@@ -17,7 +17,13 @@ let deps = {
   getCfg: () => null,
   getState: () => '',
   isBusy: () => false,
-  setState: () => {}
+  setState: () => {},
+  /* 全屏静默中（主进程判定你在打游戏 / 全屏看片）。
+   * ⚠️ 拦在 speak() 这个**唯一出口**上，而不是在调用处逐个判断：
+   *    念白有好几个来源（对话回复、主动搭话、定时提醒、摸头吐槽…），
+   *    靠每一处自己记得判断，早晚会漏一个 —— 而"漏一个"的表现就是
+   *    打游戏时角色突然开口说话，正是这个功能要消灭的东西。 */
+  isQuiet: () => false
 };
 export function configureTTS(d) { Object.assign(deps, d); }
 
@@ -49,6 +55,8 @@ export function initTTS() {
 export function speak(text) {
   const cfg = deps.getCfg();
   if (!cfg?.tts?.enabled || !text) return;
+  // 全屏静默：只留气泡不发声（正在念的那句由 pet.js 收到 pet:quiet 时停掉）
+  if (deps.isQuiet()) return;
   if (typeof speechSynthesis === 'undefined' || !ttsReady) return;
   try {
     speechSynthesis.cancel();

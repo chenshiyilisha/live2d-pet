@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const os = require('os');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const { clamp } = require('./util');
 
 /* ============================================================
@@ -252,20 +252,223 @@ function sensorScript(want) {
   return L.join('\n');
 }
 
+/* ---------- 常驻传感器采样进程 ---------- */
+
+/* 🔴 为什么要有这个东西（这是「GPU 占用慢一拍」的真正根因，别再走回头路）：
+ *
+ * GPU 占用是**累计计数器求差**，那么"这一枪相对上一枪"的差值除以时间就是占用率。
+ * 之前上一枪来自**上一次推送**，而推送间隔是 3 秒、加上采集本身 1 秒 ——
+ * 实测窗口 **4050 ms**。也就是说：屏幕上那个 GPU 数字，描述的是
+ * **刚刚过去的整整一个周期**。你刚启动一个吃显卡的程序，要等下一整拍
+ * （约 4 秒）才看得到它涨上去；关掉之后又要多显示一拍才落回来。
+ * 这不是"少了数据"，是这个数**天生晚一拍**。
+ *
+ * （CPU 其实同一套求差、同一个毛病，只是 CPU 负载起落平缓，肉眼看不出来；
+ *   GPU 负载往往是一瞬间拉满，所以它最先露馅。）
+ *
+ * 修法：让采样**连续**进行。一个常驻 powershell 每 1 秒读一枪原始计数器，
+ * 主进程维护"最近两次"求差 → 窗口固定 1 秒，读到的永远是**眼前这一秒**。
+ *
+ * 顺带把这条热路径的开销也去掉了，实测数据支持这个取舍：
+ *   - 常驻进程里单次查询只要 71~133 ms（首次 222 ms，模块加载只付一次）
+ *   - 而每 3 秒起一个新进程，固定启动开销就有 ~500 ms，加上查询与 nvidia-smi
+ *     实测一次 push 要 1035 ms —— 比常驻方案**更贵**，还更慢。
+ * 所以这不是"为了准而变费"，是把延迟和开销一起降下来了。
+ *
+ * ⚠️ 只在该用的时候开：悬浮显示关着、或全屏静默中，立刻停掉（见 main.js 的
+ *    refreshStatsTimer）。一条常驻进程哪怕很便宜，也不该在不需要时白跑。 */
+
+const SAMPLE_MS = 1000;      // 采样间隔（= 求差窗口）。1000 是"够新鲜"与"够便宜"的折中
+const TEMP_EVERY = 3;        // 温度每 3 拍取一次：nvidia-smi 本身要 100~640ms，且这个量变得慢
+const LIVE_TTL = 5000;       // 读数超过这么久没更新就当过期（采样进程挂了时的兜底）
+
+let sensorChild = null;
+let sensorBuf = '';
+let sensorStopped = true;
+let sensorRestarts = 0;
+let sensorRestartTimer = null;
+
+/* 常驻采样器给出的最近读数。没在采样 / 已过期时是 null，
+ * 那种情况下 slowPart 会退回"起一个进程打一枪"的老路。 */
+const live = { gpu: null, gpuAt: 0, tempC: null, tempAt: 0, ticks: 0, gpuOk: false, tempOk: false };
+
+/* 采样脚本。和 fullscreen.js 里那份同构，同样两条纪律：
+ * 纯 ASCII + `-EncodedCommand`，以及每 10 拍自查父进程还在不在
+ * （Windows 上父进程退出不会带走子进程，不留野进程）。 */
+function sensorWatchScript(parentPid) {
+  return [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    '$smi = Join-Path $env:SystemRoot \'System32\\nvidia-smi.exe\'',
+    '$hasSmi = Test-Path $smi',
+    '$parent = ' + parentPid,
+    '$i = 0',
+    '$w = [Console]::Out',
+    'while ($true) {',
+    '  $i = $i + 1',
+    '  if (($i % 10) -eq 0) {',
+    '    if (-not (Get-Process -Id $parent -ErrorAction SilentlyContinue)) { break }',
+    '  }',
+    '  $o = [ordered]@{}',
+    '  $s = Get-CimInstance Win32_PerfRawData_GPUPerformanceCounters_GPUEngine -ErrorAction SilentlyContinue | Where-Object { $_.Name -like \'*engtype_3D*\' }',
+    '  if ($s) {',
+    '    $e = @(); $t = [long]0',
+    '    foreach ($x in $s) { $e += [pscustomobject]@{ n = $x.Name; u = [long]$x.UtilizationPercentage }; $t = [long]$x.Timestamp_Sys100NS }',
+    '    $o.t100 = $t; $o.eng = $e',
+    '  }',
+    '  if ($hasSmi -and (($i % ' + TEMP_EVERY + ') -eq 1)) {',
+    '    $line = & $smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>$null | Select-Object -First 1',
+    '    if ($line -match \'^\\s*(\\d+)\') { $o.tempC = [int]$Matches[1] }',
+    '  }',
+    '  $w.WriteLine(($o | ConvertTo-Json -Depth 4 -Compress))',
+    '  $w.Flush()',
+    '  Start-Sleep -Milliseconds ' + SAMPLE_MS,
+    '}'
+  ].join('\n');
+}
+
+function startSensorWatch() {
+  if (process.platform !== 'win32') return false;
+  if (sensorChild) return true;
+
+  sensorStopped = false;
+  sensorRestarts = 0;
+
+  const spawnOnce = () => {
+    if (sensorStopped) return;
+    let proc;
+    try {
+      proc = spawn('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-EncodedCommand', Buffer.from(sensorWatchScript(process.pid), 'utf16le').toString('base64')
+      ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) {
+      console.warn('[sensor] 起不了采样进程:', String(err?.message || err));
+      scheduleRestart();
+      return;
+    }
+
+    sensorChild = proc;
+    sensorRestarts = 0;
+    console.log('[sensor] 采样进程已启动（每 ' + SAMPLE_MS + 'ms 一次）');
+
+    proc.stdout.setEncoding('utf8');
+    sensorBuf = '';
+    proc.stdout.on('data', (chunk) => {
+      sensorBuf += chunk;
+      const lines = sensorBuf.split('\n');
+      sensorBuf = lines.pop() || '';
+      for (const line of lines) handleSensorLine(line);
+    });
+    proc.stderr.setEncoding('utf8');
+    proc.stderr.on('data', () => { /* ignore */ });
+    proc.on('error', (err) => console.warn('[sensor] 采样进程异常:', String(err?.message || err)));
+    proc.on('exit', (code) => {
+      if (sensorChild === proc) sensorChild = null;
+      if (!sensorStopped) console.warn('[sensor] 采样进程退出，code =', code);
+      scheduleRestart();
+    });
+  };
+
+  const scheduleRestart = () => {
+    if (sensorStopped) return;
+    // 同 fullscreen：反复退出（比如 PowerShell 被策略拦了）就放弃，
+    // 而不是变成每秒重启一次的循环
+    if (sensorRestarts >= 6) {
+      console.warn('[sensor] 采样进程反复退出，放弃（退回每次现打一枪的老路）');
+      return;
+    }
+    sensorRestarts++;
+    clearTimeout(sensorRestartTimer);
+    sensorRestartTimer = setTimeout(spawnOnce, 5000);
+  };
+
+  spawnOnce();
+  return true;
+}
+
+function handleSensorLine(line) {
+  const s = line.trim();
+  if (!s || s[0] !== '{') return;
+  let r;
+  try { r = JSON.parse(s); } catch { return; }
+
+  live.ticks++;
+
+  /* ⚠️ 求差放在主进程做（复用 gpuStatus），不放进 PowerShell ——
+   *    这样"窗口合不合适"的判定只有一处实现，能被 verify-stats 覆盖。 */
+  if (r && Array.isArray(r.eng)) {
+    const st = gpuStatus(gpuMakeSample(r));
+    if (st.util !== null) {
+      live.gpu = st.util;
+      live.gpuAt = Date.now();
+      live.gpuOk = true;
+    }
+  }
+  if (r && typeof r.tempC === 'number') {
+    live.tempC = r.tempC;
+    live.tempAt = Date.now();
+    live.tempOk = true;
+  }
+}
+
+function stopSensorWatch() {
+  sensorStopped = true;
+  clearTimeout(sensorRestartTimer);
+  sensorRestartTimer = null;
+  if (sensorChild) {
+    const proc = sensorChild;
+    sensorChild = null;
+    try { proc.kill(); } catch { /* ignore */ }
+  }
+}
+
+/* 常驻读数，过期（或从没采到）返回 null —— 调用方据此决定要不要现打一枪。 */
+function liveGpu() {
+  return (live.gpu !== null && Date.now() - live.gpuAt <= LIVE_TTL) ? live.gpu : null;
+}
+function liveTemp() {
+  return (live.tempC !== null && Date.now() - live.tempAt <= LIVE_TTL) ? live.tempC : null;
+}
+
+/* ⚠️ 「采样器转了 8 拍以上却一次都没给出这一项」= 这台机器根本没有这个数据源
+ *    （没有 N 卡 → 没有温度；性能计数器类被禁用 → 没有 GPU 占用）。
+ *    这时候必须把它标成"永远取不到"，否则 slowPart 每次推送都会为它
+ *    白起一个 powershell 进程 —— 白白回到每 3 秒 1 秒开销的老路上，
+ *    而结果永远是空的。这就是这台机器上"没有独显就整项不画"的正确代价：
+ *    画不出来，但也不再为它花钱。 */
+function gpuUnavailable() { return live.ticks >= 8 && !live.gpuOk; }
+function tempUnavailable() { return live.ticks >= 8 && !live.tempOk; }
+
 /* 取一次慢字段，直接写进 out。
  *
  * ⚠️ 必须合并成一个进程：每个 powershell.exe 有 ~500ms 的固定启动开销
  *    （模块自动加载），拆成三次调用就是白付三次。
- */
+ * ⚠️ 常驻采样器正在跑时，这条路径**一次进程都不该起** —— 先查 live 读数，
+ *    全部命中就直接返回。这是"每 3 秒 1035ms"降到"0"的那一步。 */
 async function slowPart(out, want) {
-  if (!want.gpu && !want.temp && !want.battery) return;
-  const script = sensorScript(want);
+  let needGpu = false;
+  let needTemp = false;
+  if (want.gpu) {
+    const g = liveGpu();
+    if (g !== null) out.gpu = g;
+    else if (!gpuUnavailable()) needGpu = true;
+  }
+  if (want.temp) {
+    const t = liveTemp();
+    if (t !== null) out.tempC = t;
+    else if (!tempUnavailable()) needTemp = true;
+  }
+  // 电量没有常驻采样（悬浮小字不显示它），一律现取
+  const needBattery = !!want.battery;
+  if (!needGpu && !needTemp && !needBattery) return;
+
+  const script = sensorScript({ gpu: needGpu, temp: needTemp, battery: needBattery });
 
   // 超时给宽一点：nvidia-smi 在显卡刚休眠时会慢一拍（实测偶发 640ms）
   let r = await psJson(script, 4000);
   if (!r) return;
 
-  if (want.gpu) {
+  if (needGpu) {
     let st = gpuStatus(gpuMakeSample(r));
     /* 只有「真的没有基线」才补枪。
      * ⚠️ 不能用 `st.util === null` 判 —— 那会把"窗口太短"也算进来，
@@ -280,7 +483,7 @@ async function slowPart(out, want) {
     if (st.util !== null) out.gpu = st.util;
   }
 
-  if (want.temp && typeof r.tempC === 'number') out.tempC = r.tempC;
+  if (needTemp && typeof r.tempC === 'number') out.tempC = r.tempC;
   if (want.battery && typeof r.batPct === 'number') {
     out.battery = { percent: r.batPct, charging: !!r.batChg };
   }
@@ -386,4 +589,11 @@ function fmtRate(bps) {
   return `${Math.round(bps)}B/s`;
 }
 
-module.exports = { collectStats, formatStats, HUD_FIELDS, FULL_FIELDS };
+module.exports = {
+  collectStats,
+  formatStats,
+  startSensorWatch,
+  stopSensorWatch,
+  HUD_FIELDS,
+  FULL_FIELDS
+};

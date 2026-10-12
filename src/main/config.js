@@ -88,6 +88,15 @@ const DEFAULT_CONFIG = {
     floating: false,      // 常驻小字悬浮显示
     intervalMs: 3000
   },
+  /* 全屏 / 游戏时自动静默
+   *
+   * 打游戏（或全屏看片）的时候，她在旁边溜达、每 3 秒起一次系统状态轮询，
+   * 纯属添乱还抢性能。检测到前台是全屏应用就自动"睡过去"，退出后再醒。
+   * 判定与迟滞见 fullscreen.js。 */
+  quiet: {
+    enabled: true,        // 检测到前台全屏应用时自动静默
+    fps: 12               // 静默时的渲染帧率上限（12 够看出她还活着，又几乎不耗 GPU）
+  },
   /* 定时提醒 / 番茄钟 */
   reminder: {
     enabled: true

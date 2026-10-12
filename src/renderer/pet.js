@@ -733,7 +733,12 @@ async function boot() {
       if (state === State.IDLE) {
         model.focus(pointer.x, pointer.y, { instant: false });
       } else if (state === State.LISTENING || state === State.THINKING) {
-        model.focus(w / 2, h * 0.35, { instant: false });
+        /* 「正前方」= 人物身体中心，**不是窗口中心**：人物右靠了 contentShift 像素
+         * （见 PLATE_HALF 那段），继续用 w/2 她就会一直微微偏左看。
+         * 这里坐标在 canvas 缓冲里，所以要把 CSS 的偏移乘回 ZOOM。
+         * ⚠️ 闲时的 focus(pointer.x, pointer.y) 不用改 —— 光标和人物在同一套坐标里，
+         *    相对位置自动是对的。 */
+        model.focus(w / 2 + contentShift * ZOOM, h * 0.35, { instant: false });
       }
     }
   }, null, PIXI.UPDATE_PRIORITY.LOW);
@@ -746,7 +751,8 @@ async function boot() {
     getCfg: () => cfg,
     getState: () => state,
     isBusy: () => busy,
-    setState
+    setState,
+    isQuiet: () => quiet
   });
   configureRecorder({
     getCfg: () => cfg,
@@ -763,6 +769,13 @@ async function boot() {
 
   initTTS();
   pokeIdleTimer();
+
+  /* 底座先摆个转圈顶着：第一条 monitor:stats 要等主进程采到数才来
+   * （GPU 占用是两枪求差，冷启动必然晚一拍）。不摆的话这段时间窗口底部是空的，
+   * 看着像"今天没开悬浮显示"。
+   * ⚠️ 放在这里（模型挂好之后）而不是读配置的时候：renderStatsLoading 会量高度
+   *    并调 layout()，那会儿 app / model / holder 得已经就位。 */
+  scheduleStatsLoading();
 
   /* ?snap= 探针在 diag.js。不带这个参数时不加载。 */
   if (new URLSearchParams(location.search).has('snap')) {
@@ -792,7 +805,10 @@ async function boot() {
       input,
       showComposer,
       sendMessage,
-      pokeIdleTimer
+      pokeIdleTimer,
+      /* ?snap=load 用它**强制**摆一次加载态（真的去调 builder，不是复制一份 DOM），
+       * 好把"转圈时的牌"和"出数后的牌"量下来比尺寸 —— 这是加载态唯一会出错的地方。 */
+      renderStatsLoading
     });
   }
 
@@ -950,6 +966,29 @@ const SHOW_FRACTION = 0.55;
  * 太挤；14px 给出约 5px 的干净缝隙。见 layout() 里 H 的算法。 */
 const STATS_GAP = 14;
 
+/* 内容整体右靠（人物与底座牌**一起**移）。
+ *
+ * 为什么需要：窗口宽度是由气泡和输入条决定的（两者 left/right:14 铺满窗口，
+ * 收起输入条时又是 280px 的对话气泡在用），而人物只占窗口中间约 100px。
+ * 窗口本身是**全透明**的，「人在窗口里居中」这件事用户根本看不见 ——
+ * 他看见的只有「人离屏幕右边缘还有多远」。实测（窗口 308 宽、屏 1707）：
+ * 人物右边缘离窗口右边 106px、底座牌 80px，加上贴边留白一共 120+px 的空白，
+ * 视觉上就是"她没站在右下角"。
+ *
+ * 取值方式：让**底座牌的右边缘**离窗口右边 CONTENT_RIGHT_PAD 像素 ——
+ * 用"离右边的距离"而不是"往右挪多少"，是因为牌的宽度是固定的 CSS 值、
+ * 不跟屏幕缩放走，前者在任何窗口宽度下都成立。
+ *
+ * ⚠️ PLATE_HALF 是量出来的：牌宽 = 2×--stats-col(67) + 左右 padding 12 + 边框 2
+ *    = 148，半宽 74。改 style.css 的 --stats-col 要跟着改这里。
+ *    它只影响"shift 取多少"，**不影响人物与牌的对齐** —— 两者是各自按同一个
+ *    shift 摆的（人物在这里，牌在 CSS 的 padding-left），所以牌变宽变窄都不会
+ *    让人物偏出牌心。
+ * ⚠️ 窗口窄到放不下时 shift 会被压到 0（见 layout 里的 max(0, …)），
+ *    宁可不动，也不把牌推出窗口右边被裁掉。 */
+const PLATE_HALF = 74;
+const CONTENT_RIGHT_PAD = 24;
+
 /* 实测标定值（本机 DPR 1.5 下量出，换模型/换屏幕缩放都要重标）
  *
  * 画布坐标 → 窗口坐标的实测关系（**仅对模型墨水整体有效，别用来推单个参数点**）：
@@ -964,6 +1003,11 @@ let CANVAS_OFF = { x: -97.8, y: -378 };
 let MAP = { x: 0, y: 0 };   // 保留：历史上用来记插件 viewport 的固定偏置，实测恒为 0
 
 let petRect = { x: 0, y: 0, w: 0, h: 0 };
+
+/* 内容整体右靠量（CSS px），由 layout() 现算写入（取值理由见 PLATE_HALF 那段）。
+ * 存成模块级是因为除了 layout() 自己，**「聆听时抬头看用户」那处也要用** ——
+ * 那个锚点是按"人物正前方"算的，用窗口中心的话，她右靠之后会一直微微偏左看。 */
+let contentShift = 0;
 
 function layout() {
   if (!app || !model || !holder) return;
@@ -1014,7 +1058,13 @@ function layout() {
   //    结果人物整体偏左约 37px（底座居中、人物不居中）。详见 params.js 的模型表。
   const HEAD_PAD = headPadPx(H);
   const INK_TOP_C = vh * INK_TOP_C_RATIO;   // 随画布高现算，不能写死（见模型表的坑）
-  CANVAS_OFF.x = (W / 2 + 2) - INK_CX_K * s;
+  /* 内容整体右靠量（见上面 PLATE_HALF / CONTENT_RIGHT_PAD 那段说明）。
+   * 写进 CSS 变量，底座的容器（#stats 的 padding-left）与气泡小尖角读同一个值；
+   * 人物这边直接加在锚点上 —— 三处共用这一个数，才不会一处动一处不动。 */
+  const SHIFT = Math.max(0, W / 2 - PLATE_HALF - CONTENT_RIGHT_PAD);
+  contentShift = SHIFT;
+  document.body.style.setProperty('--content-shift', `${Math.round(SHIFT)}px`);
+  CANVAS_OFF.x = (W / 2 + 2 + SHIFT) - INK_CX_K * s;
   CANVAS_OFF.y = HEAD_PAD - (INK_TOP_C + INK_TOP_K * s);
   canvas.style.left = `${CANVAS_OFF.x}px`;
   canvas.style.top = `${CANVAS_OFF.y}px`;
@@ -1023,12 +1073,13 @@ function layout() {
   // 用实测墨水的宽高，比旧的 BODY 矩形准（旧值偏小、水平还偏右 48px，
   // 结果点头顶那一片会被判成"非角色"而穿透）。
   //
-  // ⚠️ 中心写成 `INK_CX_K*s + CANVAS_OFF.x` 而不是 `W/2+2`：
-  //    两者数学上**恒等**（因为 CANVAS_OFF.x 就是按 (W/2+2) − INK_CX_K*s 解出来的），
-  //    但这么写让「命中矩形锚在人物实际落点上」这件事一眼可见 —— 2026-10-12 改
-  //    INK_CX_K 标定值时，中间的 canvas 偏移量变了一个大数，若沿用字面 W/2+2
-  //    会让人怀疑矩形没跟着动。用同一条式子的两面表达，就永远不会脱节。
-  const bodyCx = INK_CX_K * s + CANVAS_OFF.x;         // 身体中心在窗口里的 x（≡ W/2+2）
+  // ⚠️ 中心写成 `INK_CX_K*s + CANVAS_OFF.x` 而不是 `W/2+2+SHIFT`：
+  //    两者数学上**恒等**（因为 CANVAS_OFF.x 就是按 (W/2+2+SHIFT) − INK_CX_K*s
+  //    解出来的），但这么写让「命中矩形锚在人物实际落点上」这件事一眼可见 ——
+  //    2026-10-12 改 INK_CX_K 标定值时，中间的 canvas 偏移量变了一个大数，
+  //    若沿用字面 W/2+2 会让人怀疑矩形没跟着动。用同一条式子的两面表达，
+  //    就永远不会脱节（这次加 SHIFT 时它自动跟着动了，正是这个写法的好处）。
+  const bodyCx = INK_CX_K * s + CANVAS_OFF.x;    // 身体中心在窗口里的 x（≡ W/2+2+SHIFT）
   petRect = {
     x: bodyCx - (INK_W / 2) * s,
     y: HEAD_PAD,
@@ -1041,6 +1092,8 @@ function layout() {
     console.log('[pet] layout', JSON.stringify({
       stage: [W, H], canvas: [vw, vh], scale: Number(s.toFixed(5)),
       cubism: [CANVAS_W, CANVAS_H], zoom: ZOOM, off: [CANVAS_OFF.x, CANVAS_OFF.y],
+      shift: Math.round(SHIFT),                                          // 内容整体右靠量
+      bodyCx: r(bodyCx),                                                 // 身体中心落点
       inkTopC: Number(INK_TOP_C.toFixed(2)),                             // = vh×0.2
       headY: HEAD_PAD,                                                  // 墨水顶部落点
       waistY: Math.round(HEAD_PAD + SHOW_FRACTION * INK_H * s),          // 腰际落点
@@ -1051,10 +1104,6 @@ function layout() {
 
 // 窗口尺寸 / 屏幕缩放变化时重算（桌宠窗口本身不可缩放，主要是防 DPR 变化）
 window.addEventListener('resize', () => layout());
-
-/* ============================================================
- *  穿透判定
- * ========================================================== */
 
 /* ============================================================
  *  穿透判定
@@ -1398,11 +1447,18 @@ window.pet?.onConfigChanged?.(async () => {
     // 大小也可能是在配置里改的，跟着同步一次
     setUserScale(cfg?.appearance?.scale);
     /* 关掉悬浮显示时，除了藏底座还得把让出去的那条高度还回来 ——
-     * 否则舞台一直矮着，人物白缩一圈（setStatsReserve 内部会重排 layout）。 */
+     * 否则舞台一直矮着，人物白缩一圈（setStatsReserve 内部会重排 layout）。
+     * ⚠️ 顺手把 statsSeen 清零：这样下一次再打开时又是"先转圈再出数"，
+     *    而不是拿上一次的老数字顶上（那会让人以为数字是刚采的）。 */
     if (wasFloating && cfg?.monitor?.floating !== true) {
+      statsSeen = false;
+      cancelStatsLoading();
       statsEl?.classList.add('hidden');
       setStatsReserve(0);
     } else {
+      /* 刚把悬浮显示打开：数据要等主进程下一次推送（~1s），先摆个转圈顶上。
+       * statsSeen 为真时 scheduleStatsLoading 自己会跳过 —— 别拿转圈盖住真数字。 */
+      if (!wasFloating && cfg?.monitor?.floating === true) scheduleStatsLoading();
       layout();
     }
   } catch { /* ignore */ }
@@ -1434,6 +1490,10 @@ const PROACTIVE_LINES = [
 
 function pokeIdleTimer() {
   clearTimeout(idleTimer);
+  /* 全屏静默中不排新的主动搭话 —— 所有"人还在"的入口（点击、划过、提醒、
+   * 改配置）都会走到这里，拦这一处就等于全部拦住。醒来时主进程那侧的
+   * resetWanderTimer 会带着新配置重新起一轮，这里不需要自己补。 */
+  if (quiet) return;
   if (!cfg || cfg.proactive?.enabled === false) return;
   // 下限 0.05 分钟（3 秒）：配置写错时不至于让角色一直碎碎念
   const mins = Number(cfg.proactive?.idleMinutes);
@@ -1442,6 +1502,8 @@ function pokeIdleTimer() {
 }
 
 async function proactiveSpeak() {
+  // 排好的定时器可能刚好落在"进入静默"那一刻之后，再挡一道
+  if (quiet) return;
   // 正忙或不在空闲态就别打扰
   if (busy || state !== State.IDLE) {
     console.log('[pet] proactive skipped', JSON.stringify({ busy, state }));
@@ -1612,6 +1674,56 @@ window.pet?.on?.('pet:noticed', () => { setEmotion('surprised'); });
 window.pet?.on?.('pet:wander-start', () => { setEmotion('happy'); });
 window.pet?.on?.('pet:wander-end', () => { setEmotion('calm'); });
 
+/* ============================================================
+ *  全屏静默（主进程判定你在打游戏 / 全屏看片）
+ * ==========================================================
+ *
+ *  渲染层这边只做一件事：**降帧**。剩下的（停溜达、停状态轮询、取消置顶、
+ *  不抢焦点）都在主进程，因为那些是窗口和系统层的动作。
+ *
+ *  ⚠️ 降帧而不是 `app.ticker.stop()`：ticker 一停，之后所有 setEmotion /
+ *    气泡 / 模型动作的更新都不会再画出来，恢复时必须自己补一次全量重绘，
+ *    很容易漏。而 maxFPS 只是节流，任何时刻恢复都是"下一帧照旧"，没有状态。
+ *    12fps 也够看出她还活着（呼吸、眨眼都在），代价只有原来的 1/5。 */
+let quiet = false;
+let quietFps = 12;
+
+function applyQuietFrame() {
+  // pixi v8 的语义：0 = 不限帧（就是平时的默认行为）
+  const fps = quiet ? quietFps : 0;
+  try { if (app?.ticker) app.ticker.maxFPS = fps; } catch { /* ignore */ }
+  /* ⚠️ 必须**两个 ticker 一起降**，只降 app.ticker 会漏掉一半开销。
+   *    这里是本文件里最容易看漏的一处：上面的 `Live2DModel.registerTicker(PIXI.Ticker)`
+   *    在插件内部等价于 `defaultTicker = Ticker.shared` —— 也就是说**模型的动作与
+   *    物理演算跑在 PIXI 的全局共享 ticker 上**（它自己 autoStart，和 app 无关），
+   *    而 `app.ticker` 只负责"把舞台画出来"。
+   *    只降后者 → 画面是 12fps 了，但 Cubism 依旧每帧算一遍顶点、物理、贴图更新，
+   *    CPU 一点没省。两个都降才是真的"睡过去"。 */
+  try { PIXI.Ticker.shared.maxFPS = fps; } catch { /* ignore */ }
+}
+
+window.pet?.on?.('pet:quiet', (d) => {
+  const on = !!d?.quiet;
+  const fps = Number(d?.fps);
+  quietFps = Number.isFinite(fps) && fps >= 1 ? fps : 12;
+
+  const changed = on !== quiet;
+  quiet = on;
+
+  if (changed && quiet) {
+    stopSpeak();              // 正在念的那句立刻掐掉 —— 打游戏时突然出声最讨厌
+    clearTimeout(idleTimer);  // 撤掉已经排好的主动搭话（醒来会重排）
+    /* 静默期间主进程**不再推数据**（refreshStatsTimer 开头就 return），
+     * 所以"还在等第一条数据"的那段时间会一直转下去 —— 直接收掉。
+     * 已经有数字在显示时这个调用什么也不做（保留最后一帧读数，和以前一致）。 */
+    dismissStatsLoading();
+  }
+  applyQuietFrame();
+  if (changed) {
+    console.log('[pet] quiet', JSON.stringify({ quiet, fps: quiet ? quietFps : 0 }));
+  }
+});
+
 // 系统状态悬浮显示
 window.pet?.on?.('monitor:stats', (s) => renderStats(s));
 
@@ -1643,68 +1755,179 @@ function levelOf(pct) {
   return '';
 }
 
-/* 底部"底座"上那行系统状态：CPU / 内存 / GPU / 温度，**固定排成 2 行 × 2 列**。
+/* 造一格：标签 + 数值。
+ * value 给空串就是加载态的"骨架格" —— 文字由 CSS（.plate.loading）藏起来，
+ * 它只负责贡献尺寸，所以骨架格和真格的宽度、行高完全一样。 */
+function buildStatsItem(spec, value, level = '') {
+  const item = document.createElement('span');
+  item.className = spec.cls ? `item ${spec.cls}` : 'item';
+  if (level) item.dataset.level = level;
+  if (spec.hint) item.title = spec.hint;
+
+  const lbl = document.createElement('span');
+  lbl.className = 'lbl';
+  lbl.textContent = spec.label;
+
+  const val = document.createElement('span');
+  val.className = 'val';
+  val.textContent = value;
+
+  item.append(lbl, val);
+  return item;
+}
+
+/* 把一串东西每两个一组排成行，整块包进 .plate（那块看得见的"牌"）。
+ *
+ * ⚠️ 显式切块，不让 flex-wrap 自己折：自动折行位置由文案宽度决定
+ *    （"温度 50°C" 比 "CPU 12%" 宽），排出来是 3+1 这种不均衡的样子；
+ *    显式切块才是稳定的 2+2。行内每格宽度由 CSS 的 --stats-col 定死，两行左右对齐。
+ * ⚠️ 这个 "2" 是全项目唯一的一份定义 —— **加载态必须走同一个函数**：
+ *    两边一分叉，转圈时和出数时的牌就不是一样大（见 style.css 的 .plate.loading）。
+ * ⚠️ 某一项在个别机器上取不到（比如没独显 → 没有温度项）时不补空占位：
+ *    少一项就是少一格，不留 "--"。 */
+function buildPlate(list, buildItem) {
+  const plate = document.createElement('div');
+  plate.className = 'plate';
+  for (let i = 0; i < list.length; i += 2) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.append(buildItem(list[i]));
+    if (list[i + 1]) row.append(buildItem(list[i + 1]));
+    plate.append(row);
+  }
+  return plate;
+}
+
+/* 画底座：CPU / 内存 / GPU / 温度，**固定排成 2 行 × 2 列**（切块在 buildPlate）。
  *
  * ⚠️ 每一项单独判存在，拿不到就**整项不画**，不能画成 0 或 "--"：
  *    GPU 占用要两枪才能求差（见 sysinfo 的 gpuStatus），冷启动第一帧没有
  *    基线；温度只有装了 NVIDIA 显卡才有来源。0% 和"取不到"看着是一回事，
  *    但前者是假数据。
- *
- * ⚠️ 按「每行两个」显式切块，不让 flex-wrap 自己折：
- *    自动折行位置由文案宽度决定（"温度 50°C" 比 "CPU 12%" 宽），
- *    排出来是 3+1 这种不均衡的样子；显式切块才是稳定的 2+2。
- *    行内每格宽度由 CSS 的 --stats-col 定死（见 style.css），两行左右对齐。
- * ⚠️ 若某一项在个别机器上取不到（比如没有独显 → 没有温度项），
- *    剩下的按每行两个照样排，不会出现空占位 —— 少一项只是少一格，不留 "--"。 */
+ * ⚠️ 不摆转圈的这段时间是**加载态**在顶（见 renderStatsLoading）——
+ *    本函数一旦真的画过一次，statsSeen 就为真，转圈不会再回来。 */
 function renderStats(s) {
   if (!statsEl) return;
   if (cfg?.monitor?.floating !== true || !s) {
+    /* 关掉（或本来就没开）悬浮显示：把"出过数"的标记清掉，
+     * 下次再打开时才又会先转圈（见 scheduleStatsLoading）。 */
+    statsSeen = false;
+    cancelStatsLoading();
     statsEl.classList.add('hidden');
     setStatsReserve(0);
     return;
   }
 
+  statsSeen = true;          // 有真数据了，转圈让位
+  cancelStatsLoading();
+
+  /* TEMP TRACE */
+  console.log('[trc] push', JSON.stringify({
+    t: Math.round(performance.now()),
+    cpu: s.cpu, mem: s.mem?.percent, gpu: s.gpu, tempC: s.tempC
+  }));
+
   const items = STAT_ITEMS
-    .map((spec) => ({ spec, value: spec.get(s) }))
+    .map((spec) => ({
+      spec,
+      value: spec.get(s),
+      /* ⚠️ pct 是可选的（温度项没有"负载百分比"这个概念，也就没有分级）。
+       *    早期版本写成 spec.pct(s) 直接调 —— 温度那一项没有这个方法，
+       *    每次都抛 "spec.pct is not a function"，整条底座因此永远画不出来，
+       *    表现是「底座一直是空的」，而不是报错浮上来。
+       *    ⚠️ 这里特意放在 map 里算（取不到的项也会算一次），
+       *    因为 levelOf 对 undefined 是安全的、而 renderStats 是热路径上的小函数，
+       *    不值得为省这一次调用把顺序编得更绕。 */
+      level: spec.pct ? levelOf(spec.pct(s)) : ''
+    }))
     .filter((it) => it.value !== null);
 
-  const buildItem = ({ spec, value }) => {
-    const item = document.createElement('span');
-    item.className = spec.cls ? `item ${spec.cls}` : 'item';
-    /* ⚠️ pct 是可选的（温度项没有"负载百分比"这个概念，也就没有分级）。
-     *    早期版本写成 spec.pct(s) 直接调 —— 温度那一项没有这个方法，
-     *    每次都抛 "spec.pct is not a function"，整条底座因此永远画不出来，
-     *    表现是「底座一直是空的」，而不是报错浮上来。 */
-    const level = spec.pct ? levelOf(spec.pct(s)) : '';
-    if (level) item.dataset.level = level;
-    if (spec.hint) item.title = spec.hint;
-
-    const lbl = document.createElement('span');
-    lbl.className = 'lbl';
-    lbl.textContent = spec.label;
-
-    const val = document.createElement('span');
-    val.className = 'val';
-    val.textContent = value;
-
-    item.append(lbl, val);
-    return item;
-  };
-
-  // 每两个一组排成一行 → 2 行 × 2 列；整块包在 .plate 里（那块可见的"牌"）
-  const plate = document.createElement('div');
-  plate.className = 'plate';
-  for (let i = 0; i < items.length; i += 2) {
-    const row = document.createElement('div');
-    row.className = 'row';
-    row.append(buildItem(items[i]));
-    if (items[i + 1]) row.append(buildItem(items[i + 1]));
-    plate.append(row);
-  }
+  const plate = buildPlate(items, (it) => buildStatsItem(it.spec, it.value, it.level));
 
   statsEl.replaceChildren(plate);
   statsEl.classList.toggle('hidden', items.length === 0);
   setStatsReserve(items.length === 0 ? 0 : measureStatsReserve());
+}
+
+/* ============================================================
+ *  底座的加载态（转圈）
+ *
+ *  为什么需要：第一条 monitor:stats 要等主进程那边采到数才来，
+ *  而 GPU 占用是**两枪求差**（见 sysinfo 的 gpuStatus），冷启动必然不是"立刻"。
+ *  这段时间窗口底部本来是空的 —— 看着像"今天没开悬浮显示"。
+ * ========================================================== */
+
+/* 先等一小会儿再出转圈：正常机器上第一条数据只晚那么一拍，
+ * 立刻出转圈反而变成"闪一下"。过了这个宽限期还没数据，才说明确实要等。 */
+const STATS_LOADING_DELAY_MS = 300;
+
+/* 转圈的最长存活时间 —— 兜底，不是常态：正常 1~2s 必到
+ * （cpu/内存 来自 node 的 os 模块，无论其它字段成不成，推送一定会发生）。
+ * 真能走到 10s 的只有两种情况：静默期间主进程不推（见 refreshStatsTimer 开头）、
+ * 或者窗口一直不可见。到点就收掉 —— 一个永远转下去的圈比"什么都没有"更让人干等。 */
+const STATS_LOADING_MAX_MS = 10000;
+
+let statsLoadingTimer = null;   // 宽限期（还没真的摆出转圈）
+let statsLoadingCap = null;     // 转圈的最长存活计时
+let statsSeen = false;          // 是否已经出过至少一帧真数据
+
+function cancelStatsLoading() {
+  clearTimeout(statsLoadingTimer); statsLoadingTimer = null;
+  clearTimeout(statsLoadingCap);   statsLoadingCap = null;
+}
+
+/* 摆出加载态。牌里的行与格跟出数时**同构同数量**，只是文字不可见 ——
+ * 高度因此和真牌完全一样，--stats-h 不会跳，人物不会缩一下。
+ * （尺寸的来龙去脉见 style.css 的 .plate.loading 那一节。）
+ *
+ * ⚠️ 这里是**原始 builder**，不管"该不该摆" —— 运行期唯一入口是
+ *    scheduleStatsLoading，它在摆之前查过 statsSeen，所以数字已经在显示时
+ *    走不到这里。（?snap=load 探针会从外部直接调它，正是要靠这一点
+ *    在"已经出数"的状态下强制摆一次来量尺寸。） */
+function renderStatsLoading() {
+  if (!statsEl) return;
+  if (cfg?.monitor?.floating !== true) return;   // 悬浮显示没开：整条底座都不该出现
+
+  const plate = buildPlate(STAT_ITEMS, (spec) => buildStatsItem(spec, ''));
+  plate.classList.add('loading');
+  const sp = document.createElement('span');
+  sp.className = 'spinner';
+  plate.append(sp);
+
+  statsEl.replaceChildren(plate);
+  statsEl.classList.remove('hidden');
+  setStatsReserve(measureStatsReserve());
+  console.log('[pet] stats loading');
+}
+
+/* 排一次加载态（宽限期后才真的摆出来）。
+ * ⚠️ 宽限期用 setTimeout 而不是"直接摆"：期间真数据到了会被
+ *    renderStats → cancelStatsLoading 撤掉，转圈一下都不闪。 */
+function scheduleStatsLoading() {
+  cancelStatsLoading();
+  if (!statsEl || statsSeen) return;
+  statsLoadingTimer = setTimeout(() => {
+    statsLoadingTimer = null;
+    /* statsSeen 是权威状态、定时器只是手段：宽限期内数据到了的话
+     * renderStats 已经把定时器撤了，这里再查一次，免得日后有人改了那边的撤法。 */
+    if (statsSeen) return;
+    renderStatsLoading();
+    statsLoadingCap = setTimeout(() => {
+      dismissStatsLoading();
+      console.log('[pet] stats loading timeout');
+    }, STATS_LOADING_MAX_MS);
+  }, STATS_LOADING_DELAY_MS);
+}
+
+/* 收掉加载态。只在"确实还摆着转圈"时才动 DOM ——
+ * 已经有真数据时它早让位了，这个方法就该什么都不做。 */
+function dismissStatsLoading() {
+  cancelStatsLoading();
+  if (!statsEl || statsSeen) return;
+  if (!statsEl.querySelector('.plate.loading')) return;
+  statsEl.replaceChildren();
+  statsEl.classList.add('hidden');
+  setStatsReserve(0);
 }
 
 /* 底座实际占掉的高度（含它自己距下沿的 4px 留白），写进 --stats-h。

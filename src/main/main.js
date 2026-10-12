@@ -18,6 +18,7 @@ const fs = require('fs');
  *   llm        流式对话 + 离线回复池 + 情绪标签过滤器
  *   reminder   定时提醒 / 番茄钟
  *   motion     平滑移动 / 边缘吸附 / 自主漫步
+ *   fullscreen 前台全屏检测（游戏 / 全屏时自动静默的输入）
  *   updater    通过 GitHub Releases 检查并安装新版本
  *
  * ⚠️ 拆分后必须守住的两条：
@@ -40,7 +41,7 @@ const {
   resolveName, resolvePersona, loadConfig, saveConfig
 } = require('./config');
 const { startLocalServer } = require('./server');
-const { collectStats, formatStats, HUD_FIELDS, FULL_FIELDS } = require('./sysinfo');
+const { collectStats, formatStats, startSensorWatch, stopSensorWatch, HUD_FIELDS, FULL_FIELDS } = require('./sysinfo');
 const { recognizeWav } = require('./speech');
 const { streamLLM, createStreamFilter } = require('./llm');
 const {
@@ -48,9 +49,12 @@ const {
   listReminders, startPomodoro, stopPomodoro, pomodoroStatus, disposeReminders
 } = require('./reminder');
 const {
-  configureMotion, cancelMoveAnim, isMoveAnimRunning, edgeSnap,
-  resetWanderTimer, disposeMotion, currentDisplay
+  configureMotion, cancelMoveAnim, isMoveAnimRunning, setMotionPaused,
+  edgeSnap, resetWanderTimer, disposeMotion, currentDisplay
 } = require('./motion');
+const {
+  startFullscreenWatch, stopFullscreenWatch
+} = require('./fullscreen');
 const { configureUpdater, checkForUpdates, updaterStatus } = require('./updater');
 
 // 项目根目录，本地服务与托盘图标、诊断截图都以它为基准
@@ -139,6 +143,11 @@ configureMotion(() => mainWindow);
 setReminderSink((payload) => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   try { mainWindow.webContents.send('pet:remind', payload); } catch { /* ignore */ }
+  /* ⚠️ 全屏静默期间**不把窗口唤出来**。
+   *    在独占全屏的游戏上 show()/focus() 会把游戏顶到后台（很多游戏因此
+   *    直接最小化甚至掉驱动），为了一个"该喝水了"的提醒害玩家丢一局，
+   *    代价完全不对等。气泡照发，退出全屏后她脸上就挂着那句话。 */
+  if (quiet) return;
   if (mainWindow.isVisible && !mainWindow.isVisible()) mainWindow.show();
 });
 
@@ -318,6 +327,8 @@ function startCursorPolling() {
   if (cursorTimer) return;
   cursorTimer = setInterval(() => {
     if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return;
+    // 全屏静默时不发（30fps 的跨进程 IPC 白烧 —— 她反正被盖着看不见）
+    if (quiet) return;
 
     let pt;
     try {
@@ -351,7 +362,12 @@ function syncAppearance() {
   const a = loadConfig().appearance || {};
 
   const opacity = clampOpacity(a.opacity);
-  const onTop = a.alwaysOnTop !== false;
+  /* ⚠️ 全屏静默期间**强制取消置顶**（用户配置只在这一条上被临时覆盖）：
+   *    独占全屏的游戏会盖住她，置不置顶看不出来；但**无边框窗口化的游戏**
+   *    （现在绝大多数）里，一个 alwaysOnTop 的窗口会一直浮在游戏画面上，
+   *    既挡视线又让 DWM 多做一层合成。退出静默时 syncAppearance 会按配置
+   *    把置顶恢复回来 —— 恢复路径只有这一条，不会漏。 */
+  const onTop = !quiet && a.alwaysOnTop !== false;
   const scale = clampScale(a.scale);
   const model = a.model === 'haru' ? 'haru' : 'hiyori';
 
@@ -370,17 +386,24 @@ function refreshStatsTimer() {
   if (statsTimer) { clearTimeout(statsTimer); statsTimer = null; }
   const gen = ++statsGen;
   const cfg = loadConfig();
-  if (!cfg.monitor?.floating) return;
+
+  /* 常驻传感器采样器**跟着悬浮显示一起开关**。
+   * 开：它每秒采一枪，于是每次推送都直接命中新鲜读数 —— 一次进程都不用起，
+   *     而且 GPU 那个数描述的是**眼前这一秒**而不是过去 4 秒（见 sysinfo.js）。
+   * 关：立刻停掉。它再便宜也不该在没人看的时候白跑。 */
+  const hudOn = !!cfg.monitor?.floating && !quiet;
+  if (hudOn) startSensorWatch(); else stopSensorWatch();
+  if (!hudOn) return;
 
   const ms = clamp(Number(cfg.monitor?.intervalMs) || 3000, 1000, 30000);
 
   /* ⚠️ 用「跑完再排下一次」的自调度，**不要用 setInterval(push, ms)**。
-   *    踩过的坑：`push` 是异步的，一次要 ~1s（冷启动那次要 ~3.6s，因为 GPU
-   *    没有基线要补第二枪）。setInterval 到点就发、不管上一枪跑没跑完，
-   *    于是冷启动时第一枪还没结束，第二枪就叠上来了 —— 两次采样挨得太近
-   *    （< GPU_WIN_MIN 800ms），第二枪的 GPU 判成 'bad-window' 被丢掉，
-   *    表现就是「CPU/内存/温度都在，唯独 GPU 少了那一帧、下一帧才出现」。
-   *    改成自调度后，两枪之间必然隔着完整的间隔，不再互相踩基线。
+   *    踩过的坑：`push` 是异步的，一次要 ~1s。setInterval 到点就发、
+   *    不管上一枪跑没跑完，于是冷启动时第一枪还没结束第二枪就叠上来了 ——
+   *    两次采样挨得太近，第二枪的判别失效、那一帧就少东西。
+   *    自调度保证两枪之间必然隔着完整的间隔。
+   *    （现在 GPU 走常驻采样器、push 本身已经接近 0 开销，这条护栏依然要留：
+   *      悬浮显示刚打开的那一两秒仍会走"现打一枪"的冷启动路径。）
    * ⚠️ 用 generation 号而不是 `statsTimer === null` 判断"我是否被取消"：
    *    重排会把 statsTimer 立刻赋成新值，旧循环等 push 回来后看到它非 null，
    *    会以为自己还该活着 → 两个循环并存。gen 对不上就直接退出，干净。 */
@@ -400,6 +423,61 @@ function refreshStatsTimer() {
   };
 
   statsTimer = setTimeout(tick, 0);
+}
+
+/* ============================================================
+ *  全屏 / 游戏自动静默
+ * ==========================================================
+ *
+ *  检测在 fullscreen.js（常驻 PowerShell 采样前台窗口 + 纯函数判定），
+ *  这里只负责「静默时到底关掉什么、醒来时怎么恢复」。
+ *
+ *  静默期间一共做四件事，每一件都对应一个真实的浪费：
+ *    1) 冻结自动移动     —— 她在游戏旁边溜达没有任何意义
+ *    2) 停系统状态轮询   —— 每 3 秒一次的 PowerShell 采样是最实打实的抢资源
+ *    3) 取消窗口置顶     —— 窗口化游戏下她会一直浮在画面之上
+ *    4) 通知渲染层降帧   —— 60fps 画一个你没在看的角色
+ *  另外两条在别处：光标轮询（startCursorPolling）与提醒不抢焦点（setReminderSink）。
+ *
+ *  ⚠️ 这是一个**状态**，不是一次性动作 —— 所以恢复路径必须和进入路径一样
+ *    完整。漏一条的表现是"打完工回来她变傻了"（不动了 / 底座没了 / 窗口
+ *    沉在最底下），而且从界面上完全看不出原因。
+ * ========================================================== */
+
+let quiet = false;
+
+function isQuiet() { return quiet; }
+
+function quietPayload() {
+  const q = loadConfig().quiet || {};
+  return { quiet, fps: clamp(Number(q.fps) || 12, 1, 60) };
+}
+
+function setQuiet(on, why) {
+  const next = !!on;
+  if (next === quiet) return;
+  quiet = next;
+
+  /* 打日志是刻意的：这个功能**从界面上几乎看不出来**（她本来就是安静的
+   * 状态之一），出问题时唯一的线索就是这条日志。 */
+  console.log('[quiet]', JSON.stringify({ quiet, why: why || '' }));
+
+  setMotionPaused(quiet);
+  refreshStatsTimer();
+  syncAppearance();                 // 内部按 quiet 决定置顶
+  try { mainWindow?.webContents.send('pet:quiet', quietPayload()); } catch { /* ignore */ }
+  refreshTrayMenu();                // 菜单标题要能显示"静默中"
+}
+
+/* 按配置启停监视。用户在托盘里关掉这个开关时要能**立刻**退出静默，
+ * 而不是等她再切一次窗口。 */
+function refreshQuietWatcher() {
+  if (isOn('quiet', 'enabled')) {
+    startFullscreenWatch((full, why) => setQuiet(full, why));
+  } else {
+    stopFullscreenWatch();
+    setQuiet(false, 'disabled');
+  }
 }
 
 /* ============================================================
@@ -1020,6 +1098,8 @@ function buildMenuTemplate() {
       if (section === 'monitor') refreshStatsTimer();
       if (section === 'motion') resetWanderTimer();
       if (section === 'appearance') syncAppearance();
+      // 关掉"全屏静默"要立刻退出静默状态，不能等她再切一次窗口
+      if (section === 'quiet') refreshQuietWatcher();
     }
   });
 
@@ -1043,9 +1123,15 @@ function buildMenuTemplate() {
   ];
 
   /* ---------- 功能开关 ---------- */
+  /* 静默那项把**当前状态**写进标签：这个功能生效时界面上什么都看不到
+   * （她本来就是安静的），"到底有没有在静默"只能从菜单里读出来。 */
+  const quietItem = flag('quiet', 'enabled', '全屏时自动静默');
+  if (quiet) quietItem.label += '（静默中）';
+
   const featureMenu = [
     flag('tts', 'enabled', '语音朗读'),
     flag('proactive', 'enabled', '主动搭话'),
+    quietItem,
     flag('monitor', 'floating', '系统状态悬浮显示', false),
     flag('reminder', 'enabled', '定时提醒'),
     flag('asr', 'enabled', '语音输入（离线识别）', false),
@@ -1544,6 +1630,7 @@ function registerIpc() {
     syncAppearance();
     refreshStatsTimer();
     resetWanderTimer();
+    refreshQuietWatcher();
     refreshTrayMenu();
     try { mainWindow?.webContents.send('config:changed'); } catch { /* ignore */ }
     return ok;
@@ -1769,8 +1856,17 @@ if (!gotLock) {
     registerHotkeys();
     refreshStatsTimer();
     resetWanderTimer();
+    refreshQuietWatcher();
     warnIfModelsMissing();
     initUpdater();
+
+    /* 诊断口子：`PET_QUIET=1` 时不需要真有全屏应用，8 秒后强制进入静默、
+     * 18 秒后退出 —— 用来验证"静默期间到底停没停、醒来有没有恢复"。
+     * 没有这个口子就只能靠真的去开一局游戏来测，不现实。 */
+    if (process.env.PET_QUIET === '1') {
+      setTimeout(() => setQuiet(true, 'PET_QUIET'), 8000);
+      setTimeout(() => setQuiet(false, 'PET_QUIET-end'), 18000);
+    }
   });
 
   // 桌宠：关掉窗口不等于退出，托盘还活着
@@ -1779,9 +1875,13 @@ if (!gotLock) {
   app.on('will-quit', () => {
     globalShortcut.unregisterAll();
     if (cursorTimer) clearInterval(cursorTimer);
-    if (statsTimer) clearInterval(statsTimer);
+    if (statsTimer) clearTimeout(statsTimer);
     disposeMotion();
     disposeReminders();
+    /* 常驻的采样进程必须显式杀掉：Windows 上父进程退出**不会**带走子进程，
+     * 留着它就是一个永远在跑的 powershell.exe。 */
+    stopFullscreenWatch();
+    stopSensorWatch();
     try { httpServer?.close(); } catch { /* ignore */ }
   });
 }

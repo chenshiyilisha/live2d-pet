@@ -101,6 +101,7 @@ const sandbox = {
     motion: { enabled: true, edgeSnap: true, wander: true },
     interaction: { rightMenu: true, headPat: true, dragReact: true, pokeReact: true },
     monitor: { floating: false },
+    quiet: { enabled: true, fps: 12 },
     reminder: { enabled: true },
     asr: { enabled: false },
     tts: { enabled: true },
@@ -118,6 +119,12 @@ const sandbox = {
   refreshStatsTimer: rec('refreshStatsTimer'),
   resetWanderTimer: rec('resetWanderTimer'),
   syncAppearance: rec('syncAppearance'),
+  /* buildMenuTemplate 里「全屏时自动静默」那一项会读模块级的 quiet 变量
+   * 往标签后面加「（静默中）」。这个变量在沙箱里不存在 → ReferenceError，
+   * 而报错信息只会说"quiet is not defined"，很容易被误判成菜单代码写错了。
+   * 想验「静默中」的标签长什么样，把这个改成 true 再跑。 */
+  quiet: false,
+  refreshQuietWatcher: rec('refreshQuietWatcher'),
   bumpScale: rec('bumpScale'),
   resetScale: rec('resetScale'),
   setOpacity: rec('setOpacity'),

@@ -10,7 +10,8 @@
  * 用法：node debug/verify-stats.js
  */
 
-const { collectStats, formatStats, HUD_FIELDS, FULL_FIELDS } = require('../src/main/sysinfo');
+const { collectStats, formatStats, startSensorWatch, stopSensorWatch, HUD_FIELDS, FULL_FIELDS } =
+  require('../src/main/sysinfo');
 
 let failures = 0;
 const ok = (m) => console.log('  ✅ ' + m);
@@ -91,7 +92,45 @@ const dump = (s) => JSON.stringify(s, (k, v) => (v instanceof Map ? '[Map]' : v)
   check(typeof full.tempC === 'number', '全量那一路也有温度');
   check(!!full.disk, '全量那一路有磁盘');
 
-  console.log('\n══════ 3. formatStats（气泡里那句话）══════\n');
+  /* ══════ 3. 常驻采样器 ══════
+   *
+   * ⚠️ 这一段是「GPU 占用慢一拍」那个坑的**回归锁**，别删。
+   *    原因是 GPU 占用靠累计计数器求差，"这一枪相对上一枪"之间的间隔就是
+   *    采样窗口。上一枪如果来自**上一次推送**，窗口就等于推送间隔（实测 4050ms）
+   *    —— 屏幕上那个数描述的是"刚刚过去的 4 秒"，天生晚一整拍。
+   *    常驻采样器把窗口压到 ~1 秒，顺带让每次推送**不再启进程**。
+   *    下面两条断言分别锁住这两件事：读数是常驻来的（采集极快）、且有值。 */
+  console.log('\n══════ 3. 常驻传感器采样器（GPU 不再慢一拍）══════\n');
+
+  startSensorWatch();
+  await new Promise((r) => setTimeout(r, 2600));   // 等它跑够 2 拍（第一拍只是建基线）
+
+  const tLive = Date.now();
+  const live = await collectStats(HUD_FIELDS);
+  const liveMs = Date.now() - tLive;
+  console.log(`  采样器在跑时，一次采集耗时 ${liveMs} ms`);
+  console.log('  ' + dump(live) + '\n');
+
+  /* 阈值给得很松（60ms）：重点不是"有多快"，而是"有没有起 PowerShell"。
+   * 一旦退回"每次推送现打一枪"，这里立刻会变成 400~1000ms。 */
+  check(liveMs < 60, `⚠️ 关键：采集不启进程、直接命中常驻读数（${liveMs} ms < 60 ms）`);
+  check(typeof live.gpu === 'number', '常驻采样器给出了 GPU 占用');
+  check(typeof live.tempC === 'number', '常驻采样器给出了温度');
+  check(live.gpu === null || (live.gpu >= 0 && live.gpu <= 100), 'GPU 占用落在 0–100');
+
+  /* 采样器的窗口必须**恒大于** GPU_WIN_MIN（800ms）—— 它每拍固定 sleep 1 秒，
+   * 所以这条是构造保证的。写成断言是为了防止有人把 SAMPLE_MS 调到 800 以下，
+   * 那会让每一拍都判成 bad-window，表现是 GPU 数字再也不更新。 */
+  const srcInfo = require('fs').readFileSync(require('path').join(__dirname, '..', 'src/main/sysinfo.js'), 'utf8');
+  const mSample = srcInfo.match(/^const SAMPLE_MS = (\d+);/m);
+  const mMin = srcInfo.match(/^const GPU_WIN_MIN = (\d+);/m);
+  check(!!mSample && !!mMin && Number(mSample[1]) > Number(mMin[1]),
+    `采样间隔 ${mSample ? mSample[1] : '?'}ms 恒大于 GPU_WIN_MIN ${mMin ? mMin[1] : '?'}ms（窗口不会落空）`);
+
+  stopSensorWatch();
+  console.log('  （采样器已停）');
+
+  console.log('\n══════ 4. formatStats（气泡里那句话）══════\n');
   const text = formatStats(full);
   console.log('  ' + text + '\n');
   check(/GPU \d+%/.test(text), '话里有 GPU 占用');

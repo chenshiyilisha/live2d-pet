@@ -13,6 +13,10 @@ html, body {
   /* 底部底座给舞台让出的高度。0 = 没开悬浮显示，行为与以前完全一致；
    * 开启后由 renderStats 量出底座真实高度写进来（见 style.css 的 #stats 一节）。 */
   --stats-h: 0px;
+  /* 内容整体右靠量（px）。由 pet.js 的 layout() 按窗口宽算出来写进来，
+   * 人物、底座牌、气泡小尖角**读同一个值**，所以三处一定一起动。
+   * 为什么需要、取值怎么来，见 pet.js 的 PLATE_HALF / CONTENT_RIGHT_PAD 那段。 */
+  --content-shift: 0px;
 }
 
 /* 舞台铺满窗口，canvas 承载 Live2D。
@@ -60,7 +64,9 @@ html, body {
 #bubble::after {
   content: "";
   position: absolute;
-  left: 50%;
+  /* 小尖角跟着人物走：气泡本体仍是满窗宽（收窄它会挤坏长回复的排版），
+   * 只把这个尖角右移到人物身下 —— 否则人物右靠之后，尖角会指着她的左边。 */
+  left: calc(50% + var(--content-shift, 0px));
   top: -8px;
   width: 14px;
   height: 14px;
@@ -205,12 +211,17 @@ html, body {
    *    这样既拿到窄牌，又不踩收缩包裹的坑（.plate 内部是定宽行，不折行）。 */
   left: 10px;
   right: 10px;
+  /* 左内边距 = 2×右靠量：flex 的居中是在**内容盒**里做的，所以内容盒整体右移
+   * 2S，牌的中心就正好右移 S —— 恰好跟人物在 layout() 里加的 S 对齐。
+   * ⚠️ 这不是"装饰性 padding"（下面那条注释说的"不画 padding"指的是别让它
+   *    有可见的底色/边框），只是为了把牌心推到人物身下。 */
+  padding-left: calc(2 * var(--content-shift, 0px));
   /* 底部留白从 6px 收到 4px —— 底座能矮一点是一点（用户要求"短一点"）。
    * ⚠️ 这个值同时是 measureStatsReserve() 里 +4 的那一项，改这里要同步改
    *    pet.js，否则舞台让出的高度和底座实际占的高度对不上。见那条注释。 */
   bottom: 4px;
   /* 外层只负责居中 + 暴露高度给 measureStatsReserve()：
-   * 不画任何背景/边框/padding，否则"牌"又会变成满宽的一条。 */
+   * 不画任何背景/边框/可见 padding，否则"牌"又会变成满宽的一条。 */
   display: flex;
   justify-content: center;
   align-items: flex-end;
@@ -249,6 +260,8 @@ html, body {
   /* 横向 padding 收到 6px：牌本身已经窄了，左右各留一点呼吸位就够。
    * ⚠️ 纵向仍是 1px：牌每高 1px，人物就等比缩一点（见上面的 --stats-h）。 */
   padding: 1px 6px;
+  /* 加载态的转圈要绝对定位到牌的正中间（见下面的 .spinner） */
+  position: relative;
 }
 
 /* 一行：固定放两个指标，两行合成 2×2。
@@ -299,3 +312,40 @@ html, body {
 /* 温度项专门用暖色（它是"温度"不是"负载%"，语义不同） */
 #stats .item.temp .lbl { color: #ea580c; }
 #stats .item.temp .val { color: #ea580c; }
+
+/* 加载态：第一条数据还没到时，牌里先摆一个转圈（DOM 由 pet.js 的
+ * renderStatsLoading 生成 —— 用的是和出数时**同构同数量的行与格**，只是文字不可见）。
+ *
+ * ⚠️ 骨架一个都不能少、也不能换成"空 span"：
+ *    牌的高度**全靠这些行的行盒撑出来**。空 span 的行盒是 0 高，
+ *    牌就从 30px 掉到 17px，于是 --stats-h 在"转圈"和"出数"之间跳一次
+ *    舞台高度、人物跟着缩一下 —— 正是这个功能要避免的"闪一下"。
+ *
+ * ⚠️ 宽度反过来**主动收窄**成一个小药丸，出数时再横向展开：
+ *    横向变化不进 --stats-h（舞台只让高度），而且是左右对称的，
+ *    视觉上就是"这颗豆子化成了整块牌"，没有上半身跟着动。
+ *    收窄后骨架会横向溢出（34px 的盒子里装着 134px 的行）——
+ *    但那些行是 visibility:hidden 的，**什么都不画**，故不可见。
+ *    这也是不担心溢出的原因：它只存在于布局计算里。 */
+#stats .plate.loading { width: 34px; }
+#stats .plate.loading .lbl,
+#stats .plate.loading .val { visibility: hidden; }
+
+/* 转圈本体：一圈很淡的底 + 一段深色弧，0.7s 一圈。
+ * 居中用 inset:0 + margin:auto —— **不能用 transform**，
+ * 那个属性被旋转动画占着，写 `translate(-50%,-50%)` 会被动画整个盖掉。 */
+#stats .spinner {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(148, 163, 184, 0.35);
+  border-top-color: #475569;
+  border-radius: 50%;
+  animation: stats-spin 0.7s linear infinite;
+}
+
+@keyframes stats-spin {
+  to { transform: rotate(1turn); }
+}

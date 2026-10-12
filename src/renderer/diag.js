@@ -436,13 +436,85 @@ export function attachSnapProbes(live) {
     }, 14000);
   }
 
+  /* 诊断：底座加载态（?snap=load）
+   *
+   * 验两件事：
+   * 1) **尺寸** —— 加载态唯一会出错的地方。牌的高度全靠骨架那几行的行盒撑着，
+   *    少一行、或者骨架被换成空 span，牌就矮一截 → 出数时 --stats-h 一跳、
+   *    人物跟着缩一下。这事**在截图上看不出来**（30px 和 17px 都"有个底座"），
+   *    必须量。
+   * 2) **时序** —— 转圈得真的出现在数据之前。转圈只闪 30ms 就等于没有，
+   *    而"到底闪了多久"只有记时间戳才知道（看日志顺序看不出来）。
+   *
+   * 做法：挂上就开始每 50ms 采一次（记下加载态、出数态各自的**首次**出现时刻），
+   * 到 14s（真牌已经在了）强制摆一次加载态 → 量 → 截图 → 4s 后
+   * （期间每 3s 一推，真牌必然已经画回来）再量一次 → 比高度和 --stats-h。 */
+  if (new URLSearchParams(location.search).get('snap') === 'load') {
+    const T0 = performance.now();
+    const since = (t) => (t === null ? null : Math.round(t - T0));
+    let tLoading = null, tLoaded = null;
+    const poll = setInterval(() => {
+      const plate = document.getElementById('stats')?.querySelector('.plate');
+      if (!plate) return;
+      if (plate.classList.contains('loading')) {
+        if (tLoading === null) tLoading = performance.now();
+      } else if (tLoaded === null) {
+        tLoaded = performance.now();
+        clearInterval(poll);
+      }
+    }, 50);
+
+    setTimeout(async () => {
+      clearInterval(poll);
+      const el = document.getElementById('stats');
+      const boxOf = (n) => { const b = n.getBoundingClientRect();
+        return [Math.round(b.x), Math.round(b.y), Math.round(b.width), Math.round(b.height)]; };
+      const read = (tag) => {
+        const plate = el?.querySelector('.plate');
+        const sp = el?.querySelector('.spinner');
+        return {
+          tag,
+          loading: !!plate?.classList.contains('loading'),
+          spinnerBox: sp ? boxOf(sp) : null,
+          plateBox: plate ? boxOf(plate) : null,
+          reserve: getComputedStyle(document.body).getPropertyValue('--stats-h').trim(),
+          text: (plate?.textContent || '').trim()
+        };
+      };
+
+      live.renderStatsLoading?.();          // 真·builder，不是复制一份 DOM
+      const loading = read('loading');
+      /* ⚠️ 截图前必须让出一帧再拍：capturePage 拿的是**上一帧合成结果**，
+       *    刚 replaceChildren 完立刻拍，拍到的还是替换前那张（实测就是这样 ——
+       *    量出来是加载态，图里却是数字）。350ms 足够过一次合成，
+       *    又远小于推送间隔（3s），不会拍到下一帧真数据。 */
+      await new Promise((r) => setTimeout(r, 350));
+      const shot = await window.pet?.saveShot?.('load');
+      setTimeout(() => {
+        const loaded = read('loaded');
+        const h = (r) => r.plateBox?.[3];
+        console.log('[pet] load', JSON.stringify({
+          /* 相对本探针挂上的时刻（≈ boot 末尾，加载态就是在那之后摆出来的） */
+          tLoadingMs: since(tLoading),
+          tLoadedMs: since(tLoaded),
+          loading,
+          loaded,
+          /* 断言就这两条：牌一样高、让出的 --stats-h 也一样 */
+          heightSame: h(loading) === h(loaded),
+          reserveSame: loading.reserve === loaded.reserve,
+          shot: shot?.ink
+        }));
+      }, 4000);
+    }, 14000);
+  }
+
   // 自检通道：带 ?snap=1 启动时触发一次窗口截图落盘（PET_SNAPSHOT=1）。
   // 走主进程 capturePage 而不是 pixi 的 extract —— Cubism 渲染时会改动
   // UNPACK_FLIP_Y_WEBGL 等全局 GL 状态，用 RenderTexture 导出会上下颠倒。
   // seam 是长时间纯观测通道，不做截图：capturePage 本身会引入卡顿，污染数据。
   // ink 自己也截图，这里要排除掉，否则会互相覆盖同一个 PNG。
   if (new URLSearchParams(location.search).has('snap') &&
-      !['seam', 'ink', 'look', 'hit', 'bar'].includes(new URLSearchParams(location.search).get('snap'))) {
+      !['seam', 'ink', 'look', 'hit', 'bar', 'load'].includes(new URLSearchParams(location.search).get('snap'))) {
     const sweep = async (name) => {
       await new Promise((r) => setTimeout(r, 380));
       const sw = await window.pet?.saveShot?.(name);

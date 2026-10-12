@@ -25,6 +25,31 @@ const win = () => {
 
 let moveAnim = null;
 
+/* 「暂停」= 全屏 / 游戏静默期间冻结一切自动移动（见 main.js 的 setQuiet）。
+ *
+ * ⚠️ 为什么不复用 motion.enabled 配置开关：那是**用户的选择**，这是**环境
+ *    触发**的临时状态，两者会互相覆盖（静默结束时若把 enabled 写回 true，
+ *    用户关掉的"自动溜达"就被偷偷打开了）。所以是一个独立的内存标志。 */
+let paused = false;
+
+function setMotionPaused(on) {
+  const next = !!on;
+  if (next === paused) return;
+  paused = next;
+  if (paused) {
+    // 立刻收手：正在跑的平滑移动、排着的溜达、溜达结束后那次贴边，全部撤掉
+    cancelMoveAnim();
+    clearTimeout(wanderTimer);
+    clearTimeout(snapGuard);
+    snapGuard = null;
+  } else {
+    // 醒了之后按当前配置重新排一次（配置可能在这期间被改过）
+    resetWanderTimer();
+  }
+}
+
+function isMotionPaused() { return paused; }
+
 function cancelMoveAnim() {
   if (moveAnim) { clearInterval(moveAnim); moveAnim = null; }
 }
@@ -120,6 +145,7 @@ let wanderTimer = null;
 
 function resetWanderTimer() {
   clearTimeout(wanderTimer);
+  if (paused) return;
   const cfg = loadConfig();
   if (!win()) return;
   if (cfg.motion?.enabled === false || cfg.motion?.wander === false) return;
@@ -128,6 +154,7 @@ function resetWanderTimer() {
 }
 
 function doWander() {
+  if (paused) return;
   const w = win();
   if (!w || !w.isVisible()) {
     resetWanderTimer();
@@ -180,6 +207,8 @@ module.exports = {
   configureMotion,
   cancelMoveAnim,
   isMoveAnimRunning,
+  setMotionPaused,
+  isMotionPaused,
   animateTo,
   edgeSnap,
   resetWanderTimer,

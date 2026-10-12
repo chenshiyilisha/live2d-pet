@@ -28,7 +28,7 @@ const fs = require('fs');
  *   2) 模块间共享**可变**状态时导出对象、不导出值 —— CJS 的
  *      module.exports 是快照，导出之后再赋值传不出去（详见 win-size.js）。 */
 
-const { SIZE, MARGIN, refreshWinSize } = require('./win-size');
+const { SIZE, MARGIN, refreshWinSize, applyStageWidth } = require('./win-size');
 const { clamp, cornerPos } = require('./util');
 
 /* 外观两项读数 + 钳位。所有入口共用，区间见 config.js 的 LIMITS。
@@ -1005,6 +1005,50 @@ function moveToCorner() {
   snapToCorner(mainWindow, currentDisplay().workArea);
 }
 
+/* 渲染层算好的「窗口该多宽」（DIP）在这里落地。
+ *
+ * 只改宽度、**右边缘钉死不动** —— 人物的锚点是「离窗口右边固定 96px」
+ * （见 pet.js 的 PLATE_HALF 那段），所以窗口在左边伸缩，她一个像素都不会动；
+ * 用户看不见的只是窗口左边多出来 / 收回去的那块透明区域。
+ *
+ * ⚠️ 钉右边缘**不能**用「getBounds() 的右边缘 − 新宽度」反推。这个窗口在
+ *    150% 缩放下外框比内容区宽 1px，而且非整数设备像素会向上取整（要 309
+ *    实际给 310）；用外框反推会把上一次多出来的 1px 带进下一次 ——
+ *    **每切一次漂 1px**，几十次之后窗口就飘出屏幕右边（实测 1687→1688→…→1692）。
+ *    改成「拿内容区右边缘当固定目标 + 差多少补多少」后误差精确为 0、最多两轮。
+ *    完整量测见 `debug/probe-setbounds.js`（改这块之前先跑它）。
+ * ⚠️ 先 cancelMoveAnim：溜达 / 贴边是 24ms 一条 setInterval 在写 setBounds，
+ *    它的目标 x 是按**旧宽度**算的，不收手就有两条 setBounds 打架，窗口右边
+ *    会跟着动画抽一下（同「用户操作优先于自动动作」那条老规矩）。 */
+function setStageWidth(want) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const prev = SIZE.w;
+  const width = applyStageWidth(want);
+  if (!width || width === prev) return;
+  cancelMoveAnim();
+
+  const c0 = mainWindow.getContentBounds();
+  const { workArea } = screen.getDisplayMatching(c0);
+  // 目标右边缘 = 现在的内容区右边缘（不越出工作区）
+  const targetRight = Math.min(c0.x + c0.width, workArea.x + workArea.width);
+
+  let x = Math.round(targetRight - width);
+  for (let i = 0; i < 3; i++) {
+    mainWindow.setBounds({ x, y: c0.y, width, height: SIZE.h });
+    const c = mainWindow.getContentBounds();
+    const err = (c.x + c.width) - targetRight;
+    if (err === 0) break;
+    x -= err;                     // 用实测误差回补，下一轮就到位
+  }
+
+  /* 兜底：窗口本来贴着屏幕左边时，往左撑会顶出屏外 —— 宁可让右边多长一截，
+   * 也不让窗口跑到屏幕外（跑出去就找不回来了）。 */
+  const c = mainWindow.getContentBounds();
+  if (c.x < workArea.x) {
+    mainWindow.setBounds({ x: workArea.x, y: c.y, width, height: SIZE.h });
+  }
+}
+
 const SCALE_STEP = LIMITS.scale.step;
 
 function bumpScale(delta) {
@@ -1458,6 +1502,10 @@ function registerIpc() {
 
   ipcMain.on('pet:quit', () => app.quit());
   ipcMain.on('pet:hide', () => mainWindow?.hide());
+
+  /* 气泡 / 输入条显隐 → 窗口宽度在「常驻窄」与「对话宽」之间切。
+   * 宽度**数值**由渲染层算（人物几何在那边），这里只负责落成 setBounds。 */
+  ipcMain.on('pet:stage-width', (_e, w) => setStageWidth(w));
 
   /* ---- 拖动结束 / 用户活动 ----
    * 松手时先试一次贴边（配置开了才生效），再把「闲置溜达」的计时器推后。 */

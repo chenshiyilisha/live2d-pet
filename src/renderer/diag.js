@@ -508,6 +508,22 @@ export function attachSnapProbes(live) {
     }, 14000);
   }
 
+  /* 诊断：窗口宽度随对话 UI 伸缩（?snap=talk）
+   *
+   * 验那条链路：常驻窗口只包住人物和底座，气泡 / 输入条一露出来就撑宽。
+   * 时间线：6s 开输入条（→ 撑宽）→ 9s 收起（→ 缩回）→ 11s 弹一条长气泡
+   * （→ 撑宽）→ 24s 全收（→ 缩回）。
+   * 配主进程的 [bounds]（PET_SNAPSHOT 打开时每 500ms 一条）一起看，要的是：
+   * 宽度在变，而 **bounds.x + bounds.width（右边缘）一直不变** —— 也就是她没挪窝。
+   * 再配上 [pet] layout 里的 bodyCx，还能核到人物屏幕横坐标 = 右边缘 − 96。 */
+  if (new URLSearchParams(location.search).get('snap') === 'talk') {
+    const T = (ms, fn) => setTimeout(fn, ms);
+    T(6000, () => live.showComposer?.());          // 输入条 → 撑宽
+    T(9000, () => live.hideUI?.());                // 收起 → 缩回
+    T(11000, () => live.say?.('这一条是用来量「说完之后窗口会不会缩回去」的，所以故意写得长一点，把整行占满。', 12000));
+    T(24000, () => live.hideUI?.());               // 全收 → 缩回
+  }
+
   // 自检通道：带 ?snap=1 启动时触发一次窗口截图落盘（PET_SNAPSHOT=1）。
   // 走主进程 capturePage 而不是 pixi 的 extract —— Cubism 渲染时会改动
   // UNPACK_FLIP_Y_WEBGL 等全局 GL 状态，用 RenderTexture 导出会上下颠倒。

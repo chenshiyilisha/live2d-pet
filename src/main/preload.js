@@ -43,6 +43,10 @@ contextBridge.exposeInMainWorld('pet', {
   chat: (messages) => ipcRenderer.invoke('chat:send', messages),
   onChunk: (cb) => ipcRenderer.on('chat:chunk', (_e, text) => cb(text)),
 
+  /* 气泡 / 输入条显示时窗口要撑宽。宽度**由渲染层算好**（人物墨水宽 =
+   * f(窗口高, 缩放, 模型)，几何在参数表里），主进程只负责落成 setBounds。 */
+  setStageWidth: (w) => ipcRenderer.send('pet:stage-width', w),
+
   // 情绪标签由主进程从回复里解析后单独发过来（气泡文本里已经剥掉了）
   onEmotion: (cb) => ipcRenderer.on('chat:emotion', (_e, name) => cb(name)),
 

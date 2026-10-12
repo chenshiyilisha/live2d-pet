@@ -804,6 +804,8 @@ async function boot() {
       bubbleText,
       input,
       showComposer,
+      hideUI,
+      say,
       sendMessage,
       pokeIdleTimer,
       /* ?snap=load 用它**强制**摆一次加载态（真的去调 builder，不是复制一份 DOM），
@@ -989,6 +991,24 @@ const STATS_GAP = 14;
 const PLATE_HALF = 74;
 const CONTENT_RIGHT_PAD = 24;
 
+/* 窗口宽度由这几个量决定（算法在 syncStageWidth）：
+ *   · 常驻：max(人物墨水宽, 底座牌宽) + 左右各 CONTENT_PAD
+ *   · 气泡 / 输入条露出来时：再取 max(…, BUBBLE_W + 2×UI_PAD)
+ * 于是平时窗口只包住人物与底座（左边不再白占一大片），一说话就撑开。
+ * 两个都是固定 px 的 UI（字号 13.5、圆角、内边距都不跟屏幕缩放走），
+ * 所以「对话宽」这一档不乘屏幕比例 —— 换显示器，聊天框该多宽还是多宽。
+ * ⚠️ CONTENT_PAD 取 24 不是随手定的：常驻宽 = max(墨水宽, 底座牌 148) + 2×24
+ *    **恒 ≥ 196**，而 196 正是 layout 里 `SHIFT = max(0, W/2 − PLATE_HALF −
+ *    CONTENT_RIGHT_PAD)` 从 0 转正的阈值 —— 保证常驻这一档也落在「离窗口右边
+ *    固定 96px」的分支上，于是切换宽窄时人物**一个像素都不动**（低于 196 会
+ *    掉进"在窗口里居中"那一支，两种档位下她会差个一两 px）。
+ * ⚠️ BUBBLE_W / UI_PAD 对应 style.css 里 #bubble / #composer 的
+ *    left:14 / right:14，改那边要跟着改这里（同 PLATE_HALF 与 --stats-col 的关系）。 */
+const CONTENT_PAD = 24;
+const BUBBLE_W = 280;
+const UI_PAD = 14;
+const TALK_W = BUBBLE_W + UI_PAD * 2;
+
 /* 实测标定值（本机 DPR 1.5 下量出，换模型/换屏幕缩放都要重标）
  *
  * 画布坐标 → 窗口坐标的实测关系（**仅对模型墨水整体有效，别用来推单个参数点**）：
@@ -1086,6 +1106,9 @@ function layout() {
     w: INK_W * s,
     h: Math.min(H - HEAD_PAD, INK_H * s)
   };
+
+  /* 人物几何算完了 → 窗口宽度可能要跟着变（换模型 / 改缩放 / 开关底座都会走这里）。 */
+  syncStageWidth();
 
   if (new URLSearchParams(location.search).has('snap')) {
     const r = (n) => Math.round(n);
@@ -1416,6 +1439,37 @@ function hideUI() {
   bubble.classList.add('hidden');
   bubbleText.textContent = '';
   setState(State.IDLE);
+}
+
+/* ---- 窗口宽度：平时只包住内容，气泡 / 输入条一出现就撑开 ----
+ *
+ * 为什么需要：窗口原先宽 308，而人物墨水的横向只占 x=135..289 —— 左边整整
+ * 135px 是空的。窗口全透明，那片空白用户看不见，但窗口是实打实占了那么大
+ * 一块（截图按窗口取、窗口列表里都是它）。
+ *
+ * 为什么宽度由渲染层算：人物的墨水宽 = f(窗口高, 用户设的缩放, 模型)，
+ * 只有这边量得到（petRect 就是它）。
+ *
+ * ⚠️ 主进程改宽度时**右边缘钉死**（见 main.js 的 setStageWidth），而人物的
+ *    锚点是「离窗口右边固定 96px」—— 两边合起来，窗口怎么伸缩她都不动。
+ * ⚠️ 只在数值变了时上报：layout() 会因为尺寸 / 缩放 / 换模型反复重跑。 */
+let stageWantW = 0;
+
+function syncStageWidth() {
+  if (!app || !model || !petRect.w) return;    // 还没布局过，报出来的会是假值
+  const talking = !bubble.classList.contains('hidden') || !composer.classList.contains('hidden');
+  const contentW = Math.max(petRect.w, PLATE_HALF * 2) + CONTENT_PAD * 2;
+  const want = Math.round(Math.max(contentW, talking ? TALK_W : 0));
+  if (want === stageWantW) return;
+  stageWantW = want;
+  window.pet?.setStageWidth?.(want);
+}
+
+/* 气泡 / 输入条的显隐有十来处调用点，逐个补一行迟早漏一个 ——
+ * 漏掉的表现就是「气泡显示了但窗口没撑开」，聊天框被挤窄。
+ * 直接盯 class 最保险：MutationObserver 的回调排在本次绘制之前，看不出延迟。 */
+for (const el of [bubble, composer]) {
+  new MutationObserver(syncStageWidth).observe(el, { attributes: true, attributeFilter: ['class'] });
 }
 
 /* ============================================================

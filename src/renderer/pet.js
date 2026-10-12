@@ -1821,12 +1821,6 @@ function renderStats(s) {
   statsSeen = true;          // 有真数据了，转圈让位
   cancelStatsLoading();
 
-  /* TEMP TRACE */
-  console.log('[trc] push', JSON.stringify({
-    t: Math.round(performance.now()),
-    cpu: s.cpu, mem: s.mem?.percent, gpu: s.gpu, tempC: s.tempC
-  }));
-
   const items = STAT_ITEMS
     .map((spec) => ({
       spec,

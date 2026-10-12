@@ -287,6 +287,8 @@ let sensorBuf = '';
 let sensorStopped = true;
 let sensorRestarts = 0;
 let sensorRestartTimer = null;
+let sensorStartedAt = 0;   // 本次 spawn 的时刻（给"还没吐出第一行"的宽限期用）
+let lastTickAt = 0;        // 最后一次收到读数的时刻（判"新不新鲜"）
 
 /* 常驻采样器给出的最近读数。没在采样 / 已过期时是 null，
  * 那种情况下 slowPart 会退回"起一个进程打一枪"的老路。 */
@@ -349,6 +351,7 @@ function startSensorWatch() {
 
     sensorChild = proc;
     sensorRestarts = 0;
+    sensorStartedAt = Date.now();
     console.log('[sensor] 采样进程已启动（每 ' + SAMPLE_MS + 'ms 一次）');
 
     proc.stdout.setEncoding('utf8');
@@ -393,6 +396,7 @@ function handleSensorLine(line) {
   try { r = JSON.parse(s); } catch { return; }
 
   live.ticks++;
+  lastTickAt = Date.now();
 
   /* ⚠️ 求差放在主进程做（复用 gpuStatus），不放进 PowerShell ——
    *    这样"窗口合不合适"的判定只有一处实现，能被 verify-stats 覆盖。 */
@@ -402,6 +406,7 @@ function handleSensorLine(line) {
       live.gpu = st.util;
       live.gpuAt = Date.now();
       live.gpuOk = true;
+      flushGpuWaiters();
     }
   }
   if (r && typeof r.tempC === 'number') {
@@ -415,6 +420,9 @@ function stopSensorWatch() {
   sensorStopped = true;
   clearTimeout(sensorRestartTimer);
   sensorRestartTimer = null;
+  /* 采样器一停，等 GPU 的调用方就没指望了 —— 立刻放行，别让它干等到超时
+   * （静默开始时会走这里，那时上层本来就该把推送停下）。 */
+  flushGpuWaiters();
   if (sensorChild) {
     const proc = sensorChild;
     sensorChild = null;
@@ -428,6 +436,63 @@ function liveGpu() {
 }
 function liveTemp() {
   return (live.tempC !== null && Date.now() - live.tempAt <= LIVE_TTL) ? live.tempC : null;
+}
+
+/* 常驻采样器是不是"活着、且确实还会继续给数"。
+ *
+ * 这个判据只有一个用途：**决定要不要另起一个进程现打一枪**。
+ *
+ * 🔴 为什么必须能答"是"：采样器和 slowPart 的兜底路径**共用同一个 lastGpuSample
+ *    基线**，谁后打谁就把对方的窗口改小。实测撞出过：兜底那一枪落在采样器
+ *    上一拍之后不到 GPU_WIN_MIN(800ms)，算出来是 bad-window → 这一帧的 GPU
+ *    被静默丢掉 —— 用户看到的就是「首次加载时 GPU 比别的项慢一拍才出现」。
+ *    采样器 ≤1s 就会给新数，等它比抢它划算（还少起一个 powershell）。
+ *
+ * 两段判据：
+ *   ① 刚收到读数（< 2.5 拍）—— 正常状态；
+ *   ② 刚 spawn 出来还没吐第一行 —— PowerShell 启动 + 头一拍要 1~2s，这段宽限
+ *      不能当成"它死了"。给 8s，之后还不给数才认账。
+ * ⚠️ 进程一 exit 就把 sensorChild 置空，所以"脚本被策略拦掉"会立刻掉到
+ *    兜底路径，不会干等这 8s。 */
+const SENSOR_ALIVE_MS = 2500;
+const SENSOR_GRACE_MS = 8000;
+
+function sensorAlive() {
+  if (sensorStopped || !sensorChild) return false;
+  if (lastTickAt && Date.now() - lastTickAt < SENSOR_ALIVE_MS) return true;
+  return Date.now() - sensorStartedAt < SENSOR_GRACE_MS;
+}
+
+/* ── 「等第一个 GPU 读数」 ──
+ *
+ * GPU 占用是累计计数器求差，采样器**第一拍只建基线**、第二拍才有数（≈2.8s）。
+ * 主进程的第一次推送如果不等它，那一帧就是"半张牌"：CPU / 内存 / 温度先出，
+ * 牌上留一个空位，GPU 下一拍才补进来 —— 正是用户说的「GPU 比别的项慢一拍」。
+ * 等它一次（~2.8s）换来"首次出现就是完整的一张牌"，比先给半张再补更干净。
+ *
+ * ⚠️ 采样器没在跑就立刻返回 false，**不许干等** —— 没有独显 / 采样器起不来的
+ *    机器上，等是等不来的，只会白耽误时间（那时 slowPart 的兜底路径会负责出数）。 */
+let gpuWaiters = [];
+
+function flushGpuWaiters() {
+  if (!gpuWaiters.length) return;
+  const list = gpuWaiters;
+  gpuWaiters = [];
+  for (const w of list) w(true);
+}
+
+function waitForFirstGpu(ms = 4500) {
+  if (live.gpu !== null) return Promise.resolve(true);   // 已经有新鲜读数
+  if (!sensorAlive()) return Promise.resolve(false);     // 采样器没跑，别等
+  if (gpuUnavailable()) return Promise.resolve(false);   // 已经断定这台机器没有 GPU 计数器，等也没用
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      gpuWaiters = gpuWaiters.filter((w) => w !== done);
+      resolve(false);
+    }, ms);
+    const done = (v) => { clearTimeout(timer); resolve(v); };
+    gpuWaiters.push(done);
+  });
 }
 
 /* ⚠️ 「采样器转了 8 拍以上却一次都没给出这一项」= 这台机器根本没有这个数据源
@@ -448,15 +513,21 @@ function tempUnavailable() { return live.ticks >= 8 && !live.tempOk; }
 async function slowPart(out, want) {
   let needGpu = false;
   let needTemp = false;
+
+  /* 🔴 采样器活着时**绝不现打一枪**（理由见 sensorAlive 上面那段）：
+   *    抢它的基线会把这一帧的 GPU 打没。它 ≤1s 就给新数，这一帧宁可不画
+   *    （交给上层等/下一拍），也不去抢。 */
+  const busy = sensorAlive();
+
   if (want.gpu) {
     const g = liveGpu();
     if (g !== null) out.gpu = g;
-    else if (!gpuUnavailable()) needGpu = true;
+    else if (!busy && !gpuUnavailable()) needGpu = true;
   }
   if (want.temp) {
     const t = liveTemp();
     if (t !== null) out.tempC = t;
-    else if (!tempUnavailable()) needTemp = true;
+    else if (!busy && !tempUnavailable()) needTemp = true;
   }
   // 电量没有常驻采样（悬浮小字不显示它），一律现取
   const needBattery = !!want.battery;
@@ -594,6 +665,7 @@ module.exports = {
   formatStats,
   startSensorWatch,
   stopSensorWatch,
+  waitForFirstGpu,
   HUD_FIELDS,
   FULL_FIELDS
 };

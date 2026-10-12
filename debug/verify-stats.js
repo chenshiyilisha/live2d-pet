@@ -10,7 +10,7 @@
  * 用法：node debug/verify-stats.js
  */
 
-const { collectStats, formatStats, startSensorWatch, stopSensorWatch, HUD_FIELDS, FULL_FIELDS } =
+const { collectStats, formatStats, startSensorWatch, stopSensorWatch, waitForFirstGpu, HUD_FIELDS, FULL_FIELDS } =
   require('../src/main/sysinfo');
 
 let failures = 0;
@@ -103,7 +103,21 @@ const dump = (s) => JSON.stringify(s, (k, v) => (v instanceof Map ? '[Map]' : v)
   console.log('\n══════ 3. 常驻传感器采样器（GPU 不再慢一拍）══════\n');
 
   startSensorWatch();
-  await new Promise((r) => setTimeout(r, 2600));   // 等它跑够 2 拍（第一拍只是建基线）
+
+  /* 🔴 下面两条是「首次加载时 GPU 比别的项慢一拍」的回归锁，别删。
+   *    GPU 占用是累计计数器求差，采样器的**第一拍只建基线**、第二拍才有数。
+   *    主进程第一次推送前会先 waitForFirstGpu() —— 等它一次（约 2.8s），
+   *    换来「第一次出现就是完整的一张牌」，而不是先给半张（CPU/内存/温度）
+   *    再补上 GPU 那一格 —— 后者正是用户看到的现象。 */
+  console.log('等第一个 GPU 读数（模拟主进程首次推送前的等待）');
+  const tWait = Date.now();
+  const gotGpu = await waitForFirstGpu(6000);
+  const waitMs = Date.now() - tWait;
+  console.log(`  等待 ${waitMs} ms，拿到 = ${gotGpu}`);
+  check(gotGpu === true, '⚠️ 关键：等到了第一个 GPU 读数（不是超时放弃）');
+  /* ⚠️ 只卡上界。下界不做断言：等多久取决于 PowerShell 启动快慢，
+   *    而且这个脚本跑到这里时 lastGpuSample 可能已有基线（第一拍就有数）。 */
+  check(waitMs <= 6000, `等待时长 ${waitMs}ms ≤ 6s（没有干等到超时）`);
 
   const tLive = Date.now();
   const live = await collectStats(HUD_FIELDS);
@@ -112,9 +126,11 @@ const dump = (s) => JSON.stringify(s, (k, v) => (v instanceof Map ? '[Map]' : v)
   console.log('  ' + dump(live) + '\n');
 
   /* 阈值给得很松（60ms）：重点不是"有多快"，而是"有没有起 PowerShell"。
-   * 一旦退回"每次推送现打一枪"，这里立刻会变成 400~1000ms。 */
+   * 一旦退回"每次推送现打一枪"，这里立刻会变成 400~1000ms。
+   * ⚠️ 这条同时锁住"采样器活着时不另起进程抢它的基线"—— 抢的那一枪窗口非法，
+   *    会把这一帧的 GPU 静默打没（sensorAlive 上面那段）。 */
   check(liveMs < 60, `⚠️ 关键：采集不启进程、直接命中常驻读数（${liveMs} ms < 60 ms）`);
-  check(typeof live.gpu === 'number', '常驻采样器给出了 GPU 占用');
+  check(typeof live.gpu === 'number', '⚠️ 关键：等到之后一定拿得到 GPU —— 首帧不会是"半张牌"');
   check(typeof live.tempC === 'number', '常驻采样器给出了温度');
   check(live.gpu === null || (live.gpu >= 0 && live.gpu <= 100), 'GPU 占用落在 0–100');
 

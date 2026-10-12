@@ -41,7 +41,7 @@ const {
   resolveName, resolvePersona, loadConfig, saveConfig
 } = require('./config');
 const { startLocalServer } = require('./server');
-const { collectStats, formatStats, startSensorWatch, stopSensorWatch, HUD_FIELDS, FULL_FIELDS } = require('./sysinfo');
+const { collectStats, formatStats, startSensorWatch, stopSensorWatch, waitForFirstGpu, HUD_FIELDS, FULL_FIELDS } = require('./sysinfo');
 const { recognizeWav } = require('./speech');
 const { streamLLM, createStreamFilter } = require('./llm');
 const {
@@ -397,6 +397,9 @@ function refreshStatsTimer() {
 
   const ms = clamp(Number(cfg.monitor?.intervalMs) || 3000, 1000, 30000);
 
+  /* 本轮的第一次推送要不要先等 GPU（见 tick 里那段）。每轮 timer 重建都重置。 */
+  let firstTick = true;
+
   /* ⚠️ 用「跑完再排下一次」的自调度，**不要用 setInterval(push, ms)**。
    *    踩过的坑：`push` 是异步的，一次要 ~1s。setInterval 到点就发、
    *    不管上一枪跑没跑完，于是冷启动时第一枪还没结束第二枪就叠上来了 ——
@@ -409,6 +412,18 @@ function refreshStatsTimer() {
    *    会以为自己还该活着 → 两个循环并存。gen 对不上就直接退出，干净。 */
   const tick = async () => {
     if (gen !== statsGen) return;
+    /* 🔴 第一枪之前先等采样器把 GPU 基线建好。
+     *    GPU 占用是累计计数器求差，采样器的**第一拍只建基线**、第二拍才有数
+     *    （约 2.8s）。不等它的话第一帧就是「半张牌」—— CPU / 内存 / 温度先出现，
+     *    牌上留一个空位，GPU 下一拍才补进来，用户看到的就是
+     *    「首次加载时 GPU 比别的项慢一拍」。
+     * ⚠️ 只等第一次：采样器没跑 / 这台机器没有 GPU 计数器时它立刻返回 false，
+     *    不会把后面的推送节奏也拖成 3s + 4.5s。 */
+    if (firstTick) {
+      firstTick = false;
+      await waitForFirstGpu();
+      if (gen !== statsGen) return;
+    }
     await push();
     if (gen !== statsGen) return;          // push 期间被重排/关掉了 → 不再续
     statsTimer = setTimeout(tick, ms);

@@ -111,8 +111,30 @@ builder.build({
       buildResources: RES
     },
 
-    // stage 里就是全部该进包的东西，通吃
-    files: ['**/*'],
+    /* stage 里就是全部该进包的东西，但默认那条「递归全量通配」并不够：
+     *
+     * 🔴 electron-builder 对**任意层级**名为 node_modules 的目录都会走它自己的
+     *    依赖收集逻辑，而 stage 的 package.json 刻意清空了 dependencies
+     *    （见 prepare-stage.js）→ 收集器报 "no node modules returned"
+     *    → 于是它把这类目录**静默剔除**。
+     *
+     *    这正好吃掉了 vendor/updater/node_modules —— 主进程运行时唯一要
+     *    require 的那棵依赖树。prepare-stage.js 当初把落点从顶层 node_modules
+     *    挪到 vendor 下面，以为绕开了这层特殊处理，但它匹配的是路径里**任意
+     *    位置**的 node_modules 段，所以照剔不误。
+     *
+     *    症状：打包版（安装版与便携版一样）启动后只留一句
+     *    "Cannot find module 'electron-updater'"，updater.js 静默降级，
+     *    **自动更新永久失效**；而构建日志里完全看不出异常
+     *    （v0.1.1 / v0.1.2 两个发布版都带着这个毛病）。
+     *
+     * 下面显式「先排除、再包含」：files 里后面的模式覆盖前面的，这棵树一定进包。
+     * 回归：debug/verify-packaged-files.js（构建后跑，直接查产物目录）。 */
+    files: [
+      '**/*',
+      '!**/node_modules/**',
+      'vendor/updater/node_modules/**'
+    ],
 
     // asar 必须关：渲染层页面是本地 http 服务按 URL 路径直接读磁盘的
     // （server.js 的 fs.readFile），asar 是虚拟归档，路径语义对不上。

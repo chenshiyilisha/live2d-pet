@@ -1,0 +1,1762 @@
+'use strict';
+
+const {
+  app, BrowserWindow, ipcMain, Tray, Menu,
+  globalShortcut, screen, nativeImage, shell
+} = require('electron');
+const path = require('path');
+const fs = require('fs');
+
+/* 这一层只做「编排」：起服务、建窗口、装托盘、挂 IPC、注册快捷键、开机自启。
+ * 具体能力全在 src/main/ 下的独立模块里：
+ *   win-size   窗口尺寸（按屏幕现算，换显示器自动适配）
+ *   util       clamp / 右下角坐标
+ *   config     配置默认值 + 读写
+ *   server     本地静态服务
+ *   sysinfo    系统状态采集（os + PowerShell 双路）
+ *   speech     离线语音识别（Windows 自带 SAPI）
+ *   llm        流式对话 + 离线回复池 + 情绪标签过滤器
+ *   reminder   定时提醒 / 番茄钟
+ *   motion     平滑移动 / 边缘吸附 / 自主漫步
+ *   updater    通过 GitHub Releases 检查并安装新版本
+ *
+ * ⚠️ 拆分后必须守住的两条：
+ *   1) 子模块**不许 require main.js**。CJS 的循环依赖不会报错，只会让
+ *      某一侧的导出变成 undefined，然后在很远的地方炸开，极难定位。
+ *      要碰窗口的模块一律走注入：motion.configureMotion(() => mainWindow)。
+ *   2) 模块间共享**可变**状态时导出对象、不导出值 —— CJS 的
+ *      module.exports 是快照，导出之后再赋值传不出去（详见 win-size.js）。 */
+
+const { SIZE, MARGIN, refreshWinSize } = require('./win-size');
+const { clamp, cornerPos } = require('./util');
+
+/* 外观两项读数 + 钳位。所有入口共用，区间见 config.js 的 LIMITS。
+ * `Number(v) || 1` 同时挡住 undefined / NaN / 0 / 空串 —— 配置被手改坏时不至于崩。 */
+const clampScale = (v) => clamp(Number(v) || 1, LIMITS.scale.min, LIMITS.scale.max);
+const clampOpacity = (v) => clamp(Number(v) || 1, LIMITS.opacity.min, LIMITS.opacity.max);
+const {
+  LIMITS, NAME_LIMITS, getConfigPath, DEFAULT_CONFIG,
+  PERSONA_PARTS, personaPartDefaults, buildPersonaFromParts, hasCustomParts,
+  resolveName, resolvePersona, loadConfig, saveConfig
+} = require('./config');
+const { startLocalServer } = require('./server');
+const { collectStats, formatStats } = require('./sysinfo');
+const { recognizeWav } = require('./speech');
+const { streamLLM, createStreamFilter } = require('./llm');
+const {
+  setReminderSink, addReminder, clearReminders, reminderCount,
+  listReminders, startPomodoro, stopPomodoro, pomodoroStatus, disposeReminders
+} = require('./reminder');
+const {
+  configureMotion, cancelMoveAnim, isMoveAnimRunning, edgeSnap,
+  resetWanderTimer, disposeMotion, currentDisplay
+} = require('./motion');
+const { configureUpdater, checkForUpdates, updaterStatus } = require('./updater');
+
+// 项目根目录，本地服务与托盘图标、诊断截图都以它为基准
+const PROJECT_ROOT = path.join(__dirname, '..', '..');
+
+/* ============================================================
+ *  GPU / GL 后端选择
+ *
+ *  Windows 的「透明窗口」靠 DWM 的**硬件合成**做 alpha 混合。
+ *  Chromium 一旦把 compositing 降级到软件路径
+ *  （app.getGPUFeatureStatus().gpu_compositing === 'disabled_software'），
+ *  transparent 就会**静默失效** —— 窗口配置全对、capturePage 截出来的图
+ *  alpha 也是 0，但屏幕上就是一块白底。极具迷惑性。
+ *
+ *  有两条路会触发这个降级，都要避开：
+ *    1) app.disableHardwareAcceleration()  → 合成整体搬到 browser 进程
+ *    2) --use-angle=swiftshader            → Chromium 判定 GL 后端是软件
+ *       渲染器，顺手把 compositing 也降级（实测 compositing 会变成
+ *       "disabled_software"，哪怕没调 disableHardwareAcceleration）
+ *
+ *  所以默认**什么都不加**，交给系统挑真实 GPU。显卡驱动正常的桌面上，
+ *  透明、WebGL 加速、60fps 全都在。
+ *
+ *  只有在拿不到真实显卡驱动的环境（远程会话 / 沙箱 —— 那里 ANGLE 只能
+ *  解析到 "Microsoft Basic Render Driver"，硬走会 0xC0000005 崩 GPU 进程）
+ *  才降级到 SwiftShader。降级是自动的（见下面的 child-process-gone），
+ *  代价就是失去透明 —— 但至少能跑起来。
+ * ========================================================== */
+
+const SOFTWARE_FLAG = '--pet-software';
+
+const softwareMode =
+  process.argv.includes(SOFTWARE_FLAG) || process.env.PET_FORCE_SOFTWARE === '1';
+
+if (softwareMode) {
+  // 硬件路径走不通时的兜底。⚠️ 这个模式下面板背景一定是不透明的
+  // （软件合成不支持 transparent），这是已知取舍，不是 bug。
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('no-sandbox');
+  app.commandLine.appendSwitch('disable-gpu-sandbox');
+  app.commandLine.appendSwitch('use-gl', 'angle');
+  app.commandLine.appendSwitch('use-angle', 'swiftshader');
+  // Chromium 自 M112 起默认**禁止**把 SwiftShader 用于 WebGL。不显式放行的话，
+  // WebGL 上下文能建出来（glVersion 报 2）、模型数据也全部就绪
+  // （134 网格 / 70 参数），但**一个像素都画不出来** —— 整片空白。
+  app.commandLine.appendSwitch('enable-unsafe-swiftshader');
+  console.warn('[gpu] 已进入软件渲染模式：窗口背景会是不透明的（已知代价）');
+} else {
+  /* 沙箱必须整体关掉 —— 装了深信服 aTrust 零信任的机器上，这是唯一能跑起来的方案。
+   *
+   * 症状：窗口一闪都不出现（或白屏）。日志里分两种，会**先后**出现：
+   *   1) [gpu] GPU 进程启动阶段崩溃，exit_code = -1073741819（0xC0000005 访问冲突）
+   *   2) [renderer] process gone: {"reason":"crashed","exitCode":-2147483645}
+   *      （-2147483645 = 0x80000003 STATUS_BREAKPOINT）
+   *  只关 GPU 沙箱的话，1) 会消失但 2) 立刻接上 —— 因为 renderer 也是沙箱进程。
+   *
+   * 排查陷阱：日志里会刷一屏 DawnGraphiteCache 的
+   *   "另一个程序正在使用此文件 (0x20)" —— **那是伴生噪音，不是原因**。
+   *   把整个 GPUPersistentCache 移走照样崩，别去清缓存。
+   *
+   * 定位过程：默认参数崩、显式 --use-angle=d3d11 崩、独立 --user-data-dir 崩，
+   *   加上关沙箱的参数后崩溃数归零 → 和 GL 后端、缓存、用户数据都无关，
+   *   就是**沙箱进程被外部注入打崩**。aTrustAgent / aTrustXtunnel 会向进程注入
+   *   DLL 做管控，而沙箱进程权限最低、最容易被打成访问冲突。
+   *   → 这个故障是**环境相关、且时好时坏**：aTrust 没连内网时一切正常，
+   *     连上之后必崩。表现为「早上还能跑，下午突然起不来」，极具迷惑性。
+   *
+   * 代价：进程不再沙箱化。本项目只加载自己写的页面 + 官方 Live2D 素材，
+   *   不加载任何外部网页，安全面可接受；**将来若要加载远程内容，必须重新评估**。
+   */
+  app.commandLine.appendSwitch('no-sandbox');
+  app.commandLine.appendSwitch('disable-gpu-sandbox');
+}
+
+let mainWindow = null;
+let tray = null;
+let httpServer = null;
+let serverPort = 0;
+
+/* ---- 跨模块注入 ----
+ * motion 要能拿到「当前」窗口（窗口会被销毁重建，所以给 getter 而不是快照）；
+ * reminder 到点了要弹气泡、必要时还得把窗口唤出来 —— 那部分是窗口的活，
+ * 留在这一层做，并通过 setReminderSink 注进去。 */
+configureMotion(() => mainWindow);
+
+setReminderSink((payload) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try { mainWindow.webContents.send('pet:remind', payload); } catch { /* ignore */ }
+  if (mainWindow.isVisible && !mainWindow.isVisible()) mainWindow.show();
+});
+
+/* 单点改配置并广播。托盘菜单、快捷键、渲染层都用它，
+ * 保证「配置落盘 + 通知渲染层 + 重画菜单」三件事永远一起发生。
+ * 读写本身在 config.js，这里只做编排 —— 它要碰窗口和托盘，
+ * 放到 config.js 里会让那个模块反过来 require 主文件。 */
+function patchConfig(section, patch) {
+  const cur = loadConfig();
+  const next = { ...cur };
+  if (section) next[section] = { ...(cur[section] || {}), ...patch };
+  else Object.assign(next, patch);
+  saveConfig(next);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send('config:changed'); } catch { /* 窗口在销毁 */ }
+  }
+  refreshTrayMenu();
+  return next;
+}
+
+/* ============================================================
+ *  窗口
+ * ========================================================== */
+
+// 右下角是默认落点，但记住上次拖到哪儿了更有用
+function getInitialBounds() {
+  const { workArea } = screen.getPrimaryDisplay();
+  const fallback = cornerPos(workArea, SIZE.w, SIZE.h, MARGIN);
+
+  const saved = loadConfig().window;
+  if (!saved || typeof saved.x !== 'number' || typeof saved.y !== 'number') return fallback;
+
+  // 显示器布局可能变过（拔了外接屏等），位置跑到屏幕外就退回右下角，
+  // 否则窗口会出现在看不见的地方，用户以为程序没启动。
+  const visible = screen.getAllDisplays().some((d) => {
+    const a = d.workArea;
+    return saved.x + SIZE.w > a.x && saved.x < a.x + a.width &&
+           saved.y + SIZE.h > a.y && saved.y < a.y + a.height;
+  });
+
+  return visible ? { x: Math.round(saved.x), y: Math.round(saved.y) } : fallback;
+}
+
+function createWindow() {
+  refreshWinSize();                 // 先按当前屏幕定尺寸，后面 getInitialBounds 要用
+  const { x, y } = getInitialBounds();
+
+  mainWindow = new BrowserWindow({
+    width: SIZE.w,
+    height: SIZE.h,
+    x,
+    y,
+    transparent: true,        // 透明背景（必须配 frame:false，否则透明区渲染成黑色）
+    frame: false,
+    show: false,              // 先隐藏创建，首帧就绪再显示（见下面的 ready-to-show）
+    alwaysOnTop: isOn('appearance', 'alwaysOnTop'),
+    skipTaskbar: true,
+    hasShadow: false,         // 关掉阴影，否则边缘有灰圈
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false
+    }
+  });
+
+  mainWindow.setAlwaysOnTop(isOn('appearance', 'alwaysOnTop'), 'floating');
+
+  /* 窗口标题走配置。窗口是无边框的（frame:false），标题看不见 ——
+   * 但任务管理器、以及某些窗口管理工具读的就是它，改了名字这里也该跟着变，
+   * 否则「阿岩」会从这些地方漏出来。index.html 里的 <title> 是静态兜底，
+   * 真正生效的是这一行。 */
+  mainWindow.setTitle(resolveName(loadConfig()));
+
+  /* 启动时把生效的名字打出来。
+   * 名字有三处落点（托盘 / 标题 / 人设自称），用户改名后如果哪一处没跟着变，
+   * 从界面上很难判断到底是"没写进配置"还是"写了但某一处没读"。
+   * 这行日志给出的是"主进程认定的名字"，是排查时的第一手依据。 */
+  console.log('[name] 当前角色名:', JSON.stringify(resolveName(loadConfig())));
+
+  /* 人设同理，而且它更隐蔽：改了设定但对话没变化，可能是因为
+   * toggleConfig 没生效、也可能是被整段 persona 顶掉了。
+   * 打出"来源"(整段/分项 N 项/默认)与字符数，一眼能分辨是哪种。 */
+  {
+    const c = loadConfig();
+    const whole = String(c.persona || '').trim();
+    const nParts = PERSONA_PARTS.filter((p) => String((c.personaParts || {})[p.key] ?? '').trim()).length;
+    const src = whole ? '整段覆盖' : (nParts ? `分项 ${nParts} 项` : '全默认');
+    const body = resolvePersona(c);
+    console.log('[persona] 来源:', src, '| 字符数:', body.length);
+    if (whole) console.warn('[persona] 注意：persona 字段非空，分项设置被它覆盖');
+  }
+
+  // 默认整窗穿透，但把鼠标移动事件转发给渲染进程，
+  // 渲染进程靠 mousemove 判断光标是否落在角色本体上，再决定关闭穿透。
+  mainWindow.setIgnoreMouseEvents(true, { forward: true });
+
+  // Windows 上 transparent 窗口用「隐藏创建 → 首帧就绪再显示」更稳：
+  // 一创建就显示的话，DWM 可能把首帧那个还没上 alpha 的底缓存住，
+  // 结果就是窗口一直是一块白底，怎么改配置都不生效。
+  mainWindow.once('ready-to-show', () => {
+    if (!mainWindow) return;
+    mainWindow.show();
+    mainWindow.setAlwaysOnTop(isOn('appearance', 'alwaysOnTop'), 'floating');
+    // 页面就绪后把外观配置（缩放 / 透明度 / 模型）同步过去
+    syncAppearance();
+  });
+  // 兜底：万一 ready-to-show 没触发，也不能让窗口永远不出现
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isVisible()) mainWindow.show();
+  }, 4000);
+
+  // PET_ENTRY 用于排查：可临时指向最小页面
+  const entry = process.env.PET_ENTRY || 'src/renderer/index.html';
+  // PET_SNAPSHOT=1 时让渲染进程触发一次窗口截图，用于无截屏权限时验证
+  // PET_SNAPSHOT=ui 会额外把气泡和输入条露出来再截一张
+  const query = process.env.PET_SNAPSHOT ? `?snap=${process.env.PET_SNAPSHOT}` : '';
+  mainWindow.loadURL(`http://127.0.0.1:${serverPort}/${entry}${query}`);
+
+  // 把渲染进程的日志和加载失败转发到终端，否则错误会被静默吞掉
+  mainWindow.webContents.on('console-message', (...args) => {
+    const parts = args.map((a) => (a && typeof a === 'object' ? JSON.stringify(a) : a));
+    console.log('[renderer]', ...parts);
+  });
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    console.error(`[renderer] did-fail-load ${code} ${desc} ${url}`);
+  });
+  mainWindow.webContents.on('render-process-gone', (_e, details) => {
+    console.error('[renderer] process gone:', JSON.stringify(details));
+  });
+
+  // 拖动停止后记住位置（moved 触发很密集，debounce 一下再落盘）
+  let savePosTimer = null;
+  mainWindow.on('moved', () => {
+    clearTimeout(savePosTimer);
+    savePosTimer = setTimeout(() => {
+      if (!mainWindow) return;
+      const [x, y] = mainWindow.getPosition();
+      saveConfig({ ...loadConfig(), window: { x, y } });
+    }, 600);
+  });
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+}
+
+/* ============================================================
+ *  全局光标跟随
+ * ==========================================================
+ *
+ * 渲染进程只能靠 mousemove 知道光标在哪，而 mousemove 只在**窗口内**触发。
+ * 窗口才 368x418，鼠标一移出去就再也没有事件了，pointer 冻在最后那个点，
+ * 表现就是「鼠标离开她附近，目光就不动了」。
+ *
+ * 修法：由主进程按固定节奏读系统光标位置，换算成「相对窗口左上角」的坐标
+ * 发给渲染进程 —— 和 mousemove 的 e.clientX/clientY 同一坐标系，
+ * 渲染层拿到直接当 pointer 用，窗口内外无缝衔接。
+ *
+ * 几个刻意的选择：
+ *   - getCursorScreenPoint() 返回 DIP，和 getBounds() 是同一套单位，
+ *     直接相减就行（HiDPI 不用换算，算错反而会偏）。
+ *   - 坐标变化小于 1px 就不发，鼠标静止时零 IPC 流量。
+ *   - 窗口不可见时跳过，托盘里关掉显示就完全不轮询。
+ *   - 33ms ≈ 30fps：视线的 focus() 本身是插值逼近的，再快也看不出区别，
+ *     但比 60fps 省一半的跨进程调用。
+ */
+const CURSOR_POLL_MS = 33;
+let cursorTimer = null;
+let lastCursor = { x: NaN, y: NaN };
+
+function startCursorPolling() {
+  if (cursorTimer) return;
+  cursorTimer = setInterval(() => {
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return;
+
+    let pt;
+    try {
+      pt = screen.getCursorScreenPoint();
+    } catch {
+      return;
+    }
+
+    const b = mainWindow.getBounds();
+    const x = pt.x - b.x;
+    const y = pt.y - b.y;
+    // 亚像素抖动不值得发；1px 的粒度已经比 focus 的插值精度细得多
+    if (Math.abs(x - lastCursor.x) < 1 && Math.abs(y - lastCursor.y) < 1) return;
+    lastCursor = { x, y };
+
+    try {
+      mainWindow.webContents.send('pet:cursor', { x, y });
+    } catch { /* 窗口正在销毁，忽略 */ }
+  }, CURSOR_POLL_MS);
+}
+
+/* ============================================================
+ *  外观 / 窗口控制
+ * ========================================================== */
+
+/* 把 appearance 配置同步到窗口与渲染层。
+ * 托盘、快捷键、渲染层右键菜单、手改 config.json 后的重载 —— 全部收敛到这里，
+ * 保证「配置 / 窗口实际状态 / 渲染层看到的」三处永远一致。 */
+function syncAppearance() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const a = loadConfig().appearance || {};
+
+  const opacity = clampOpacity(a.opacity);
+  const onTop = a.alwaysOnTop !== false;
+  const scale = clampScale(a.scale);
+  const model = a.model === 'haru' ? 'haru' : 'hiyori';
+
+  try { mainWindow.setOpacity(opacity); } catch { /* 某些合成模式下不支持 */ }
+  try { mainWindow.setAlwaysOnTop(onTop, 'floating'); } catch { /* ignore */ }
+  try {
+    mainWindow.webContents.send('appearance:changed', { scale, opacity, onTop, model });
+  } catch { /* 窗口正在销毁 */ }
+}
+
+/* ---- 悬浮显示：按配置定期把状态推给渲染层 ---- */
+let statsTimer = null;
+
+function refreshStatsTimer() {
+  if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+  const cfg = loadConfig();
+  if (!cfg.monitor?.floating) return;
+
+  const push = async () => {
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return;
+    const s = await collectStats(true);
+    try { mainWindow.webContents.send('monitor:stats', s); } catch { /* ignore */ }
+  };
+  push();
+  const ms = clamp(Number(cfg.monitor?.intervalMs) || 3000, 1000, 30000);
+  statsTimer = setInterval(push, ms);
+}
+
+/* ============================================================
+ *  托盘
+ * ========================================================== */
+
+/* 菜单随时可能重建 —— 勾选状态不会自己刷新，而配置改动来自很多入口
+ * （托盘、快捷键、渲染层右键菜单、手改 config.json）。所以把模板函数存起来，
+ * patchConfig() 改完配置后统一调 refreshTrayMenu()。 */
+let buildTrayMenu = null;
+
+function refreshTrayMenu() {
+  if (!tray || (tray.isDestroyed && tray.isDestroyed()) || !buildTrayMenu) return;
+  try { tray.setContextMenu(buildTrayMenu()); } catch { /* 菜单正在显示时可能失败，忽略 */ }
+}
+
+// 托盘图标：Q 版日和头像（16/32/48 三张，改设计请跑 tools/make-tray-icon.js）
+// 用 addRepresentation 提供 1x/2x/3x，Windows 会按任务栏 DPI 自己挑最合适的那张。
+function makeTrayIcon() {
+  const dir = path.join(PROJECT_ROOT, 'src', 'assets');
+  const img = nativeImage.createEmpty();
+  for (const [scale, file] of [[1, 'tray-16.png'], [2, 'tray-32.png'], [3, 'tray-48.png']]) {
+    const p = path.join(dir, file);
+    if (!fs.existsSync(p)) continue;
+    try {
+      img.addRepresentation({ scaleFactor: scale, buffer: fs.readFileSync(p) });
+    } catch (err) {
+      console.warn('[tray] 图标表示加载失败', file, String(err?.message || err));
+    }
+  }
+  if (!img.isEmpty()) {
+    console.log('[tray] 图标就绪', JSON.stringify(img.getSize()));
+    return img;
+  }
+
+  // 兜底：图标文件缺失时给个纯色块，至少托盘里还有个能点的东西
+  console.warn('[tray] 图标文件缺失，回退到纯色块');
+  const size = 16;
+  const buf = Buffer.alloc(size * size * 4);
+  for (let i = 0; i < size * size; i++) {
+    const p = i * 4;
+    buf[p] = 0x56;      // B
+    buf[p + 1] = 0x6e;  // G
+    buf[p + 2] = 0x0f;  // R
+    buf[p + 3] = 0xff;  // A
+  }
+  return nativeImage.createFromBuffer(buf, { width: size, height: size });
+}
+
+function createTray() {
+  tray = new Tray(makeTrayIcon());
+  // 名字走配置：改完名字由 renameDialog 直接调 tray.setToolTip 刷新，
+  // 不必重建整个托盘（重建会让图标闪一下）。
+  tray.setToolTip(resolveName(loadConfig()));
+  buildTrayMenu = buildMenuTemplate;
+  refreshTrayMenu();
+
+  tray.on('double-click', () => toggleVisible());
+}
+
+/* 读某个开关的当前值。def 是「配置里没写时」的默认 ——
+ * 有些功能默认开（互动类），有些默认关（悬浮显示、语音输入）。 */
+function isOn(section, key, def = true) {
+  const v = loadConfig()[section]?.[key];
+  return v === undefined || v === null ? def : !!v;
+}
+
+function toast(text) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try { mainWindow.webContents.send('pet:toast', { text }); } catch { /* ignore */ }
+}
+
+/* 模型素材不随仓库分发（版权归 Live2D Inc.，放在 Release 的 models.zip 里），
+ * 所以从源码跑的人有可能压根没有 src/assets/models/。那种情况下应用能起、托盘
+ * 也在，但舞台上空无一物 —— 报错发生在渲染层，日志里只剩一句 404，很难定位。
+ * 这里在启动时主动查一次并给出可操作的提示。只提示，不影响启动。 */
+function warnIfModelsMissing() {
+  const modelsDir = path.join(PROJECT_ROOT, 'src', 'assets', 'models');
+  let names = [];
+  try {
+    names = fs.readdirSync(modelsDir);
+  } catch { /* 目录都不存在，下面统一处理 */ }
+
+  const hasModel = names.some((n) => {
+    const dir = path.join(modelsDir, n);
+    try {
+      return fs.statSync(dir).isDirectory() &&
+        fs.readdirSync(dir).some((f) => f.endsWith('.model3.json'));
+    } catch { return false; }
+  });
+
+  if (hasModel) return;
+
+  console.warn('[models] 找不到任何 Live2D 模型：' + modelsDir);
+  console.warn('[models] 模型不随仓库分发。请从 Releases 下载 models.zip，');
+  console.warn('[models] 解压到 src/assets/ 后重启（应得到 src/assets/models/{hiyori,haru}/）。');
+}
+
+/* 自动更新：注入依赖 + 启动后延迟检查一次。
+ *
+ * 为什么延迟而不是立刻查：检查更新要打 github.com，国内网络有时要好几秒
+ * 才超时。放在启动瞬间会和"起服务 / 建窗口 / 装托盘"抢资源，最坏情况让窗口
+ * 晚出来。而这功能本身是锦上添花 —— 用户第一次看到桌宠的体验不该被它拖累。
+ *
+ * ⚠️ getCfg 传的是**函数**而不是 loadConfig() 的结果：设置里随时可能改开关，
+ *    快照下一分钟就过期（这条是模块间的通用约定，见 tts.js / recorder.js）。 */
+function initUpdater() {
+  configureUpdater({
+    getCfg: loadConfig,
+    toast,
+    log: (...a) => console.log(...a),
+    // 「跳过这个版本」要落盘。走 patchConfig 是为了让「落盘 + 重画托盘」一起发生
+    markSkipped: (v) => patchConfig('update', { skippedVersion: v })
+  });
+
+  const cfg = loadConfig();
+  if (cfg?.update?.enabled === false) {
+    console.log('[updater] 自动检查已在设置里关闭');
+    return;
+  }
+  // 下限 3 秒：配置被手改成 0 或负数时不至于在启动瞬间就发请求
+  const delay = Math.max(3, Number(cfg?.update?.delaySec) || 12);
+  console.log(`[updater] ${delay} 秒后自动检查更新（当前 ${app.getVersion()}）`);
+  setTimeout(() => { checkForUpdates({ manual: false }); }, delay * 1000);
+}
+
+/* 改名对话框。
+ *
+ * 为什么不用 dialog.showMessageBox：Electron 的 dialog 模块**没有文本输入**
+ * 能力（只有 message / detail / buttons），拿不到用户敲的字。
+ * 所以只能自己开一个小 BrowserWindow 当输入框。
+ *
+ * 用 data: URL 而不是额外建一个 html 文件，是为了不让这个一次性界面
+ * 出现在 src/renderer/ 里被误当成正式页面（它不走预加载、不碰 IPC，
+ * 只靠 executeJavaScript 取值）。
+ *
+ * 几个 must：
+ *   - modal: true 且 parent 指向主窗口 —— 否则用户能连点两次菜单开出两个框；
+ *   - 必须自己拦 Esc：无边框窗口没有系统关闭按钮；
+ *   - 返回值区分「取消」和「确定」，取消时要**保持原名不变**，
+ *     不能被 trim 成空串写进配置。
+ */
+function renameDialog() {
+  const cfg = loadConfig();
+  const current = resolveName(cfg);
+
+  return new Promise((resolve) => {
+    const w = new BrowserWindow({
+      width: 360,
+      height: 170,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      frame: false,
+      transparent: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
+      modal: !!mainWindow && !mainWindow.isDestroyed(),
+      show: false,
+      backgroundColor: '#1e1e22',
+      webPreferences: { contextIsolation: true, nodeIntegration: false }
+    });
+
+    /* 页面本身不认识 Electron。用 executeJavaScript 读输入框的值，
+     * 通过 'done' / 'cancel' 两个约定消息回传 —— 比跑一遍 IPC 简单，
+     * 也不会污染主窗口的 IPC 面。 */
+    const html = `<!doctype html><meta charset="utf-8"><style>
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{background:#1e1e22;color:#e8e8ea;font:13px/1.5 "Microsoft YaHei",system-ui,sans-serif;
+           padding:18px 20px;user-select:none}
+      h2{font-size:13px;font-weight:500;margin-bottom:10px;color:#e8e8ea}
+      input{width:100%;height:32px;padding:0 10px;border-radius:6px;border:1px solid #3a3a40;
+            background:#2a2a30;color:#fff;font:14px/1 inherit;outline:none}
+      input:focus{border-color:#5a5a66}
+      .row{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+      button{height:28px;padding:0 14px;border-radius:6px;border:1px solid #3a3a40;
+             background:#2a2a30;color:#e8e8ea;font-size:13px;cursor:pointer}
+      button.primary{background:#4a6cf7;border-color:#4a6cf7;color:#fff}
+      button:hover{filter:brightness(1.15)}
+      .err{color:#ff7b7b;font-size:12px;height:15px;margin-top:6px}
+    </style>
+    <h2>给角色起个名字</h2>
+    <input id="n" maxlength="${NAME_LIMITS.max}" value="" autofocus>
+    <div class="err" id="e"></div>
+    <div class="row"><button id="c">取消</button><button class="primary" id="k">确定</button></div>
+    <script>
+      const inp = document.getElementById('n'), err = document.getElementById('e');
+      inp.value = ${JSON.stringify(current)};
+      inp.focus(); inp.select();
+      const send = (v) => { window.__renameResult = v; };
+      const commit = () => {
+        const v = inp.value.trim();
+        if (v.length < ${NAME_LIMITS.min}) { err.textContent = '名字不能为空'; return; }
+        if (v.length > ${NAME_LIMITS.max}) { err.textContent = '最多 ${NAME_LIMITS.max} 个字'; return; }
+        send(v);
+      };
+      document.getElementById('k').onclick = commit;
+      document.getElementById('c').onclick = () => send(null);
+      inp.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') commit();
+        if (ev.key === 'Escape') send(null);
+      });
+      window.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') send(null); });
+    <\/script>`;
+
+    w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    w.once('ready-to-show', () => w.show());
+
+    /* 轮询取值。没走 IPC，所以只能问页面要 —— 间隔 120ms 对输入框这种
+     * 交互完全无感（人的反应是几百毫秒级），换来的是零 IPC 面扩张。 */
+    let finished = false;
+    const finish = async (val) => {
+      if (finished) return;
+      finished = true;
+      clearInterval(timer);
+      if (!w.isDestroyed()) w.destroy();
+      resolve(val);
+    };
+    const timer = setInterval(async () => {
+      if (w.isDestroyed()) { finish(undefined); return; }
+      try {
+        const v = await w.webContents.executeJavaScript('window.__renameResult ?? undefined');
+        if (v !== undefined) finish(v === null ? undefined : v);
+      } catch { /* 页面还在加载，下一轮再试 */ }
+    }, 120);
+
+    // 窗口被外部关掉（比如系统强制）也要能收尾，否则 Promise 永久挂起
+    w.on('closed', () => { if (!finished) { finished = true; clearInterval(timer); resolve(undefined); } });
+  });
+}
+
+/* 菜单标签里给「角色设定」加个状态后缀 —— 一眼看出是默认还是改过。
+ * 「整段覆盖」和「分项自定义」是两回事，标签上要能区分，
+ * 否则用户会困惑"我明明设了，为什么标签说默认"。 */
+function personaStateLabel(cfg) {
+  if (String(cfg?.persona ?? '').trim()) return '（整段自定义）';
+  const parts = cfg?.personaParts || {};
+  const n = PERSONA_PARTS.filter((p) => String(parts[p.key] ?? '').trim()).length;
+  return n ? `（已改 ${n} 项）` : '（默认）';
+}
+
+/* 改名入口：菜单里点「重命名」走这里。返回是否真的改成功了。 */
+async function promptRename() {
+  const next = await renameDialog();
+  if (next === undefined) return false;         // 取消：保持原名
+  const cur = resolveName(loadConfig());
+  if (next === cur) return false;               // 没改：不写盘
+
+  patchConfig(null, { name: next });
+  // 名字同时出现在三处，都要立刻刷 —— 少刷一处就是「改了一半」
+  try { tray?.setToolTip(next); } catch { /* ignore */ }
+  try { mainWindow?.setTitle(next); } catch { /* ignore */ }
+  toast(`已重命名为「${next}」`);
+  return true;
+}
+
+/* ============================================================
+ *  角色设定（人设）对话框
+ * ==========================================================
+ *
+ * 与改名对话框同一套路（BrowserWindow + data: URL + 轮询取值），
+ * 区别是它要编辑 6 个槽位、能滚动、每项都有 placeholder 显示默认值。
+ *
+ * 设计要点：
+ *   - **留空 = 用默认**。所以 placeholder 必须是"按当前名字渲染出来的
+ *     默认文案"，用户一眼能看出留空之后会是什么。
+ *   - 每项右上角给一个「恢复默认」的小按钮 —— 用户改了想退回去时，
+ *     不必自己回忆原文，也不必清空后猜 placeholder。
+ *   - 底部实时预览**最终拼出来的 system prompt**。人设是拼起来的，
+ *     只看单格不知道整体长什么样；有了预览，"我把这句删了会不会影响
+ *     表情"这类问题当场就能看出来。
+ */
+function personaDialog() {
+  const cfg = loadConfig();
+  const defaults = personaPartDefaults(cfg);   // 按当前名字渲染的默认文案
+  const saved = cfg.personaParts || {};
+  const customWhole = String(cfg.persona || '').trim();
+
+  return new Promise((resolve) => {
+    const W = 560, H = 620;
+    const w = new BrowserWindow({
+      width: W, height: H,
+      minWidth: 460, minHeight: 420,
+      resizable: true,
+      minimizable: false,
+      maximizable: false,
+      frame: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
+      modal: !!mainWindow && !mainWindow.isDestroyed(),
+      show: false,
+      backgroundColor: '#1e1e22',
+      webPreferences: { contextIsolation: true, nodeIntegration: false }
+    });
+
+    /* 槽位数据以 JSON 注入页面。**在这里序列化而不是让页面去 require** ——
+     * 页面没有 node 集成，拿不到 config.js，注入是唯一路径。 */
+    const slots = PERSONA_PARTS.map((p) => ({
+      key: p.key,
+      label: p.label,
+      hint: p.hint || '',
+      tech: !!p.tech,
+      def: defaults[p.key] || '',
+      val: String(saved[p.key] ?? '')
+    }));
+
+    const html = `<!doctype html><meta charset="utf-8"><style>
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{background:#1e1e22;color:#e8e8ea;font:13px/1.6 "Microsoft YaHei",system-ui,sans-serif;
+           height:100vh;display:flex;flex-direction:column;user-select:none}
+      header{padding:14px 20px 10px;flex:none}
+      h2{font-size:14px;font-weight:500}
+      .sub{font-size:12px;color:#9a9aa4;margin-top:4px;line-height:1.5}
+      main{flex:1;overflow-y:auto;padding:0 20px 8px}
+      .slot{margin-bottom:14px}
+      .hd{display:flex;align-items:baseline;gap:8px;margin-bottom:5px}
+      .lb{font-size:13px;font-weight:500}
+      .ht{font-size:11px;color:#8a8a94}
+      .tech{font-size:11px;color:#efb25a}
+      .rst{margin-left:auto;font-size:11px;color:#8a8a94;cursor:pointer;flex:none}
+      .rst:hover{color:#c8c8d0}
+      textarea{width:100%;min-height:52px;padding:8px 10px;border-radius:6px;
+               border:1px solid #3a3a40;background:#2a2a30;color:#fff;
+               font:12px/1.6 "Microsoft YaHei",system-ui,sans-serif;resize:vertical;
+               outline:none;user-select:text}
+      textarea:focus{border-color:#5a5a66}
+      textarea::placeholder{color:#5f5f68}
+      .warn{padding:8px 10px;border-radius:6px;background:#3a2f1c;border:1px solid #5c4a22;
+            font-size:12px;color:#efb25a;margin-bottom:14px;line-height:1.5}
+      footer{flex:none;border-top:1px solid #303036;padding:12px 20px;
+             display:flex;align-items:center;gap:10px}
+      .pv{margin-left:auto;font-size:11px;color:#8a8a94;cursor:pointer}
+      .pv:hover{color:#c8c8d0}
+      button{height:30px;padding:0 16px;border-radius:6px;border:1px solid #3a3a40;
+             background:#2a2a30;color:#e8e8ea;font-size:13px;cursor:pointer}
+      button.primary{background:#4a6cf7;border-color:#4a6cf7;color:#fff}
+      button:hover{filter:brightness(1.15)}
+      .err{color:#ff7b7b;font-size:12px}
+      .pvbox{display:none;position:absolute;left:20px;right:20px;bottom:56px;max-height:60%;
+             overflow-y:auto;background:#15151a;border:1px solid #3a3a40;border-radius:8px;
+             padding:12px 14px;white-space:pre-wrap;font:12px/1.7 Consolas,monospace;
+             color:#c8c8d0;user-select:text}
+    </style>
+    <header>
+      <h2>角色设定</h2>
+      <div class="sub">留空即用默认（灰字是默认内容）。改完下次对话生效。</div>
+    </header>
+    <main id="main"></main>
+    <div class="pvbox" id="pvbox"></div>
+    <footer>
+      <span class="err" id="err"></span>
+      <span class="pv" id="pv">预览最终设定</span>
+      <button id="reset">全部恢复默认</button>
+      <button id="c">取消</button>
+      <button class="primary" id="k">保存</button>
+    </footer>
+    <script>
+      const SLOTS = ${JSON.stringify(slots)};
+      const customWhole = ${JSON.stringify(customWhole)};
+      const main = document.getElementById('main');
+      const err = document.getElementById('err');
+      const pvbox = document.getElementById('pvbox');
+
+      if (customWhole) {
+        const d = document.createElement('div');
+        d.className = 'warn';
+        d.textContent = '当前生效的是一份「整段自定义人设」（配置文件里的 persona 字段），'
+          + '它的优先级高于这里的各项，所以下面的修改暂时不会生效。'
+          + '要改用分项设置，请先把配置文件里的 persona 清空。';
+        main.appendChild(d);
+      }
+
+      const areas = {};
+      for (const s of SLOTS) {
+        const box = document.createElement('div');
+        box.className = 'slot';
+        const hd = document.createElement('div');
+        hd.className = 'hd';
+        const lb = document.createElement('span');
+        lb.className = 'lb'; lb.textContent = s.label;
+        hd.appendChild(lb);
+        if (s.hint) {
+          const ht = document.createElement('span');
+          ht.className = 'ht'; ht.textContent = s.hint;
+          hd.appendChild(ht);
+        }
+        if (s.tech) {
+          const t = document.createElement('span');
+          t.className = 'tech'; t.textContent = '⚠ 影响表情';
+          hd.appendChild(t);
+        }
+        const rst = document.createElement('span');
+        rst.className = 'rst'; rst.textContent = '恢复默认';
+        rst.onclick = () => { ta.value = ''; sync(); };
+        hd.appendChild(rst);
+        box.appendChild(hd);
+
+        const ta = document.createElement('textarea');
+        ta.value = s.val;
+        ta.placeholder = s.def;
+        ta.dataset.key = s.key;
+        ta.addEventListener('input', sync);
+        areas[s.key] = ta;
+        box.appendChild(ta);
+        main.appendChild(box);
+      }
+
+      const readAll = () => {
+        const out = {};
+        for (const s of SLOTS) out[s.key] = areas[s.key].value.trim();
+        return out;
+      };
+
+      const compose = () => {
+        const v = readAll();
+        return SLOTS.map(s => v[s.key] || s.def).filter(Boolean).join('\\n');
+      };
+
+      const sync = () => {
+        if (pvbox.style.display === 'block') pvbox.textContent = compose();
+        err.textContent = '';
+      };
+
+      document.getElementById('reset').onclick = () => {
+        for (const s of SLOTS) areas[s.key].value = '';
+        sync();
+      };
+      document.getElementById('pv').onclick = () => {
+        const on = pvbox.style.display === 'block';
+        pvbox.style.display = on ? 'none' : 'block';
+        if (!on) pvbox.textContent = compose();
+      };
+      document.getElementById('c').onclick = () => { window.__personaResult = null; };
+      document.getElementById('k').onclick = () => {
+        window.__personaResult = readAll();
+      };
+      document.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape') window.__personaResult = null;
+        if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) window.__personaResult = readAll();
+      });
+    <\/script>`;
+
+    w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    w.once('ready-to-show', () => w.show());
+
+    let finished = false;
+    const finish = async (val) => {
+      if (finished) return;
+      finished = true;
+      clearInterval(timer);
+      if (!w.isDestroyed()) w.destroy();
+      resolve(val);
+    };
+    const timer = setInterval(async () => {
+      if (w.isDestroyed()) { finish(undefined); return; }
+      try {
+        const v = await w.webContents.executeJavaScript('window.__personaResult ?? undefined');
+        if (v !== undefined) finish(v === null ? undefined : v);
+      } catch { /* 页面还在加载 */ }
+    }, 120);
+
+    w.on('closed', () => { if (!finished) { finished = true; clearInterval(timer); resolve(undefined); } });
+  });
+}
+
+/* 设定入口。返回是否写盘了。
+ *
+ * 与改名不同：这里**允许"全部清空"**（= 回到全默认），所以不能用
+ * "和旧值相同就不写"那套短路 —— 空对象也是一次有意义的编辑。 */
+async function promptPersona() {
+  const next = await personaDialog();
+  if (next === undefined) return false;         // 取消
+
+  /* 只保留非空的项。存空串和不存是等价的（都是"用默认"），
+   * 但存了一堆空串会让 config.json 变脏、也让人误以为设过什么。 */
+  const clean = {};
+  for (const p of PERSONA_PARTS) {
+    const v = String(next[p.key] ?? '').trim();
+    if (v) clean[p.key] = v;
+  }
+
+  patchConfig(null, { personaParts: clean });
+
+  const n = Object.keys(clean).length;
+  toast(n ? `角色设定已更新（自定义 ${n} 项）` : '角色设定已恢复默认');
+  return true;
+}
+
+function toggleVisible() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isVisible()) mainWindow.hide();
+  else { mainWindow.show(); mainWindow.setAlwaysOnTop(isOn('appearance', 'alwaysOnTop'), 'floating'); }
+}
+
+/* 把窗口钉到某块屏的右下角。
+ * ⚠️ setBounds 必须显式带上宽高 —— 透明无边框窗口上用 setPosition 会触发
+ *    DWM 边框重算、把窗口一点点撑大（详见 pet:drag-move 的长注释）。
+ * 这个「右下角」公式原先在 4 个入口各写了一遍，统一到这里 + util.cornerPos。 */
+function snapToCorner(win, workArea) {
+  const p = cornerPos(workArea, SIZE.w, SIZE.h, MARGIN);
+  win.setBounds({ x: p.x, y: p.y, width: SIZE.w, height: SIZE.h });
+}
+
+function moveToCorner() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  // 「回到右下角」= 她自己那块屏的右下角，不是主屏的
+  cancelMoveAnim();
+  snapToCorner(mainWindow, currentDisplay().workArea);
+}
+
+const SCALE_STEP = LIMITS.scale.step;
+
+function bumpScale(delta) {
+  const cur = clampScale(loadConfig().appearance?.scale);
+  const { min, max } = LIMITS.scale;
+  const next = Math.round(clamp(cur + delta, min, max) * 100) / 100;
+  patchConfig('appearance', { scale: next });
+  syncAppearance();
+  toast(`大小 ${Math.round(next * 100)}%`);
+}
+
+function resetScale() {
+  patchConfig('appearance', { scale: 1 });
+  syncAppearance();
+  toast('大小已重置');
+}
+
+function setOpacity(v) {
+  const o = clampOpacity(v);            // 落盘前就钳住，别把越界值写进配置
+  patchConfig('appearance', { opacity: o });
+  syncAppearance();
+  toast(`不透明度 ${Math.round(o * 100)}%`);
+}
+
+function setModel(name) {
+  patchConfig('appearance', { model: name === 'haru' ? 'haru' : 'hiyori' });
+  syncAppearance();
+  toast(`换成${name === 'haru' ? '春' : '日和'}`);
+}
+
+function toggleTTS() {
+  const on = isOn('tts', 'enabled');
+  patchConfig('tts', { enabled: !on });
+  toast(on ? '语音朗读已关' : '语音朗读已开');
+}
+
+/* 托盘菜单模板。每次打开都会重新构建（勾选状态不会自己刷新）。
+ *
+ * ⚠️ 顶层**最多四组**，别再往上平铺条目了 —— 之前是 20 个顶层项
+ * （大小 / 不透明度 / 人物模型 / 6 个功能开关 / 番茄钟 / 定时提醒…全摆在外面），
+ * 菜单长得要拉过半个屏幕，想找「退出」得先翻到底。
+ *
+ * 现在的结构：
+ *   显示/隐藏 · 回到右下角
+ *   ├─ 外观与形象（大小 / 不透明度 / 人物模型 / 置顶）
+ *   ├─ 互动与行为（总开关 + 6 项）
+ *   ├─ 功能开关  （朗读 / 搭话 / 悬浮 / 提醒 / 语音 / 快捷键）
+ *   └─ 小工具    （番茄钟 / 定时提醒）
+ *   设置 · 退出
+ * 各组把**当前值写在组标题里**（缩放%、模型名），不展开也能一眼看到状态。
+ */
+/* 外观三项（大小 / 不透明度 / 人物模型）。
+ *
+ * 托盘和「点角色」的右键菜单各要一份，之前是**复制粘贴**出来的两份 ——
+ * 改了一处忘另一处就会出现「托盘里能调、右键里调不了」这种不一致，
+ * 而且两边的标题写法都漂了（`大小（100%）` vs `大小 100%`）。
+ * 现在共用一份，只有「要不要显示快捷键提示」按场景开关。 */
+function appearanceSubmenu(cfg, { accelerators = false } = {}) {
+  const scale = Math.round(clampScale(cfg.appearance?.scale) * 100);
+  const opacity = clampOpacity(cfg.appearance?.opacity);
+  const model = cfg.appearance?.model === 'haru' ? 'haru' : 'hiyori';
+  const label = model === 'haru' ? '春' : '日和';
+  const acc = (a) => (accelerators ? { accelerator: a } : {});
+
+  return [
+    {
+      label: `大小（${scale}%）`,
+      submenu: [
+        { label: '放大', click: () => bumpScale(SCALE_STEP), ...acc('Ctrl+Shift+Up') },
+        { label: '缩小', click: () => bumpScale(-SCALE_STEP), ...acc('Ctrl+Shift+Down') },
+        { type: 'separator' },
+        { label: '重置 100%', click: resetScale, ...acc('Ctrl+Shift+0') }
+      ]
+    },
+    {
+      label: `不透明度（${Math.round(opacity * 100)}%）`,
+      submenu: [1, 0.9, 0.8, 0.7].map((v) => ({
+        label: `${Math.round(v * 100)}%`,
+        type: 'radio',
+        checked: Math.abs(opacity - v) < 0.02,
+        click: () => setOpacity(v)
+      }))
+    },
+    {
+      label: `人物模型（${label}）`,
+      submenu: [
+        { label: '日和 Hiyori', type: 'radio', checked: model === 'hiyori', click: () => setModel('hiyori') },
+        { label: '春 Haru', type: 'radio', checked: model === 'haru', click: () => setModel('haru') }
+      ]
+    }
+  ];
+}
+
+function buildMenuTemplate() {
+  const cfg = loadConfig();
+  const login = app.getLoginItemSettings();
+  const pomo = pomodoroStatus();
+
+  // 配置开关的统一构造：勾选 → 落盘 + 广播 + 重画菜单（patchConfig 全包了）
+  const flag = (section, key, label, def = true) => ({
+    label,
+    type: 'checkbox',
+    checked: isOn(section, key, def),
+    click: (item) => {
+      patchConfig(section, { [key]: item.checked });
+      if (section === 'monitor') refreshStatsTimer();
+      if (section === 'motion') resetWanderTimer();
+      if (section === 'appearance') syncAppearance();
+    }
+  });
+
+  /* ---------- 外观与形象 ---------- */
+  const appearanceMenu = [
+    ...appearanceSubmenu(cfg, { accelerators: true }),
+    { type: 'separator' },
+    flag('appearance', 'alwaysOnTop', '窗口置顶')
+  ];
+
+  /* ---------- 互动与行为 ---------- */
+  const interactMenu = [
+    flag('motion', 'enabled', '互动总开关'),
+    { type: 'separator' },
+    flag('motion', 'edgeSnap', '拖动后贴屏幕边缘'),
+    flag('motion', 'wander', '闲置时自己溜达'),
+    flag('interaction', 'rightMenu', '在角色身上右键出菜单'),
+    flag('interaction', 'headPat', '摸头有专属反应'),
+    flag('interaction', 'dragReact', '拖着走会挣扎'),
+    flag('interaction', 'pokeReact', '连戳有递进反应')
+  ];
+
+  /* ---------- 功能开关 ---------- */
+  const featureMenu = [
+    flag('tts', 'enabled', '语音朗读'),
+    flag('proactive', 'enabled', '主动搭话'),
+    flag('monitor', 'floating', '系统状态悬浮显示', false),
+    flag('reminder', 'enabled', '定时提醒'),
+    flag('asr', 'enabled', '语音输入（离线识别）', false),
+    { type: 'separator' },
+    flag('hotkeys', 'enabled', '全局快捷键')
+  ];
+
+  /* ---------- 小工具 ---------- */
+  const toolsMenu = [
+    {
+      label: pomo ? `番茄钟（${pomo.phase === 'work' ? '专注' : '休息'}中 · 剩 ${Math.ceil(pomo.leftSec / 60)} 分）` : '番茄钟',
+      submenu: [
+        { label: '开始 25 + 5', click: () => { startPomodoro(25, 5); toast('番茄钟开始'); } },
+        { label: '开始 45 + 10', click: () => { startPomodoro(45, 10); toast('番茄钟开始'); } },
+        { type: 'separator' },
+        { label: '停止', enabled: !!pomo, click: () => { stopPomodoro(); toast('番茄钟已停'); } }
+      ]
+    },
+    {
+      label: '定时提醒',
+      submenu: [
+        { label: '5 分钟后提醒我', click: () => { addReminder(5, '5 分钟到了。'); toast('5 分钟后提醒你'); } },
+        { label: '15 分钟后提醒我', click: () => { addReminder(15, '15 分钟到了。'); toast('15 分钟后提醒你'); } },
+        { label: '25 分钟后提醒我', click: () => { addReminder(25, '25 分钟到了。'); toast('25 分钟后提醒你'); } },
+        { type: 'separator' },
+        { label: '清除全部提醒', click: () => { clearReminders(); toast('提醒已清空'); } }
+      ]
+    }
+  ];
+
+  /* ---------- 设置 ---------- */
+  /* 更新做成一个子菜单而不是平铺两项：设置组本来就长，再往上加会挤到
+   * 「清空聊天记录」。把状态写进组标题，不展开也能看到"有新版 / 正在下载"。 */
+  const upd = updaterStatus();
+  const updateLabel =
+    upd.state === 'downloading' ? `更新（下载中 ${upd.progress}%）` :
+    upd.state === 'ready' ? `更新（${upd.version} 待安装）` :
+    upd.version ? `更新（有新版 ${upd.version}）` : '更新';
+
+  const settingsMenu = [
+    // 当前名字写进标签里，不用点进去就知道现在叫什么
+    { label: `重命名（当前：${resolveName(cfg)}）`, click: () => { promptRename(); } },
+    { label: `角色设定${personaStateLabel(cfg)}`, click: () => { promptPersona(); } },
+    { type: 'separator' },
+    {
+      label: updateLabel,
+      submenu: [
+        { label: '检查更新', click: () => { checkForUpdates({ manual: true }); } },
+        { type: 'separator' },
+        flag('update', 'enabled', '自动检查更新')
+      ]
+    },
+    { type: 'separator' },
+    {
+      label: '开机自动启动',
+      type: 'checkbox',
+      checked: !!login.openAtLogin,
+      click: (item) => {
+        // 开发环境下 execPath 是 electron.exe，得把项目目录当参数带上，
+        // 否则开机只会启动一个空白 Electron
+        app.setLoginItemSettings({
+          openAtLogin: item.checked,
+          path: process.execPath,
+          /* 这个参数只有开发时才需要：那时 execPath 是 electron.exe，
+           * 得显式告诉它待启动的是哪个项目。打包后 execPath 就是应用自己的
+           * exe，再塞一个目录进去会被 Electron 当成"要打开的文件路径"，
+           * 结果是开机自启静默失效（或弹一个找不到文件的错误）。 */
+          args: app.isPackaged ? [] : [PROJECT_ROOT]
+        });
+        refreshTrayMenu();
+      }
+    },
+    { type: 'separator' },
+    {
+      label: '打开配置文件',
+      click: () => {
+        const p = getConfigPath();
+        if (!fs.existsSync(p)) saveConfig(loadConfig());
+        shell.openPath(p);
+      }
+    },
+    { label: '打开配置目录', click: () => shell.openPath(app.getPath('userData')) },
+    { type: 'separator' },
+    {
+      label: '清空聊天记录',
+      click: () => {
+        try {
+          fs.rmSync(path.join(app.getPath('userData'), 'chat-history.json'), { force: true });
+        } catch { /* ignore */ }
+        mainWindow?.webContents.send('history:cleared');
+      }
+    }
+  ];
+
+  // 顶层只保留这些 —— 平铺项一律进上面的组
+  return Menu.buildFromTemplate([
+    { label: '显示 / 隐藏', accelerator: 'Ctrl+Shift+A', click: toggleVisible },
+    { label: '回到右下角', accelerator: 'Ctrl+Shift+C', click: moveToCorner },
+
+    { type: 'separator' },
+    { label: '外观与形象', submenu: appearanceMenu },
+    { label: '互动与行为', submenu: interactMenu },
+    { label: '功能开关', submenu: featureMenu },
+    { label: '小工具', submenu: toolsMenu },
+
+    { type: 'separator' },
+    { label: '设置', submenu: settingsMenu },
+
+    { type: 'separator' },
+    { label: '退出', click: () => app.quit() }
+  ]);
+}
+
+
+/* ============================================================
+ *  本地意图：系统状态 / 定时提醒 / 番茄钟
+ * ==========================================================
+ *
+ * 这几类请求**根本不需要大模型** —— 答案本地就有，而且没配 API Key 时
+ * 也必须能用（离线模式本来是"只会背稿子"，加上这些立刻就能干实事了）。
+ * 所以在这里先拦一道，命中就地回答；没命中才交给 streamLLM。
+ */
+
+const RE_STATS = /(\bcpu\b|处理器|内存|占用率|磁盘|硬盘|[cC]\s*盘|网速|带宽|电量|电池|系统状态|电脑.{0,4}(怎么样|状态|还好))/;
+const RE_POMO_STOP = /(停|关掉|关|结束|取消).{0,4}(番茄|专注)/;
+const RE_POMO_START = /(开始|来个|开个|启动|进入).{0,4}(番茄|专注)/;
+const RE_REMIND_CLEAR = /(取消|清除|清空).{0,6}(提醒|闹钟)/;
+
+/* 时间解析：中英文数字都认，「25分钟后提醒我喝水」和
+ * 「提醒我 25 分钟后喝水」两种语序都支持。 */
+function parseReminder(text) {
+  /* 一条正则就够，两种语序它都吃 —— `(\d+)` 前面没有 ^ 锚定，
+   * 「提醒我 」「提醒一下我 」这类前缀是被允许跳过的（实测：
+   * 「提醒一下我 1 小时后取快递」→ ["1","小时","取快递"]）。
+   * 这里原本还挂过一条专门处理「提醒我 N 分钟后」的 m2 正则，
+   * 实测永远轮不到它命中，是死代码，已删。 */
+  const m = text.match(/(\d+(?:\.\d+)?)\s*(个?小时|分钟|分|钟头)\s*(?:之后|后)?\s*(?:提醒我|提醒一下|叫我|提醒)?\s*(.*)$/);
+  if (!m) return null;
+
+  let mins = parseFloat(m[1]);
+  if (!Number.isFinite(mins) || mins <= 0) return null;
+  if (/小时|钟头/.test(m[2])) mins *= 60;
+  if (mins < 0.05) mins = 0.05;
+
+  const what = String(m[3] || '')
+    .replace(/^[，,。.!！?？\s]+/, '')
+    .replace(/[。.\s]+$/, '')
+    .trim();
+  return { minutes: Math.round(mins * 100) / 100, what: what.slice(0, 60) };
+}
+
+function fmtMinutes(mins) {
+  if (mins >= 60) {
+    const h = mins / 60;
+    return `${Number.isInteger(h) ? h : h.toFixed(1)} 小时`;
+  }
+  if (mins >= 1) return `${Number.isInteger(mins) ? mins : mins.toFixed(1)} 分钟`;
+  return `${Math.round(mins * 60)} 秒`;
+}
+
+/* 逐字发出去，和真实的流式回复走同一条通道，渲染层不用区分。 */
+async function emitLocal(text, emotion = 'calm') {
+  const filter = createStreamFilter(
+    (t) => mainWindow?.webContents.send('chat:chunk', t),
+    (e) => mainWindow?.webContents.send('chat:emotion', e)
+  );
+  const full = `${text}\n[emo:${emotion}]`;
+  for (const ch of full) {
+    filter.push(ch);
+    await new Promise((r) => setTimeout(r, 14));
+  }
+  filter.end();
+  return { ok: true, local: true };
+}
+
+async function tryLocalIntent(text) {
+  const q = String(text || '').trim();
+  if (!q) return null;
+
+  // 1) 定时提醒 —— 先试"X 分钟后提醒我"，命中就登记
+  const rem = parseReminder(q);
+  if (rem && /提醒|叫我/.test(q)) {
+    const r = addReminder(rem.minutes, rem.what ? `该${rem.what}了。` : '时间到了。');
+    if (!r) return emitLocal('定时提醒在设置里关着呢，先去托盘打开。', 'think');
+    return emitLocal(
+      rem.what
+        ? `好，${fmtMinutes(rem.minutes)}后提醒你${rem.what}。`
+        : `好，${fmtMinutes(rem.minutes)}后叫你。`,
+      'smile'
+    );
+  }
+
+  // 2) 取消提醒
+  if (RE_REMIND_CLEAR.test(q)) {
+    const n = reminderCount();
+    clearReminders();
+    return emitLocal(n ? `清掉了，${n} 条提醒都取消了。` : '本来就没有待办的提醒。', 'calm');
+  }
+
+  // 3) 番茄钟
+  if (RE_POMO_START.test(q)) {
+    const m = q.match(/(\d+)\s*(?:分钟|分)/);
+    const work = m ? clamp(parseInt(m[1], 10), 1, 180) : 25;
+    startPomodoro(work, work >= 40 ? 10 : 5);
+    return emitLocal(`番茄钟开始，先专注 ${work} 分钟。中途想停就说"停掉番茄钟"。`, 'happy');
+  }
+  if (RE_POMO_STOP.test(q)) {
+    const st = pomodoroStatus();
+    stopPomodoro(true);
+    return emitLocal(st ? '行，番茄钟停了，歇会儿吧。' : '现在没在跑番茄钟。', 'calm');
+  }
+
+  // 4) 系统状态（放最后 —— 它最宽泛，前面几个更具体）
+  if (RE_STATS.test(q)) {
+    const s = await collectStats(true);
+    return emitLocal(formatStats(s), 'calm');
+  }
+
+  return null;
+}
+
+/* 把 llm.js 的 streamLLM 接到窗口上。
+ * 依赖注入的代价就是这里多一层胶水 —— 但换来 llm.js 完全不碰窗口，
+ * 可以脱离 Electron 单独 require 与测试。 */
+function chatStream(messages) {
+  const cfg = loadConfig();
+  return streamLLM(messages, {
+    ...cfg.llm,
+    send: (t) => mainWindow?.webContents.send('chat:chunk', t),
+    sendEmotion: (e) => mainWindow?.webContents.send('chat:emotion', e)
+  });
+}
+
+/* ============================================================
+ *  IPC
+ * ========================================================== */
+
+function registerIpc() {
+  ipcMain.on('pet:set-ignore-mouse', (_e, ignore) => {
+    if (!mainWindow) return;
+    if (ignore) mainWindow.setIgnoreMouseEvents(true, { forward: true });
+    else mainWindow.setIgnoreMouseEvents(false);
+  });
+
+  ipcMain.on('pet:drag-move', (_e, { dx, dy }) => {
+    if (!mainWindow) return;
+
+    /* ⚠️ 第一件事：把可能正在跑的平滑移动停掉。
+     *
+     * animateTo（溜达 1100ms / 贴边 240ms）是个 24ms 的 setInterval，一直在
+     * setBounds 写窗口位置。如果不先停它，拖拽期间就有**两条循环同时写位置**：
+     * 一条把你拖到的坐标写进去，另一条把动画的插值坐标写进去，
+     * 表现是「溜达途中一把抓住她，窗口一边跟着走一边自己抽搐」，
+     * 松手后（drag-end → edgeSnap）还要再抖一次。
+     * 用户操作一律优先于自动动作，进来就把它掐掉。 */
+    cancelMoveAnim();
+
+    /* ⚠️ 拖窗口必须用 setBounds 并把 width/height 一起带上，**不能用 setPosition**。
+     *
+     * 症状：每拖动一次，人物就变大一点，拖几次之后人明显胀大。
+     *
+     * 根因（在窗口层，不在渲染层）：这是透明 + 无边框（transparent/frame:false）的
+     *   Windows 窗口。Windows 为了给这类窗口做 DWM 合成，会额外附加一圈不可见的
+     *   边框，而**每次做窗口位置变更（SetWindowPos）时这圈边框都会被重新计算**，
+     *   结果是窗口的尺寸被一点点撑大。
+     *   实测（诊断通道 ?snap=movesize，模拟拖动 dx=dy=6）：
+     *       静置   width=324 高度=360（稳定）
+     *       拖 1 次 width=326，拖 2 次 328，拖 5 次 336，十几次后 370+ …
+     *   而且位置**多走一倍**：dx 传 6，窗口实际移动 12。
+     *
+     * 为什么会传导到人物大小：窗口尺寸 → 渲染进程 #stage 的 clientWidth/Height
+     *   → layout() 里 canvas = stage × ZOOM → holder.scale = canvas高 / 画布高，
+     *   一路等比放大。所以这不是取景参数的问题，改 PET_SCALE 也治不好。
+     *
+     * 修法：setBounds 显式带上尺寸，把宽高钉死；顺带把已经漂移的尺寸纠回设计值。
+     *   位置用 getBounds 的坐标系（和 setBounds 同一套），不再多走一倍。
+     *   代价：桌宠窗口本来就是固定尺寸（resizable:false），钉死没有任何副作用。 */
+    const b = mainWindow.getBounds();
+    mainWindow.setBounds({
+      x: Math.round(b.x + dx),
+      y: Math.round(b.y + dy),
+      width: SIZE.w,
+      height: SIZE.h
+    });
+  });
+
+  /* 诊断：把窗口的真实尺寸打出来。
+   *
+   * 排查「跑一会儿人物自己变大」时加的：渲染进程报 stage 尺寸在持续增长，
+   * 而 CSS 里 html/body 是 100% + overflow:hidden、#canvas 是 absolute，
+   * 理论上 stage 只可能等于窗口内容区 —— 所以必须确认到底是窗口在变大，
+   * 还是渲染进程的 DOM 度量在抽风。getBounds 是 DIP，getContentSize 是内容区。
+   *
+   * anim 是给自动化测试用的：判断「拖拽有没有把溜达的平滑移动掐掉」，
+   * 光看坐标变化会被 edgeSnap 之类的后续动作干扰，直接看动画在不在跑最准。 */
+  if (process.env.PET_SNAPSHOT) {
+    setInterval(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      console.log('[bounds]', JSON.stringify({
+        bounds: mainWindow.getBounds(),
+        content: mainWindow.getContentSize(),
+        anim: isMoveAnimRunning() ? 'running' : null
+      }));
+    }, 500);
+  }
+
+  ipcMain.on('pet:quit', () => app.quit());
+  ipcMain.on('pet:hide', () => mainWindow?.hide());
+
+  /* ---- 拖动结束 / 用户活动 ----
+   * 松手时先试一次贴边（配置开了才生效），再把「闲置溜达」的计时器推后。 */
+  ipcMain.on('pet:drag-end', () => {
+    edgeSnap();
+    resetWanderTimer();
+  });
+
+  // 渲染层节流后发来的"人还在"信号，用来推迟自主漫步
+  ipcMain.on('pet:activity', () => resetWanderTimer());
+
+  /* ---- 在角色身上右键弹出的快捷菜单 ---- */
+  ipcMain.on('pet:context-menu', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const cfg = loadConfig();
+    const send = (ch, payload) => {
+      try { mainWindow.webContents.send(ch, payload); } catch { /* ignore */ }
+    };
+    const openCfg = () => {
+      const p = getConfigPath();
+      if (!fs.existsSync(p)) saveConfig(loadConfig());
+      shell.openPath(p);
+    };
+
+    /* 外观三项收进一个子菜单，免得「点一下角色」弹出来的面板跟托盘一样长。
+     * 内容与托盘**共用** appearanceSubmenu()，这里只是不显示快捷键提示。 */
+    const appearanceSub = appearanceSubmenu(cfg);
+
+    // 顶层控制在 7 行内 —— 这是「点角色」的快捷面板，别照抄托盘那份长菜单
+    const menu = Menu.buildFromTemplate([
+      {
+        label: '表情',
+        submenu: [
+          ['calm', '平静'], ['happy', '开心'], ['smile', '微笑'], ['think', '思考'],
+          ['shy', '害羞'], ['serious', '认真'], ['surprised', '惊讶'], ['sleepy', '困倦']
+        ].map(([k, label]) => ({ label, click: () => send('pet:set-emotion', { name: k }) }))
+      },
+      {
+        label: '动作',
+        submenu: [
+          { label: '打个招呼', click: () => send('pet:play-motion', { group: 'TapBody' }) },
+          { label: '随便动动', click: () => send('pet:play-motion', { group: 'Idle' }) }
+        ]
+      },
+      { type: 'separator' },
+      { label: '外观', submenu: appearanceSub },
+      { label: '语音朗读', type: 'checkbox', checked: isOn('tts', 'enabled'), click: toggleTTS },
+      { type: 'separator' },
+      /* 「重命名」+「打开配置文件」合并成一个设置子菜单。
+       * 顶层行数是硬约束（用户嫌长，2026-10-11 收过一次），直接平铺加一行
+       * 会顶到 9 行；合并进来是净增 0 行，而且这两项本来都属"设置"性质。 */
+      {
+        label: '设置',
+        submenu: [
+          { label: `重命名（当前：${resolveName(cfg)}）`, click: () => { promptRename(); } },
+          { label: `角色设定${personaStateLabel(cfg)}`, click: () => { promptPersona(); } },
+          { type: 'separator' },
+          { label: '检查更新', click: () => { checkForUpdates({ manual: true }); } },
+          { label: '打开配置文件', click: openCfg }
+        ]
+      },
+      { label: '隐藏', click: () => mainWindow?.hide() },
+      { label: '退出', click: () => app.quit() }
+    ]);
+    menu.popup({ window: mainWindow });
+  });
+
+  /* ---- 系统状态 ---- */
+  ipcMain.handle('monitor:query', async () => {
+    const s = await collectStats(true);
+    return { ok: true, stats: s, text: formatStats(s) };
+  });
+
+  /* ---- 定时提醒 / 番茄钟 ---- */
+  ipcMain.handle('reminder:add', (_e, { minutes, text, kind } = {}) => {
+    const r = addReminder(minutes, text, kind === 'pomodoro' ? 'pomodoro' : 'reminder');
+    if (!r) return { ok: false, error: 'reminder-disabled' };
+    return { ok: true, at: r.at, minutes: Number(minutes) };
+  });
+
+  ipcMain.handle('reminder:list', () => ({
+    reminders: listReminders(),
+    pomodoro: pomodoroStatus()
+  }));
+
+  ipcMain.handle('reminder:clear', () => { clearReminders(); return { ok: true }; });
+
+  ipcMain.handle('pomodoro:start', (_e, { workMin, breakMin } = {}) => {
+    startPomodoro(Number(workMin) || 25, Number(breakMin) || 5);
+    return { ok: true, status: pomodoroStatus() };
+  });
+
+  ipcMain.handle('pomodoro:stop', () => { stopPomodoro(); return { ok: true }; });
+
+  /* ---- 语音输入 ---- */
+  ipcMain.handle('asr:recognize', async (_e, data) => {
+    if (!isOn('asr', 'enabled', false)) return { ok: false, error: 'disabled' };
+    let buf;
+    try {
+      buf = Buffer.from(data);
+    } catch {
+      return { ok: false, error: 'bad-payload' };
+    }
+    if (!buf.length) return { ok: false, error: 'empty' };
+    // 太短基本是误触（16kHz 16bit 下 0.3 秒才 9600 字节）
+    if (buf.length < 4000) return { ok: false, error: 'too-short' };
+    return recognizeWav(buf);
+  });
+
+  ipcMain.handle('chat:send', async (_e, messages) => {
+    // 本地能答的先答（系统状态 / 定时提醒 / 番茄钟），答不了的才交给对话后端
+    const last = [...(messages || [])].reverse().find((m) => m && m.role === 'user');
+    try {
+      const local = await tryLocalIntent(last?.content);
+      if (local) return local;
+    } catch (err) {
+      console.warn('[intent] 本地意图处理失败:', String(err?.message || err));
+    }
+    const cfg = loadConfig();
+    return chatStream([{ role: 'system', content: resolvePersona(cfg) }, ...messages]);
+  });
+
+  ipcMain.handle('config:get', () => {
+    const cfg = loadConfig();
+    return { ...cfg, llm: { ...cfg.llm, apiKey: cfg.llm.apiKey ? '***' : '' } };
+  });
+
+  /* ---- 聊天记录持久化 ----
+   * 存成 userData/chat-history.json，退出重开还能接着上次聊。 */
+  const historyFile = () => path.join(app.getPath('userData'), 'chat-history.json');
+
+  ipcMain.handle('history:load', () => {
+    try {
+      const arr = JSON.parse(fs.readFileSync(historyFile(), 'utf8'));
+      return Array.isArray(arr) ? arr.slice(-40) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  ipcMain.handle('history:save', (_e, arr) => {
+    try {
+      fs.mkdirSync(app.getPath('userData'), { recursive: true });
+      fs.writeFileSync(historyFile(), JSON.stringify((arr || []).slice(-80), null, 1), 'utf8');
+      return true;
+    } catch (err) {
+      console.error('[history] save failed:', err);
+      return false;
+    }
+  });
+
+  /* ---- 主动搭话 ----
+   * 主人闲置久了由主进程挑话头，走同一条流式通道，渲染层不用区分。 */
+  ipcMain.handle('chat:proactive', async () => {
+    const cfg = loadConfig();
+    if (cfg.proactive?.enabled === false) return { ok: false, error: 'disabled' };
+    return chatStream([
+      { role: 'system', content: resolvePersona(cfg) },
+      {
+        role: 'user',
+        content: '（主人已经有一阵子没搭理你了。主动开个话头，一句话就够，' +
+                 '别问"在忙吗"这种客套，按你的性子随口说点什么。）'
+      }
+    ]);
+  });
+
+  /* 渲染层改配置的统一入口。对象段逐段合并（不能整段替换，否则丢默认键），
+   * 落盘后把受影响的运行时状态一起同步：外观、悬浮统计、托盘勾选。 */
+  ipcMain.handle('config:set', (_e, patch = {}) => {
+    const cur = loadConfig();
+    const next = { ...cur, ...patch };
+    for (const k of Object.keys(DEFAULT_CONFIG)) {
+      const pv = patch[k];
+      if (pv && typeof pv === 'object' && !Array.isArray(pv)) {
+        next[k] = { ...(cur[k] || {}), ...pv };
+      }
+    }
+    /* 外观两项必须落在合法区间里才算数。这条通道是渲染层直接写配置用的
+     * （诊断页也在走），不钳的话一个越界的 scale 会被写进盘并在下次启动生效。 */
+    if (next.appearance) {
+      next.appearance.scale = clampScale(next.appearance.scale);
+      next.appearance.opacity = clampOpacity(next.appearance.opacity);
+    }
+    const ok = saveConfig(next);
+    syncAppearance();
+    refreshStatsTimer();
+    resetWanderTimer();
+    refreshTrayMenu();
+    try { mainWindow?.webContents.send('config:changed'); } catch { /* ignore */ }
+    return ok;
+  });
+
+  // 自检：把窗口当前画面截图落盘，并统计非背景像素的包围盒。
+  // 用像素统计而不是目测，才能客观量出模型在窗口里的真实落位。
+  ipcMain.handle('pet:save-shot', async (_e, name) => {
+    try {
+      /* name 只是内部诊断用的标签。必须白名单过滤：它会被拼进 path.join，
+       * 传 '../../../../某处' 就能把 PNG 写到项目目录之外去（写文件 + 覆盖）。 */
+      const tag = (typeof name === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(name)) ? name : null;
+      const outDir = path.join(PROJECT_ROOT, 'debug');
+      fs.mkdirSync(outDir, { recursive: true });
+      const img = await mainWindow.webContents.capturePage();
+      const out = path.join(outDir, tag ? `pet-${tag}.png` : 'pet-window.png');
+      fs.writeFileSync(out, img.toPNG());
+
+      const { width, height } = img.getSize();
+      const bmp = img.toBitmap();   // BGRA
+
+      // 背景基准色取左上角内侧一点。
+      // ⚠️ 不能用「非纯白」当判据 —— 软件合成下 transparent 会静默失效，
+      //    背景不是纯白（实测 r/g/b 不在 >240 那一档），结果整窗都被算成角色
+      //    （ink 直接 0..height）。改成「与角落基准色的曼哈顿差」，
+      //    透明背景（真实 GPU，基准是 a=0）和实心背景（软件合成）两种都认。
+      const ci = (8 * width + 8) * 4;
+      const bg = { b: bmp[ci], g: bmp[ci + 1], r: bmp[ci + 2], a: bmp[ci + 3] };
+      const BG_TOL = 30;
+
+      let opaque = [1e9, 1e9, -1, -1];   // alpha > 8 的范围
+      let ink = [1e9, 1e9, -1, -1];      // 明显偏离背景色的范围（角色实体）
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const i = (y * width + x) * 4;
+          const b = bmp[i], g = bmp[i + 1], r = bmp[i + 2], a = bmp[i + 3];
+          if (a > 8) {
+            if (x < opaque[0]) opaque[0] = x;
+            if (y < opaque[1]) opaque[1] = y;
+            if (x > opaque[2]) opaque[2] = x;
+            if (y > opaque[3]) opaque[3] = y;
+          }
+          const diff = Math.abs(r - bg.r) + Math.abs(g - bg.g) +
+                       Math.abs(b - bg.b) + Math.abs(a - bg.a);
+          if (diff > BG_TOL) {
+            if (x < ink[0]) ink[0] = x;
+            if (y < ink[1]) ink[1] = y;
+            if (x > ink[2]) ink[2] = x;
+            if (y > ink[3]) ink[3] = y;
+          }
+        }
+      }
+
+      return {
+        ok: true,
+        bytes: fs.statSync(out).size,
+        size: [width, height],
+        opaque,
+        ink,
+        bg
+      };
+    } catch (err) {
+      return { ok: false, error: String(err?.message || err) };
+    }
+  });
+}
+
+/* ============================================================
+ *  全局快捷键
+ * ========================================================== */
+
+/* 快捷键可能被别的软件占用，注册失败不该影响启动 —— 逐个注册、逐个报错。 */
+function registerHotkeys() {
+  try { globalShortcut.unregisterAll(); } catch { /* ignore */ }
+
+  if (!isOn('hotkeys', 'enabled')) {
+    console.log('[hotkeys] 已在配置中关闭，不注册');
+    return;
+  }
+
+  const bind = (accel, fn) => {
+    try {
+      const ok = globalShortcut.register(accel, fn);
+      if (!ok) console.warn('[hotkeys] 注册失败（多半被其它软件占用）:', accel);
+    } catch (err) {
+      console.warn('[hotkeys] 注册异常:', accel, String(err?.message || err));
+    }
+  };
+
+  bind('CommandOrControl+Shift+A', toggleVisible);          // 显示 / 隐藏
+  bind('CommandOrControl+Shift+M', toggleTTS);              // 静音切换
+  bind('CommandOrControl+Shift+Up', () => bumpScale(SCALE_STEP));   // 放大
+  bind('CommandOrControl+Shift+Down', () => bumpScale(-SCALE_STEP)); // 缩小
+  bind('CommandOrControl+Shift+0', resetScale);             // 重置大小
+  bind('CommandOrControl+Shift+C', moveToCorner);           // 回到右下角
+  console.log('[hotkeys] 注册完成');
+}
+
+/* ============================================================
+ *  启动
+ * ========================================================== */
+
+const gotLock = app.requestSingleInstanceLock();
+
+if (!gotLock) {
+  app.quit();
+} else {
+  const bootedAt = Date.now();
+
+  // GPU 进程崩溃会在同一秒内被连续上报多次（Chromium 自己重启 GPU 子进程又立刻失败，
+  // 每次都触发一次 child-process-gone）。实测一次启动能收到 4 次，不去重的话
+  // app.relaunch() 会被调用 4 次，拉起多个实例互相抢 GPU 缓存。
+  let gpuRelaunchDone = false;
+
+  // GPU 进程崩了就自动降级重启 —— 否则在没显卡驱动的环境里会直接白屏挂掉。
+  // 只降一次（softwareMode 里不再注册这个分支），避免崩溃-重启死循环。
+  app.on('child-process-gone', (_e, details) => {
+    if (details?.type !== 'GPU' || details.reason === 'clean-exit') return;
+
+    // 跑了很久之后偶尔崩一次，Chromium 自己会用软件合成顶上去，不必重启
+    if (Date.now() - bootedAt > 45000) {
+      console.warn('[gpu] GPU 进程运行中退出，交给 Chromium 自行恢复:', details.reason);
+      return;
+    }
+    if (softwareMode) {
+      console.error('[gpu] 软件渲染模式下 GPU 进程仍异常退出:', details.reason);
+      return;
+    }
+    if (gpuRelaunchDone) return;
+    gpuRelaunchDone = true;
+
+    console.warn(`[gpu] GPU 进程启动阶段崩溃（${details.reason}），改用软件渲染重启`);
+    app.relaunch({ args: process.argv.slice(1).concat(SOFTWARE_FLAG) });
+    app.exit(0);
+  });
+
+  /* 单实例：用户再次双击 start-pet.cmd 时（第二个进程会被 requestSingleInstanceLock
+   * 挡掉并立刻退出，同时把这件事通知到这里）把已有窗口唤到眼前。
+   *
+   * ⚠️ 一定要有可感知的反馈：桌宠窗口小、还是 alwaysOnTop 的无边框窗口，
+   *    如果它恰好被拖到屏幕边缘看不见的地方，用户会以为「没启动成功」，
+   *    于是反复双击 —— 那才是「看起来有好几个实例」的真正来源。
+   *    所以这里除了 show/focus，还要把跑到屏幕外的窗口拉回右下角。 */
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+
+    const b = mainWindow.getBounds();
+    const onScreen = screen.getAllDisplays().some((d) => {
+      const a = d.workArea;
+      return b.x + b.width > a.x && b.x < a.x + a.width &&
+             b.y + b.height > a.y && b.y < a.y + a.height;
+    });
+    if (!onScreen) {
+      // 这里**故意**用主屏：窗口已经跑到所有显示器之外了，
+      // 「离她最近的屏」没有意义，回主屏右下角才是用户能立刻找到的位置。
+      snapToCorner(mainWindow, screen.getPrimaryDisplay().workArea);
+    }
+    mainWindow.show();
+    mainWindow.focus();
+  });
+
+  app.whenReady().then(async () => {
+    try {
+      // Cubism Core 是 Live2D 的专有软件、不随仓库分发（详见 server.js 里那段
+      // 说明）。本地没有该文件时由 server 从官方 CDN 取回，缓存丢在 userData
+      // 下，这样 clone 到的仓库第一次启动联网一次，之后就跟本地文件一样快了。
+      httpServer = await startLocalServer(PROJECT_ROOT, {
+        coreCacheFile: path.join(app.getPath('userData'), 'cache', 'live2dcubismcore.min.js')
+      });
+      serverPort = httpServer.address().port;
+    } catch (err) {
+      console.error('[server] failed to start:', err);
+      app.quit();
+      return;
+    }
+
+    registerIpc();
+
+    // 透明窗口能不能生效，取决于合成走的是硬件路径还是软件路径。
+    // 软件合成（gpu_compositing: disabled_software）下 Windows 的 transparent
+    // 会静默失效，表现就是「窗口一块白底」。这里把真实状态打出来，别靠猜。
+    try {
+      const g = app.getGPUFeatureStatus();
+      console.log('[gpu]', JSON.stringify({
+        compositing: g.gpu_compositing,
+        rasterization: g.rasterization,
+        webgl: g.webgl,
+        webgl2: g.webgl2
+      }));
+    } catch { /* 取不到就算了 */ }
+
+    createWindow();
+    createTray();
+    startCursorPolling();
+
+    /* 换显示器 / 改系统缩放后自动适配。
+     *
+     * 三个事件都要听：拔插屏是 added/removed，改缩放或分辨率是 metrics-changed。
+     * 处理逻辑：
+     *   - 尺寸变了 → 直接落回右下角（窗口变大后原位置很可能已经越界）；
+     *   - 尺寸没变（只是换了块屏）→ 走 getInitialBounds 的可见性检查，
+     *     位置还在屏幕内就原地不动，跑到屏幕外才拉回右下角。
+     * ⚠️ 一律用 setBounds 带死宽高 —— 透明无边框窗口上 setPosition 会
+     *    触发 DWM 边框重算、把窗口撑大（见 pet:drag-move 的注释）。 */
+    const onDisplayChanged = () => {
+      const resized = refreshWinSize();
+      if (!mainWindow) return;
+      // 重定位也按窗口当前所在的那块屏算
+      const { workArea } = currentDisplay();
+      let x;
+      let y;
+      if (resized) {
+        ({ x, y } = cornerPos(workArea, SIZE.w, SIZE.h, MARGIN));
+      } else {
+        ({ x, y } = getInitialBounds());
+      }
+      mainWindow.setBounds({ x, y, width: SIZE.w, height: SIZE.h });
+    };
+    screen.on('display-added', onDisplayChanged);
+    screen.on('display-removed', onDisplayChanged);
+    screen.on('display-metrics-changed', onDisplayChanged);
+
+    registerHotkeys();
+    refreshStatsTimer();
+    resetWanderTimer();
+    warnIfModelsMissing();
+    initUpdater();
+  });
+
+  // 桌宠：关掉窗口不等于退出，托盘还活着
+  app.on('window-all-closed', () => {});
+
+  app.on('will-quit', () => {
+    globalShortcut.unregisterAll();
+    if (cursorTimer) clearInterval(cursorTimer);
+    if (statsTimer) clearInterval(statsTimer);
+    disposeMotion();
+    disposeReminders();
+    try { httpServer?.close(); } catch { /* ignore */ }
+  });
+}

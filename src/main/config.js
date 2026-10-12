@@ -1,0 +1,354 @@
+'use strict';
+
+const { app } = require('electron');
+const path = require('path');
+const fs = require('fs');
+
+/* ============================================================
+ *  配置
+ * ==========================================================
+ *
+ *  这里只有**纯读写**：默认值、读、写、路径。
+ *  「改一段 + 广播 + 重画托盘」那种编排留在 main.js 的 patchConfig()，
+ *  因为它要碰窗口和托盘 —— 放进来的话 config 就得反过来 require 主文件，
+ *  循环依赖立刻出现。
+ * ========================================================== */
+
+const getConfigPath = () => path.join(app.getPath('userData'), 'config.json');
+
+/* 外观两项的合法区间。
+ *
+ * 这两个数原先散在 main.js 的 6 个地方（同步外观、托盘标题、加减、
+ * 快捷键、右键菜单），改一处漏一处就会出现「菜单显示 90%、窗口却是 70%」
+ * 这种只在一半入口上复现的偏差。
+ * ⚠️ 渲染层 pet.js 里的 SCALE_MIN / SCALE_MAX 必须与此保持一致。 */
+const LIMITS = {
+  scale: { min: 0.5, max: 1.4, step: 0.06 },
+  opacity: { min: 0.25, max: 1 }
+};
+
+/* 自定义名称的合法区间。
+ *
+ * 上限 12 个字符不是因为存储限制，而是**显示限制**：托盘 tooltip 是单行，
+ * 窗口标题也是单行，名字太长会把托盘提示撑得没法看。
+ * 下限 1 是「不许为空」—— 空名字会让托盘提示和窗口标题变成空白，
+ * 看起来像程序坏了。
+ *
+ * ⚠️ 主进程和渲染层都要用这个区间：入口在托盘/右键菜单（主进程），
+ *    但渲染层的气泡也可能要显示名字。改这里必须同步改 pet.js 里的
+ *    NAME_MIN / NAME_MAX（与 SCALE_MIN/MAX 同样的成对约定）。 */
+const NAME_LIMITS = { min: 1, max: 12 };
+
+const DEFAULT_CONFIG = {
+  llm: {
+    baseUrl: 'https://api.deepseek.com/v1',
+    apiKey: '',
+    model: 'deepseek-chat'
+  },
+  // 语音朗读：走 Chromium 内置的 speechSynthesis（Windows 上即系统 SAPI），
+  // 零依赖、纯离线。音色取决于系统装了哪些语音包。
+  tts: {
+    enabled: true,
+    rate: 1.05,
+    pitch: 1.0
+  },
+  // 主动搭话：闲置这么久之后主动说一句
+  proactive: {
+    enabled: true,
+    idleMinutes: 8
+  },
+  /* ══════════════════════════════════════════════════════════
+   *  以下每一段都对应托盘菜单里的一个分组，**每个功能都是独立开关**，
+   *  改完立刻生效（外观类是实时改窗口/渲染，行为类是下次触发时读配置）。
+   * ══════════════════════════════════════════════════════════ */
+
+  /* 外观 —— 全部实时生效，不用重启 */
+  appearance: {
+    scale: 1.0,           // 人物缩放倍率，建议 0.6 ~ 1.3
+    opacity: 1.0,         // 整窗不透明度，0.3 ~ 1.0
+    alwaysOnTop: true,    // 窗口置顶
+    model: 'hiyori'       // 'hiyori' | 'haru'
+  },
+  /* 互动行为（开关 + 各自参数） */
+  motion: {
+    enabled: true,        // 互动总开关，关掉则下面几项全部失效
+    edgeSnap: true,       // 拖完松手后自动吸附到最近的屏幕边缘
+    wander: true,         // 闲置时自己溜达换位置
+    wanderIdleMin: 3      // 闲置多少分钟后开始溜达
+  },
+  /* 角色交互反馈 */
+  interaction: {
+    rightMenu: true,      // 在角色身上右键弹出快捷菜单
+    headPat: true,        // 点头部有专属反应
+    dragReact: true,      // 拖着走的时候挣扎 / 不满
+    pokeReact: true       // 连戳给出递进反应
+  },
+  /* 系统状态 */
+  monitor: {
+    floating: false,      // 常驻小字悬浮显示
+    intervalMs: 3000
+  },
+  /* 定时提醒 / 番茄钟 */
+  reminder: {
+    enabled: true
+  },
+  /* 语音输入（离线识别） */
+  asr: {
+    enabled: false
+  },
+  /* 全局快捷键 */
+  hotkeys: {
+    enabled: true
+  },
+  /* 自动更新（GitHub Releases + electron-updater）。
+   *
+   * ⚠️ 这条路线的固有代价：**发版时 latest.yml、安装包、.blockmap 三个文件
+   *    必须同时传上 Release**。少传 latest.yml，所有客户端都会"静默收不到
+   *    更新"，而且在你本地完全看不出异常。tools/verify-release.js 会逐个自检。
+   *
+   * autoDownload 默认关：安装包 114MB，不打招呼就下会占带宽。打开它才是
+   * 真正的"零操作"——发现新版本→自动下载→退出应用时装上。 */
+  update: {
+    enabled: true,           // 启动后自动检查新版本
+    autoDownload: false,     // 发现新版本后直接下载，不先问
+    delaySec: 12,            // 启动后延迟多少秒再检查（别和启动初始化抢）
+    skippedVersion: ''       // 用户点过"跳过这个版本"的版本号
+  },
+  /* 角色名字。空字符串表示「用默认名」（下面 DEFAULT_NAME）。
+   *
+   * ⚠️ 刻意不写死成 'default' 之类的哨兵值：老配置文件里没有这个键，
+   *    逐段合并后读出来就是 undefined，空字符串和 undefined 都能落到
+   *    默认名这条分支上，不需要额外迁移逻辑。 */
+  name: '',
+  /* 人设分项（界面上可编辑）。键名见 PERSONA_PARTS，**留空即用默认**。
+   * 空对象是初始状态，不是"没配置" —— 逐段合并会保住它。 */
+  personaParts: {},
+  /* 整段人设覆盖。**保留给老用户与高级用法**：非空时它的优先级
+   * 高于 personaParts（见 resolvePersona）。界面上不直接暴露这个字段，
+   * 但「打开配置文件」还能改它。 */
+  persona: ''
+};
+
+// 情绪标签协议：让模型在回复末尾自带一个 [emo:xxx]，
+// 渲染层解析出来驱动 Live2D 表情，解析后会把标签从气泡文本里剥掉。
+const EMOTION_TAGS = ['calm', 'happy', 'smile', 'think', 'shy', 'serious', 'surprised', 'sleepy'];
+
+/* 默认角色名。三处硬编码（托盘提示 / 窗口标题 / 人设自称）都读它 ——
+ * 想换默认名只需改这一行。 */
+const DEFAULT_NAME = '阿岩';
+
+/* ══════════════════════════════════════════════════════════
+ *  人设分项槽位 —— 界面与渲染**共用这一份定义**
+ * ══════════════════════════════════════════════════════════
+ *
+ * 这是人设文案的**唯一真相**。原先另有一份 `buildDefaultPersona()`
+ * 把同样的句子抄了一遍，两处一旦不同步就会出现"界面上显示的默认值
+ * 与实际生效的不一致"——那种 bug 从界面上完全看不出来。已删除。
+ *
+ * 每项的 `def` 是它的默认文案（函数形式，因为"身份"那句要插名字）。
+ * 用户在界面上留空 = 用 `def`；填了 = 用用户填的。
+ *
+ * ⚠️ `key` 是配置里的键名，改名等于破坏用户已存配置，别动。
+ * ⚠️ 数组顺序 = 拼进 system prompt 的顺序（见 buildPersonaFromParts）。
+ *    调整顺序会让行为语义漂移，尤其是把带 [emo:xxx] 的项往前挪。
+ * ⚠️ `hint` 会显示在界面上，写给用户看的，别写实现细节。
+ * ⚠️ `tech: true` 的项属于功能性约束，界面要标注"改错会影响表情"。
+ */
+const PERSONA_PARTS = [
+  {
+    key: 'identity',
+    label: '身份定位',
+    hint: '它是谁、在哪儿、不是什么',
+    def: (name) => `你叫${name}，是常驻在这台电脑里的搭子。不是客服，不是待办清单执行器。`
+  },
+  {
+    key: 'style',
+    label: '说话风格',
+    hint: '语气、态度、口头习惯',
+    def: () => '说话干脆、直接、有主见。不说"好问题"这类客套，不铺垫"我很乐意帮你"。'
+  },
+  {
+    key: 'method',
+    label: '回答方式',
+    hint: '怎么组织答案、遇到不确定怎么办',
+    def: () => [
+      '先给结论，再给理由。看到不合理的方案直接说"这个不行"，然后给替代方案。',
+      '拿不准的事就说不确定，绝不编造。承认错误不丢人。'
+    ].join('\n')
+  },
+  {
+    key: 'extra',
+    label: '补充要求',
+    hint: '任何额外想让它遵守的事',
+    def: () => ''
+  },
+  {
+    key: 'format',
+    label: '输出格式约束',
+    hint: '泡泡显示的字数、禁用 markdown 等',
+    def: () => '技术话题上较真，日常闲聊放松。你正以桌面宠物的形态和主人对话，回答要简短——通常两三句话，适合显示在气泡里。不要用 markdown 列表和代码块。'
+  },
+  {
+    key: 'emotion',
+    label: '表情协议',
+    hint: '驱动 Live2D 表情的 [emo:xxx] 格式，改错会没表情',
+    tech: true,
+    def: () => [
+      '你有一张会动的脸，所以情绪要说出来。每次回复的最末尾，另起一行写上 [emo:xxx]，',
+      `xxx 只能从这几个词里选一个：${EMOTION_TAGS.join(' / ')}。`,
+      '这个词不会显示给主人看，只用来控制你的表情，按你这句话真实的语气挑就行。'
+    ].join('\n')
+  }
+];
+
+/* 名字的最终取值：用户设过就用用户的，否则用默认。
+ *
+ * 两件事一起做：
+ *   1) trim —— 输入框里手滑多敲一个空格，「阿岩 」和「阿岩」在人设里
+ *      就是两个不同的字符串，模型会照着带空格的那份自称。
+ *   2) 空值兜底 —— 空字符串和 undefined 都落到默认名上。
+ *
+ * ⚠️ 放在 PERSONA_PARTS 的那几个函数**之前**：它们都调它，虽然函数声明
+ *    会提升、顺序在运行时无所谓，但按依赖顺序写读起来不容易看漏。 */
+function resolveName(cfg) {
+  const n = String(cfg?.name ?? '').trim();
+  return n || DEFAULT_NAME;
+}
+
+/* 每个槽位的默认文案（按当前名字渲染）。界面用它做 placeholder / 重置。 */
+function personaPartDefaults(cfg) {
+  const name = resolveName(cfg);
+  const out = {};
+  for (const p of PERSONA_PARTS) out[p.key] = p.def(name);
+  return out;
+}
+
+/* 把「分项配置 + 整段覆盖」合成最终人设。
+ *
+ * 优先级（从高到低）：
+ *   1) cfg.persona 非空 —— 老用户的整段覆盖，**必须保留**，
+ *      否则他们之前手写的人设会被分项版本悄悄顶掉；
+ *   2) 分项（personaParts）逐项按需覆盖默认；
+ *   3) 全默认。
+ *
+ * ⚠️ 空槽位不产生空行 —— 拼接前要 filter，否则 system prompt 里会
+ *    插进一串空白，模型偶尔会把它当成"要求留白"。 */
+function buildPersonaFromParts(cfg) {
+  const parts = cfg?.personaParts || {};
+  const name = resolveName(cfg);
+  const lines = [];
+  for (const p of PERSONA_PARTS) {
+    const custom = String(parts[p.key] ?? '').trim();
+    const text = custom || p.def(name);
+    if (text) lines.push(text);
+  }
+  return lines.join('\n');
+}
+
+/* 分项是否全部为空（= 用户没动过任何一项）。界面用它判断"是否处于自定义状态"。 */
+function hasCustomParts(cfg) {
+  const parts = cfg?.personaParts || {};
+  return PERSONA_PARTS.some((p) => String(parts[p.key] ?? '').trim() !== '');
+}
+
+/* 按当前配置渲染出人设。
+ *
+ * 优先级：整段自定义 persona > 分项覆盖 > 全默认。
+ * 三条路径都必须在**同一个函数**里走，否则会出现「改了某一项但人设没跟着变」
+ * 的半生效状态 —— 这是这套东西最容易出的错。 */
+function resolvePersona(cfg) {
+  const custom = String(cfg?.persona ?? '').trim();
+  return custom || buildPersonaFromParts(cfg);
+}
+
+/* 配置损坏只在首次发现时处理（备份 + 报错）一次。
+ * loadConfig 在一次运行里会被调很多次，不加这个标志就把同一份坏文件
+ * 反复写 .bak、反复刷日志。 */
+let cfgCorruptHandled = false;
+
+/* 读配置。
+ * ⚠️ 必须**逐段合并**而不是整对象覆盖：老的 config.json 里没有新加的段落
+ *    （appearance / motion / interaction …），如果直接 { ...base, ...parsed }，
+ *    用户配置里**存在**的那一段会整体替换掉默认值，导致该段后续新增的默认键
+ *    全部丢失（比如给 tts 加了新键，老用户的 tts 里没有 → 读出来就是 undefined）。
+ *    所以对象型字段一律逐键合并。 */
+function loadConfig() {
+  const base = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+  const cfgPath = getConfigPath();
+
+  /* 读文件失败分三种，处理方式必须不同 —— 一律 return base 是很危险的：
+   * 只要这次读失败，**下一次任何落盘（改大小、拖窗口、patchConfig）都会把
+   * 默认值整份写回**，用户的设置就这么永久没了，而且全程不报错。
+   * 这是全项目唯一会静默丢用户数据的路径。 */
+  let raw = null;
+  try {
+    raw = fs.readFileSync(cfgPath, 'utf8');
+  } catch (err) {
+    // a) ENOENT：首次运行，正常，用默认值
+    // b) EACCES / EPERM / EBUSY / EMFILE 等：环境有问题，不该当成"没配过"
+    if (err && err.code !== 'ENOENT') {
+      console.error('[config] 读不了配置文件（不是首次运行）：', err.code || err.message, cfgPath);
+    }
+    return base;
+  }
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    /* 文件损坏（断电写一半 / 手工编辑写错）。这时候更要命：如果直接回退默认值，
+     * 下一次落盘就把原文件覆盖了，用户再也找不回来。
+     * 先把**原始内容**另存成 .bak —— 坏文件本身留着没用，但它上面可能还有
+     * 用户能手工救回的信息，覆盖掉就彻底没了。 */
+    if (!cfgCorruptHandled) {
+      cfgCorruptHandled = true;
+      try {
+        const bak = `${cfgPath}.bak`;
+        fs.writeFileSync(bak, raw);
+        console.error('[config] 配置解析失败，原文已备份：', bak, '|', err.message);
+      } catch (err2) {
+        console.error('[config] 配置解析失败，且备份也失败：', err.message, '|', err2.message);
+      }
+    }
+    return base;
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return base;
+
+  const out = { ...base, ...parsed };
+  for (const key of Object.keys(base)) {
+    const def = base[key];
+    if (!def || typeof def !== 'object' || Array.isArray(def)) continue;
+    const cur = parsed[key];
+    out[key] = { ...def, ...(cur && typeof cur === 'object' && !Array.isArray(cur) ? cur : {}) };
+  }
+  return out;
+}
+
+function saveConfig(cfg) {
+  try {
+    fs.mkdirSync(app.getPath('userData'), { recursive: true });
+    fs.writeFileSync(getConfigPath(), JSON.stringify(cfg, null, 2), 'utf8');
+    return true;
+  } catch (err) {
+    console.error('[config] save failed:', err);
+    return false;
+  }
+}
+
+module.exports = {
+  LIMITS,
+  NAME_LIMITS,
+  getConfigPath,
+  DEFAULT_CONFIG,
+  DEFAULT_NAME,
+  EMOTION_TAGS,
+  PERSONA_PARTS,
+  personaPartDefaults,
+  buildPersonaFromParts,
+  hasCustomParts,
+  resolveName,
+  resolvePersona,
+  loadConfig,
+  saveConfig
+};

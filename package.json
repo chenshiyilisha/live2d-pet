@@ -1,0 +1,32 @@
+{
+  "name": "live2d-pet",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ayan - a Live2D desktop pet",
+  "author": "chenshiyilisha",
+  "license": "MIT",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "icon": "node tools/make-tray-icon.js && node tools/make-app-icon.js",
+    "stage": "node tools/prepare-stage.js",
+    "build": "node tools/prepare-stage.js && node tools/build-installer.js",
+    "models": "node tools/make-models-zip.js",
+    "accept": "node debug/acceptance.js",
+    "release-check": "node tools/verify-release.js"
+  },
+  "dependencies": {
+    "@naari3/pixi-live2d-display": "^1.2.5",
+    "electron-updater": "^6.8.9",
+    "pixi.js": "^8.22.0"
+  },
+  "devDependencies": {
+    "electron": "^44.7.0",
+    "electron-builder": "^26.15.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron"
+    ]
+  }
+}

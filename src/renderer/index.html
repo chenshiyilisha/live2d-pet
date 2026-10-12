@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>阿岩</title>
+<link rel="stylesheet" href="./style.css">
+
+<!--
+  用 import map 把裸模块名映射到本地 ESM 产物。源码里这些文件在 node_modules 下，
+  进安装包后目录被改名为 vendor/（见 tools/prepare-stage.js），该脚本会把下面的
+  /node_modules/ 前缀一起改写。开发版读的就是这份文件，路径保持不变。
+
+  页面由主进程的本地 http 服务加载（见 src/main/server.js），同源，ESM 不会被 CORS 拦截。
+-->
+<script type="importmap">
+{
+  "imports": {
+    "pixi.js": "/node_modules/pixi.js/dist/pixi.mjs",
+    "@naari3/pixi-live2d-display/cubism5": "/node_modules/@naari3/pixi-live2d-display/dist/cubism5.es.js"
+  }
+}
+</script>
+
+<!-- Cubism 运行时必须早于渲染库就位，它会挂在 window.Live2DCubismCore 上 -->
+<script src="/src/assets/live2dcubismcore.min.js"></script>
+</head>
+<body>
+
+  <div id="stage">
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <div id="bubble" class="hidden">
+    <div id="bubble-text"></div>
+  </div>
+
+  <div id="composer" class="hidden">
+    <input id="input" type="text" placeholder="说点什么…" autocomplete="off" spellcheck="false">
+    <button id="mic" title="按住说话（离线识别）" aria-label="语音输入">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="9" y="2" width="6" height="11" rx="3"/>
+        <path d="M5 10a7 7 0 0 0 14 0"/>
+        <path d="M12 17v4"/>
+        <path d="M8 21h8"/>
+      </svg>
+    </button>
+    <button id="send" title="发送">↵</button>
+  </div>
+
+  <div id="status"></div>
+
+  <!-- 系统状态悬浮小字（托盘里开启后才显示） -->
+  <div id="stats" class="hidden"></div>
+
+  <script type="module" src="./pet.js"></script>
+</body>
+</html>

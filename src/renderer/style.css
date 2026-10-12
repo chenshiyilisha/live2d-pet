@@ -1,0 +1,183 @@
+/* 整页透明：桌宠的全部视觉都来自 canvas 和悬浮的 UI 层 */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+
+/* 舞台铺满窗口，canvas 承载 Live2D。
+ * canvas 比窗口大（layout() 设成窗口的 ZOOM 倍），靠 left/top 推走、
+ * 这里 overflow:hidden 把窗口外面的部分裁掉。
+ * 不要给 canvas 写 width/height —— pixi 的 autoDensity 会写入内联尺寸。 */
+#stage {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+#canvas { display: block; position: absolute; left: 0; top: 0; }
+
+/* ---------------- 气泡 ----------------
+ * 半身取景下角色是「头顶贴窗口顶部」，气泡放上面会糊住脸，
+ * 所以固定在输入条上方 —— 只挡到人到腰那一段，脸始终露着。 */
+#bubble {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 66px;
+  max-height: 150px;
+  padding: 12px 15px;
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid #d8dee6;
+  border-radius: 14px;
+  box-shadow: 0 6px 22px rgba(20, 30, 45, 0.16);
+  font-size: 13.5px;
+  line-height: 1.62;
+  color: #1f2328;
+  overflow-y: auto;
+  pointer-events: auto;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+#bubble::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -8px;
+  width: 14px;
+  height: 14px;
+  margin-left: -7px;
+  background: rgba(255, 255, 255, 0.97);
+  border-left: 1px solid #d8dee6;
+  border-top: 1px solid #d8dee6;
+  transform: rotate(45deg);
+}
+#bubble.hidden {
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+}
+
+/* 等待首字时的呼吸提示 */
+#bubble.waiting #bubble-text::after {
+  content: "…";
+  animation: blink 1.1s steps(4, end) infinite;
+}
+@keyframes blink { 0%, 60% { opacity: 1; } 61%, 100% { opacity: 0.2; } }
+
+/* ---------------- 输入条 ---------------- */
+#composer {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 14px;
+  display: flex;
+  gap: 8px;
+  padding: 8px 9px;
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid #d8dee6;
+  border-radius: 13px;
+  box-shadow: 0 6px 22px rgba(20, 30, 45, 0.16);
+  pointer-events: auto;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+#composer.hidden {
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+}
+#input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 13.5px;
+  color: #1f2328;
+  font-family: inherit;
+  padding: 5px 3px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+#input::placeholder { color: #9aa4af; }
+#send {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: #0f6e56;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+#send:hover { background: #0d5c48; }
+#send:active { background: #0a4a3a; }
+
+/* ---------------- 语音输入按钮（按住说话） ----------------
+ * 录音期间变红并呼吸，给一个明确的"正在听"信号。 */
+#mic {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: #eef2f6;
+  color: #475569;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+#mic:hover { background: #e2e8f0; }
+#mic.recording {
+  background: #dc2626;
+  color: #fff;
+  animation: micPulse 1s ease-in-out infinite;
+}
+@keyframes micPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+/* ---------------- 状态提示（左下角小字，仅异常时出现） ---------------- */
+#status {
+  position: absolute;
+  left: 14px;
+  bottom: 4px;
+  font-size: 11.5px;
+  color: #b45309;
+  background: rgba(253, 243, 231, 0.95);
+  border: 1px solid #f2d9b8;
+  border-radius: 6px;
+  padding: 2px 7px;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+  pointer-events: none;
+  max-width: calc(100% - 28px);
+}
+#status.show { opacity: 1; }
+
+/* ---------------- 系统状态悬浮小字（可选，默认关） ----------------
+ * 放左上角而不是右上角：半身取景下头顶在中间偏上，右上角容易糊住呆毛。 */
+#stats {
+  position: absolute;
+  left: 10px;
+  top: 8px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: #334155;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  border-radius: 7px;
+  padding: 3px 8px;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+  white-space: pre;
+  opacity: 1;
+  transition: opacity 0.25s ease;
+}
+#stats.hidden { opacity: 0; }

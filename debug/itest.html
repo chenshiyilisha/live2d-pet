@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>itest</title>
+<style>body{font:13px/1.6 Consolas,monospace;background:#111;color:#ddd;margin:0;padding:10px}</style>
+</head>
+<body>
+<pre id="out"></pre>
+<script>
+/* 新功能的集成自检页（只在 PET_ENTRY=debug/itest.html 时被加载）。
+ * 它不渲染任何模型，纯粹把所有新加的 IPC 通道挨个调一遍，
+ * 把结果打到 console（主进程会转发到终端日志）。
+ * 全程只读 + 用完即还原，不改用户配置。 */
+const out = document.getElementById('out');
+const lines = [];
+let pass = 0, fail = 0;
+const say = (s) => { lines.push(s); out.textContent = lines.join('\n'); };
+const ok = (name, cond, extra) => {
+  (cond ? pass++ : fail++);
+  say(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra !== undefined ? '  ' + extra : ''}`);
+};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const J = (v) => { try { return JSON.stringify(v); } catch { return String(v); } };
+
+(async () => {
+  const pet = window.pet;
+  say('=== itest start ===');
+  if (!pet) { say('FATAL: window.pet 不存在'); return; }
+
+  /* ---- 0) 配置结构：新段必须都在（验证逐段合并没丢键）---- */
+  const cfg = await pet.getConfig();
+  say('config: ' + J(cfg));
+  for (const k of ['appearance', 'motion', 'interaction', 'monitor', 'reminder', 'asr', 'hotkeys']) {
+    ok(`config.${k} 存在`, cfg[k] && typeof cfg[k] === 'object', J(cfg[k]));
+  }
+
+  /* ---- 1) 系统状态 ---- */
+  const st = await pet.queryStats();
+  ok('monitor:query ok', st?.ok === true);
+  ok('stats 含 cpu/mem/disk', typeof st?.stats?.cpu === 'number' && !!(st?.stats?.mem && st?.stats?.disk),
+     J(st?.stats?.cpu) + ' ' + J(st?.stats?.mem) + ' ' + J(st?.stats?.disk));
+  ok('stats 含电池/网速实际速率', !!st?.stats?.battery && typeof st?.stats?.net?.down === 'number',
+     'battery=' + J(st?.stats?.battery) + ' net=' + J(st?.stats?.net));
+  ok('文本里带上了 CPU 与网速', /CPU \d+%/.test(String(st?.text)) && /网速|B\/s/.test(String(st?.text)),
+     J(String(st?.text).replace(/\n/g, ' | ')));
+  say('  text: ' + String(st?.text).replace(/\n/g, ' | '));
+
+  /* ---- 2) 定时提醒 ---- */
+  const before = await pet.listReminders();
+  ok('reminder:list 可用', Array.isArray(before?.reminders), J(before?.reminders?.length));
+  const fired = [];
+  pet.on('pet:remind', (p) => { fired.push(p); say('  >> pet:remind ' + J(p)); });
+  // 0.03 分钟 = 1.8 秒
+  const ar = await pet.addReminder(0.03, '自检提醒', 'reminder');
+  ok('reminder:add 返回 at', ar?.ok === true && typeof ar.at === 'number', J(ar));
+  const after = await pet.listReminders();
+  ok('reminder:list 多了一条', after.reminders.length === before.reminders.length + 1);
+  await sleep(3200);
+  ok('提醒到点触发了 pet:remind', fired.length >= 1, 'count=' + fired.length);
+
+  /* ---- 3) 番茄钟 ---- */
+  const ps = await pet.startPomodoro(0.05, 0.05);   // 3 秒工作 → 3 秒休息
+  ok('pomodoro:start 返回 status', ps?.ok === true && !!ps.status, J(ps?.status));
+  const st1 = await pet.listReminders();
+  ok('listReminders 里能看到番茄钟', !!st1?.pomodoro, J(st1?.pomodoro));
+  await sleep(4200);
+  ok('番茄钟工作段到点播报', fired.length >= 2, 'count=' + fired.length);
+  const sp = await pet.stopPomodoro();
+  ok('pomodoro:stop ok', sp?.ok === true, J(sp));
+
+  /* ---- 4) 本地意图层（不联网）---- */
+  const chunks = [];
+  pet.onChunk((t) => chunks.push(t));
+  const c1 = await pet.chat([{ role: 'user', content: '现在 cpu 和内存占用怎么样' }]);
+  ok('本地意图命中（系统状态）', c1?.local === true, J(c1));
+  const got = chunks.join('');
+  ok('chat:chunk 收到了本地回复', got.length > 0, J(got.slice(0, 60)));
+
+  chunks.length = 0;
+  const c2 = await pet.chat([{ role: 'user', content: '10 分钟后提醒我喝水' }]);
+  ok('本地意图命中（建提醒）', c2?.local === true, J(c2));
+  const lst2 = await pet.listReminders();
+  ok('10 分钟提醒已登记', (lst2.reminders || []).some((r) => /喝水/.test(r.text)), J(lst2.reminders));
+
+  chunks.length = 0;
+  const c3 = await pet.chat([{ role: 'user', content: '取消提醒' }]);
+  ok('本地意图命中（清提醒）', c3?.local === true, J(c3));
+  const lst3 = await pet.listReminders();
+  ok('提醒已清空', (lst3.reminders || []).length === 0, 'len=' + lst3.reminders.length);
+
+  /* 未命中的句子必须交回大模型（apiKey 空 → 应报错而不是当成本地命中） */
+  const c4 = await pet.chat([{ role: 'user', content: '今天天气真好，你在做什么呀' }]);
+  ok('未命中时透传给 LLM', c4?.local !== true, J(String(c4?.error || '').slice(0, 40)));
+
+  /* ---- 5) 外观开关（改完立刻还原）---- */
+  const setRes = await pet.setConfig({ appearance: { opacity: 0.88 } });
+  ok('config:set 落盘成功', setRes === true, J(setRes));
+  const cfg2 = await pet.getConfig();
+  ok('appearance.opacity 生效', cfg2?.appearance?.opacity === 0.88, J(cfg2?.appearance));
+  ok('其他段没被整段覆盖', cfg2?.interaction && cfg2?.motion && cfg2?.hotkeys);
+  await pet.setConfig({ appearance: { opacity: 1 } });
+  const cfg3 = await pet.getConfig();
+  ok('appearance.opacity 已还原', cfg3?.appearance?.opacity === 1, J(cfg3?.appearance));
+  await pet.clearReminders();
+
+  say(`=== itest done  pass=${pass} fail=${fail} ===`);
+  console.log(`[itest] done pass=${pass} fail=${fail}`);
+  console.log('[itest] ' + lines.join('\n[itest] '));
+})().catch((e) => {
+  console.log('[itest] EXCEPTION ' + (e && e.stack || e));
+  say('EXCEPTION ' + (e && e.stack || e));
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+# 开发模式（electron.exe .）下的更新源配置。
+#
+# electron-updater 默认拒绝在未打包的应用里检查更新，除非打开
+# forceDevUpdateConfig（见 src/main/updater.js 的 wire()），此时它会来读
+# 这个文件而不是 resources/app-update.yml。
+#
+# 打包版用的是构建时由 tools/build-installer.js 的 publish 段生成的
+# app-update.yml，与本文件内容同源。改这里的话记得两边一致。
+provider: github
+owner: chenshiyilisha
+repo: live2d-pet

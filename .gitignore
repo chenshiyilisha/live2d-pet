@@ -1,0 +1,41 @@
+# 依赖：476MB，绝不进库
+node_modules/
+
+# Live2D Cubism Core —— 专有软件，不随本仓库分发。
+# 协议里属 "Redistributable Code"，但官方文档写得很明白：
+#   "In accordance with the Live2D Proprietary Software License Agreement,
+#    Cubism Core is not published on GitHub."
+# 运行时由 src/main/server.js 从官方 CDN 取回（详见 README 的第三方声明）。
+# 本地开发时把文件放回 src/assets/ 即可离线使用，它不会被提交。
+src/assets/live2dcubismcore.min.js
+
+# Live2D 模型素材（Hiyori / Haru，65 文件 9 MB）—— 版权归 Live2D Inc.，
+# 不随本仓库分发。放在 Release 的 models.zip 里（tools/make-models-zip.js 生成）。
+# 本地开发时解压到 src/assets/ 即可，与 Cubism Core 同理它不会被提交。
+src/assets/models/
+
+# 调试运行的产物 —— 日志与截图都是可再生的。
+# ⚠️ debug/ 下的 .js / .sh / .html 是**可复用的验证工具**（tray-dump.js、
+#    itest.html、probe.sh、driver*.js …），不能一起 ignore 掉。
+debug/*.log
+debug/*.png
+# 这几类是探针跑出来的**数据快照**，含本机绝对路径（C:\Users\...），
+# 既不可复用也没必要公开。
+debug/*.txt
+debug/*.svg
+debug/*.json
+
+# 打包 / 构建输出
+dist/
+out/
+build/
+
+# WorkBuddy 工作区数据：每日记忆文件与备份，属本机私有内容
+.workbuddy/
+
+# 编辑器与系统杂物
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini

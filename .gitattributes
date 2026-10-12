@@ -1,0 +1,14 @@
+# 统一跨平台换行行为：仓库内一律 LF，检出时按下述规则转换
+* text=auto
+
+# Windows 批处理必须 CRLF，否则 cmd.exe 对多行脚本可能解析异常
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# shell 脚本必须 LF —— Git Bash 跑带 CRLF 的 .sh 会在行尾报 "\r: command not found"
+*.sh text eol=lf
+
+# 二进制资产，明确禁止任何换行转换（text=auto 一般也能识别，写死更稳）
+*.png binary
+*.moc3 binary
+*.wav binary

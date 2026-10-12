@@ -944,6 +944,12 @@ function headPadPx(H) {
 // 取景想要「显示到哪」—— 全身的 55% 处（腰际）。改大 = 露更多腿、人物显小。
 const SHOW_FRACTION = 0.55;
 
+/* 舞台底部预留的"呼吸位"（CSS px）：人物下沿与舞台底边（= 底座上沿）之间留的空。
+ * 取景定义的那条 55% 线正好等于舞台高，所以不留白的话人直接贴到底座上。
+ * 实测留 8px 时只剩 1px 透明缝（人下沿 y=472、底座顶边 y=474，1.5× 像素），
+ * 太挤；14px 给出约 5px 的干净缝隙。见 layout() 里 H 的算法。 */
+const STATS_GAP = 14;
+
 /* 实测标定值（本机 DPR 1.5 下量出，换模型/换屏幕缩放都要重标）
  *
  * 画布坐标 → 窗口坐标的实测关系（**仅对模型墨水整体有效，别用来推单个参数点**）：
@@ -962,7 +968,14 @@ let petRect = { x: 0, y: 0, w: 0, h: 0 };
 function layout() {
   if (!app || !model || !holder) return;
   const W = stageEl.clientWidth;
-  const H = stageEl.clientHeight;
+  /* 舞台高再让出一条"呼吸位"（STATS_GAP），别让人物的下沿正好贴在底边上。
+   * 取景的定义是「显示到全身的 55%（腰际）」，那条线**正好落在舞台底边**；
+   * 舞台上方又有 #stats 底座时，底座上沿离底边还有几 px，#stage 又是
+   * bottom: --stats-h 让出来的 —— 两边加起来，人物下沿会正好压到底座上沿。
+   * 让出 STATS_GAP 之后人站在底座上方、留一线空白，视觉上才像"站在台子上"。
+   * ⚠️ 没开底座时（--stats-h = 0）这 14px 是纯底部留白，人物略小于从前一丁点，
+   *    属可接受的代价 —— 不区分开关状态能少一条分支、也少一处不一致。 */
+  const H = stageEl.clientHeight - STATS_GAP;
   if (!W || !H) return;
 
   // ---- 0) 画布尺寸以模型真值为准（Haru 2400x4500，Hiyori 不同）----
@@ -985,16 +998,20 @@ function layout() {
   const s = (vh / CANVAS_H) * PET_SCALE;
   holder.scale.set(s);
 
-  // ---- 3) 平移：把**模型墨水的真实顶部**对到 HEAD_PAD、水平中心对到窗口中心 ----
+  // ---- 3) 平移：把**模型墨水的真实顶部**对到 HEAD_PAD、身体中心对到窗口中心 ----
   // 关系式是 window = canvas内坐标 + CANVAS_OFF（CANVAS_OFF 就是 canvas 的 left/top，
   // 1:1 生效，实测斜率 1.0）。而「canvas 内坐标」由上面那组实测几何给出：
   //     墨水顶部 canvas内 y = vh×INK_TOP_C_RATIO + INK_TOP_K × s   ← 第一项随画布高走
-  //     墨水中心 canvas内 x = INK_CX_K × s                          ← 水平方向是纯比例
+  //     身体中心 canvas内 x = INK_CX_K × s                          ← 水平方向是纯比例
   // 于是：
   //     y: HEAD_PAD     = (vh×INK_TOP_C_RATIO + INK_TOP_K×s) + CANVAS_OFF.y
   //     x: W/2 + 2      = INK_CX_K×s + CANVAS_OFF.x
   // 末尾那个 +2 是标定时量到的光学修正（人物实际中心比窗口中心右偏 2px），沿用它。
   // holder/model 的 position 对 Cubism 绘制无效、别去调，平移只走 canvas 的 left/top。
+  //
+  // ⚠️ INK_CX_K 是**身体中心线**，不是墨水包围盒中心（2026-10-12 修）。
+  //    原先用的是包围盒中心，而日和的长发偏在一侧、包围盒中心 ≠ 视觉中心，
+  //    结果人物整体偏左约 37px（底座居中、人物不居中）。详见 params.js 的模型表。
   const HEAD_PAD = headPadPx(H);
   const INK_TOP_C = vh * INK_TOP_C_RATIO;   // 随画布高现算，不能写死（见模型表的坑）
   CANVAS_OFF.x = (W / 2 + 2) - INK_CX_K * s;
@@ -1005,8 +1022,15 @@ function layout() {
   // ---- 4) 角色在窗口里的矩形（鼠标穿透判定用）----
   // 用实测墨水的宽高，比旧的 BODY 矩形准（旧值偏小、水平还偏右 48px，
   // 结果点头顶那一片会被判成"非角色"而穿透）。
+  //
+  // ⚠️ 中心写成 `INK_CX_K*s + CANVAS_OFF.x` 而不是 `W/2+2`：
+  //    两者数学上**恒等**（因为 CANVAS_OFF.x 就是按 (W/2+2) − INK_CX_K*s 解出来的），
+  //    但这么写让「命中矩形锚在人物实际落点上」这件事一眼可见 —— 2026-10-12 改
+  //    INK_CX_K 标定值时，中间的 canvas 偏移量变了一个大数，若沿用字面 W/2+2
+  //    会让人怀疑矩形没跟着动。用同一条式子的两面表达，就永远不会脱节。
+  const bodyCx = INK_CX_K * s + CANVAS_OFF.x;         // 身体中心在窗口里的 x（≡ W/2+2）
   petRect = {
-    x: (W / 2 + 2) - (INK_W / 2) * s,
+    x: bodyCx - (INK_W / 2) * s,
     y: HEAD_PAD,
     w: INK_W * s,
     h: Math.min(H - HEAD_PAD, INK_H * s)
@@ -1373,8 +1397,14 @@ window.pet?.onConfigChanged?.(async () => {
     hasApiKey = !!cfg?.llm?.apiKey;
     // 大小也可能是在配置里改的，跟着同步一次
     setUserScale(cfg?.appearance?.scale);
-    layout();
-    if (wasFloating && cfg?.monitor?.floating !== true) statsEl?.classList.add('hidden');
+    /* 关掉悬浮显示时，除了藏底座还得把让出去的那条高度还回来 ——
+     * 否则舞台一直矮着，人物白缩一圈（setStatsReserve 内部会重排 layout）。 */
+    if (wasFloating && cfg?.monitor?.floating !== true) {
+      statsEl?.classList.add('hidden');
+      setStatsReserve(0);
+    } else {
+      layout();
+    }
   } catch { /* ignore */ }
   pokeIdleTimer();
 });
@@ -1585,18 +1615,122 @@ window.pet?.on?.('pet:wander-end', () => { setEmotion('calm'); });
 // 系统状态悬浮显示
 window.pet?.on?.('monitor:stats', (s) => renderStats(s));
 
+/* 底座上每个指标的显示规格：CPU / 内存 / GPU / 温度。
+ *
+ * ⚠️ 不放图标：12px 的描边图标在这个尺寸下认不出是什么，反而把一行撑宽撑高。
+ *    纯文字 + 分级配色信息密度更高，底座也更矮 ——
+ *    半身取景下每一像素的底座高度都是从人物身上让出来的。 */
+const STAT_ITEMS = [
+  { key: 'cpu',  label: 'CPU',  get: (s) => (typeof s.cpu === 'number' ? `${s.cpu}%` : null),           pct: (s) => s.cpu },
+  { key: 'mem',  label: '内存', get: (s) => (s.mem ? `${s.mem.percent}%` : null),                        pct: (s) => s.mem?.percent },
+  { key: 'gpu',  label: 'GPU',  get: (s) => (typeof s.gpu === 'number' ? `${s.gpu}%` : null),           pct: (s) => s.gpu },
+  /* 温度：**标签写「温度」**，不能写「GPU」—— 它紧跟在「GPU 45%」后面，
+   * 写成 "GPU 48°C" 读起来是"GPU 又 48"，纯属重复。
+   * ⚠️ 也不能不消歧：系统监视语境里「温度」默认指 CPU，用户第一反应是
+   *    "不对，应该有七八十度" —— 实际这是**独显核心温度**，待机就 ~48℃
+   *    （满载才 75~85℃，目标上限 87℃）。数值对、歧义在含义上。
+   * → 靠橙色（区别于三条负载%）+ title 全文说明消歧。 */
+  { key: 'temp', label: '温度', get: (s) => (typeof s.tempC === 'number' ? `${s.tempC}°C` : null),
+    cls: 'temp', hint: '独显（GPU）核心温度' }
+];
+
+/* 把 0–100 的负载映射成 CSS 的 data-level（样式见 style.css）。
+ * 中性不给值 —— 平时不抢眼，偏高才变琥珀/红。 */
+function levelOf(pct) {
+  if (typeof pct !== 'number') return '';
+  if (pct >= 90) return 'hot';
+  if (pct >= 75) return 'warn';
+  return '';
+}
+
+/* 底部"底座"上那行系统状态：CPU / 内存 / GPU / 温度，**固定排成 2 行 × 2 列**。
+ *
+ * ⚠️ 每一项单独判存在，拿不到就**整项不画**，不能画成 0 或 "--"：
+ *    GPU 占用要两枪才能求差（见 sysinfo 的 gpuStatus），冷启动第一帧没有
+ *    基线；温度只有装了 NVIDIA 显卡才有来源。0% 和"取不到"看着是一回事，
+ *    但前者是假数据。
+ *
+ * ⚠️ 按「每行两个」显式切块，不让 flex-wrap 自己折：
+ *    自动折行位置由文案宽度决定（"温度 50°C" 比 "CPU 12%" 宽），
+ *    排出来是 3+1 这种不均衡的样子；显式切块才是稳定的 2+2。
+ *    行内每格宽度由 CSS 的 --stats-col 定死（见 style.css），两行左右对齐。
+ * ⚠️ 若某一项在个别机器上取不到（比如没有独显 → 没有温度项），
+ *    剩下的按每行两个照样排，不会出现空占位 —— 少一项只是少一格，不留 "--"。 */
 function renderStats(s) {
   if (!statsEl) return;
   if (cfg?.monitor?.floating !== true || !s) {
     statsEl.classList.add('hidden');
+    setStatsReserve(0);
     return;
   }
-  const lines = [];
-  if (typeof s.cpu === 'number') lines.push(`CPU  ${s.cpu}%`);
-  if (s.mem) lines.push(`内存 ${s.mem.percent}%`);
-  if (s.battery) lines.push(`电量 ${s.battery.percent}%${s.battery.charging ? ' ⚡' : ''}`);
-  statsEl.textContent = lines.join('\n');
-  statsEl.classList.toggle('hidden', lines.length === 0);
+
+  const items = STAT_ITEMS
+    .map((spec) => ({ spec, value: spec.get(s) }))
+    .filter((it) => it.value !== null);
+
+  const buildItem = ({ spec, value }) => {
+    const item = document.createElement('span');
+    item.className = spec.cls ? `item ${spec.cls}` : 'item';
+    /* ⚠️ pct 是可选的（温度项没有"负载百分比"这个概念，也就没有分级）。
+     *    早期版本写成 spec.pct(s) 直接调 —— 温度那一项没有这个方法，
+     *    每次都抛 "spec.pct is not a function"，整条底座因此永远画不出来，
+     *    表现是「底座一直是空的」，而不是报错浮上来。 */
+    const level = spec.pct ? levelOf(spec.pct(s)) : '';
+    if (level) item.dataset.level = level;
+    if (spec.hint) item.title = spec.hint;
+
+    const lbl = document.createElement('span');
+    lbl.className = 'lbl';
+    lbl.textContent = spec.label;
+
+    const val = document.createElement('span');
+    val.className = 'val';
+    val.textContent = value;
+
+    item.append(lbl, val);
+    return item;
+  };
+
+  // 每两个一组排成一行 → 2 行 × 2 列；整块包在 .plate 里（那块可见的"牌"）
+  const plate = document.createElement('div');
+  plate.className = 'plate';
+  for (let i = 0; i < items.length; i += 2) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.append(buildItem(items[i]));
+    if (items[i + 1]) row.append(buildItem(items[i + 1]));
+    plate.append(row);
+  }
+
+  statsEl.replaceChildren(plate);
+  statsEl.classList.toggle('hidden', items.length === 0);
+  setStatsReserve(items.length === 0 ? 0 : measureStatsReserve());
+}
+
+/* 底座实际占掉的高度（含它自己距下沿的 4px 留白），写进 --stats-h。
+ *
+ * ⚠️ 量的是内层 **.plate**（可见的那块牌），不是外层 #stats ——
+ *    外层是撑满宽度的定位容器，它的高度虽然此刻恰好等于 .plate，
+ *    但那是"因为外层是单行 flex + align-items:flex-end"才成立的巧合。
+ *    直接量 .plate 才是量的"底座真正占了多少地方"，不依赖那层巧合。
+ * ⚠️ 必须**先显示、再量** —— 量一个 opacity:0 的元素拿到的 rect 是对的
+ *    （opacity 不参与布局），所以这里能直接量。但量完要立刻把舞台让出来，
+ *    否则 canvas 矮下去后底座可能折行（更宽/更高）→ 下一帧再调一次收敛，
+ *    所以用量完的同一值回写、不递归。 */
+function measureStatsReserve() {
+  const el = statsEl.querySelector('.plate') || statsEl;
+  const h = Math.ceil(el.getBoundingClientRect().height);
+  return Math.max(0, h) + 4;   // +4 是底座与窗口下沿的间距（style.css 里 bottom: 4px）
+}
+
+let statsReserve = 0;
+function setStatsReserve(px) {
+  const v = Math.max(0, Math.round(px));
+  if (v === statsReserve) return;
+  statsReserve = v;
+  document.body.style.setProperty('--stats-h', `${v}px`);
+  // 舞台变矮 → canvas 尺寸变 → 必须让 layout() 重算取景（否则人物还按旧窗口排）
+  layout();
 }
 
 /* ============================================================

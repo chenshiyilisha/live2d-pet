@@ -10,15 +10,28 @@ html, body {
   -webkit-user-select: none;
   user-select: none;
   cursor: default;
+  /* 底部底座给舞台让出的高度。0 = 没开悬浮显示，行为与以前完全一致；
+   * 开启后由 renderStats 量出底座真实高度写进来（见 style.css 的 #stats 一节）。 */
+  --stats-h: 0px;
 }
 
 /* 舞台铺满窗口，canvas 承载 Live2D。
  * canvas 比窗口大（layout() 设成窗口的 ZOOM 倍），靠 left/top 推走、
  * 这里 overflow:hidden 把窗口外面的部分裁掉。
- * 不要给 canvas 写 width/height —— pixi 的 autoDensity 会写入内联尺寸。 */
+ * 不要给 canvas 写 width/height —— pixi 的 autoDensity 会写入内联尺寸。
+ *
+ * ⚠️ 底部要给 #stats 底座让出一条（--stats-h），见下面「底座」那一节：
+ *    半身取景的墨水下沿正好落在窗口底（实测 hiyori 的 55% 处 = 窗高 - 0.6px），
+ *    底座压上去必然糊住裙子/腿。让 #stage 矮一条、canvas 跟着矮，
+ *    layout() 的 vh = clientHeight×ZOOM 会自动把人物整体缩小一圈，
+ *    人物与底座就各占各的、不再叠。
+ *    ⚠️ --stats-h 为 0 时（没开悬浮显示）行为与以前**完全一致**。 */
 #stage {
   position: absolute;
-  inset: 0;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: var(--stats-h, 0px);
   overflow: hidden;
 }
 #canvas { display: block; position: absolute; left: 0; top: 0; }
@@ -143,11 +156,14 @@ html, body {
 }
 @keyframes micPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 
-/* ---------------- 状态提示（左下角小字，仅异常时出现） ---------------- */
+/* ---------------- 状态提示（左下角小字，仅异常时出现） ----------------
+ * ⚠️ bottom 要让开底部那条 #stats 底座。两者共用 --stats-h 这一个量：
+ *    没开底座时它是 0，这里就是 6px；开了底座（renderStats 量出高度写进去）
+ *    这里自动抬到底座上面，不会压在状态条上。只改一个很难发现，别漏。 */
 #status {
   position: absolute;
   left: 14px;
-  bottom: 4px;
+  bottom: calc(var(--stats-h, 0px) + 6px);
   font-size: 11.5px;
   color: #b45309;
   background: rgba(253, 243, 231, 0.95);
@@ -161,23 +177,125 @@ html, body {
 }
 #status.show { opacity: 1; }
 
-/* ---------------- 系统状态悬浮小字（可选，默认关） ----------------
- * 放左上角而不是右上角：半身取景下头顶在中间偏上，右上角容易糊住呆毛。 */
+/* ---------------- 系统状态：窗口底部的"底座"（可选，默认关） ----------------
+ *
+ * 压在窗口最下沿、横向铺开，像底座上的铭牌。
+ *
+ * ⚠️ **不许压在人物身上**（用户明确要求）：
+ *    半身取景下人物一直画到窗口底（hiyori 的腰际 y = 窗高 - 0.6px，实测），
+ *    底座直接压上去就是糊在裙子上。所以改法不是"把底座挪一挪"，而是
+ *    **让舞台让出一条**：body.stats-on 时把 --stats-h 设成底座的实际高度，
+ *    #stage 的 bottom 就是它，canvas 随之变矮 → layout() 里
+ *    vh = clientHeight × ZOOM 也跟着变小 → 人物等比缩小一圈、底边正好停在
+ *    底座上沿。两边各占各的，怎么改窗口尺寸都不打架。
+ *
+ * 🔴 高度必须**实测**（renderStats 里 setStatsReserve），不能写死：
+ *    窗口宽 = 高 × 0.889，小屏兜底高度 240 时只有 213px 宽，四个数一行放不下
+ *    会折成两行 —— 写死一个数字，窄窗下要么留白过大、要么还是叠上。
+ *
+ * ⚠️ 与 #status 抢同一块地方：两者平时都不可见，只有同时出现才看得出撞。
+ *    #status 的 bottom 用的是同一个 --stats-h，跟着一起让（见下面那条）。 */
 #stats {
   position: absolute;
+  /* ⚠️ 这里必须是**定宽**的定位容器 —— 不能自己 shrink-to-fit。
+   *    绝对定位元素收缩包裹时，flex 容器算固有宽度只取**最宽的单个 item**，
+   *    会让每个 item 各占一行（实测塌成 4 行）。所以分两层：
+   *    外层 #stats 定宽垫底、负责定位与高度测量，
+   *    内层 .plate 才是看得见的那块牌，由它 shrink-to-fit 出"窄牌"。
+   *    这样既拿到窄牌，又不踩收缩包裹的坑（.plate 内部是定宽行，不折行）。 */
   left: 10px;
-  top: 8px;
+  right: 10px;
+  /* 底部留白从 6px 收到 4px —— 底座能矮一点是一点（用户要求"短一点"）。
+   * ⚠️ 这个值同时是 measureStatsReserve() 里 +4 的那一项，改这里要同步改
+   *    pet.js，否则舞台让出的高度和底座实际占的高度对不上。见那条注释。 */
+  bottom: 4px;
+  /* 外层只负责居中 + 暴露高度给 measureStatsReserve()：
+   * 不画任何背景/边框/padding，否则"牌"又会变成满宽的一条。 */
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
   font-size: 11px;
-  line-height: 1.55;
+  line-height: 1.2;
   color: #334155;
-  background: rgba(255, 255, 255, 0.88);
-  border: 1px solid rgba(148, 163, 184, 0.5);
-  border-radius: 7px;
-  padding: 3px 8px;
   pointer-events: none;
   font-variant-numeric: tabular-nums;
-  white-space: pre;
   opacity: 1;
   transition: opacity 0.25s ease;
 }
 #stats.hidden { opacity: 0; }
+
+/* 看得见的那块"牌"：宽度收缩到内容（用户要求"窄一点"）。
+ * 固定 2 行 × 2 列（用户要求）—— 用「两行 + 每行两个」的显式结构，
+ * 不靠 flex-wrap 的自动折行（自动折行位置会随文案宽度漂移，排出来是 3+1）。 */
+#stats .plate {
+  /* 每个指标格的**固定列宽**。这是"牌能收缩包裹"的前提：
+   * 收缩包裹的容器里用百分比宽度没有确定基准（会退化成按内容宽、两行对不齐），
+   * 所以列宽写死。取的是最宽那个指标的宽度（"温度 50°C"/"内存 100%"
+   * 这一档，11px 字号实测约 66px），再留 1px 抗字体差异。
+   * ⚠️ 改字号就要跟着改这个值，否则长的那一项会被裁。 */
+  --stats-col: 67px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  /* 铭牌质感：极淡的上下渐变 + 一层柔光阴影，比纯白块像"一块东西" */
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(246, 249, 252, 0.9));
+  border: 1px solid rgba(148, 163, 184, 0.42);
+  border-radius: 9px;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.07),
+    0 3px 10px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  /* 横向 padding 收到 6px：牌本身已经窄了，左右各留一点呼吸位就够。
+   * ⚠️ 纵向仍是 1px：牌每高 1px，人物就等比缩一点（见上面的 --stats-h）。 */
+  padding: 1px 6px;
+}
+
+/* 一行：固定放两个指标，两行合成 2×2。
+ * 每格宽度由 --stats-col 定死，所以两行左右严格对齐 —— 与"哪一项文字更长"无关。 */
+#stats .row {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+}
+
+/* 单个指标：标签 + 数值挤成一组（不放图标 —— 12px 的图标认不出是哪个硬件，
+ * 只把这一行撑宽撑高，得不偿失）。 */
+#stats .item {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 3px;
+  white-space: nowrap;
+  /* 固定列宽（不是 50% —— 收缩包裹下百分比没有确定基准），居中排 */
+  flex: 0 0 var(--stats-col);
+  padding: 0;
+}
+
+/* 指标之间**不放分隔点**（用户要求）—— 两列各占一半、靠间距分开就够了，
+ * 加圆点反而让这一行显得碎。靠 .item 的 padding 留白区分。 */
+
+/* 标签（CPU / 内存 / GPU / 温度）淡一点，数值才是主角 */
+#stats .lbl {
+  color: #64748b;
+  letter-spacing: 0.2px;
+}
+
+/* 数值：等宽 + 略加重，右对齐（数字跳动时宽度不抖） */
+#stats .val {
+  color: #1e293b;
+  font-weight: 600;
+  min-width: 2.4em;
+  text-align: right;
+}
+
+/* 按负载分级上色 —— 只在"偏高"时才给颜色，平时是中性深灰，
+ * 一路红到底反而没有信息量。阈值与系统监视的常规观感对齐：
+ *   ≥90 红（该管管了）／≥75 琥珀（留意）／其余中性。 */
+#stats .item[data-level="warn"] .val { color: #b45309; }
+#stats .item[data-level="hot"] .val { color: #dc2626; }
+
+/* 温度项专门用暖色（它是"温度"不是"负载%"，语义不同） */
+#stats .item.temp .lbl { color: #ea580c; }
+#stats .item.temp .val { color: #ea580c; }

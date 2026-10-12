@@ -386,13 +386,63 @@ export function attachSnapProbes(live) {
     }, 4000);
   }
 
+  /* 诊断：底座（#stats）布局自检（?snap=bar）
+   *
+   * 为什么要单独验：底座要等第一条 monitor:stats 推送才出现，而那条推送依赖
+   * GPU 两枪基线（~9s）。默认的 ?snap=1 截图在 2.6s 就拍了，那时底座还没出来，
+   * 拍到的是一张"没有底座"的图 —— 看图会误判成"底座没生效"。
+   * 这里等到 14s（底座必然已出）再打 DOM 几何 + 拍图。
+   *
+   * 打的是**实测框**（getBoundingClientRect）与**舞台高**的对照：
+   * 舞台高 + --stats-h 应恰好等于窗口内容高，否则预留算错了。 */
+  if (new URLSearchParams(location.search).get('snap') === 'bar') {
+    setTimeout(async () => {
+      const el = document.getElementById('stats');
+      const plate = el?.querySelector('.plate');
+      const stage = live.stageEl;
+      const cs = plate ? getComputedStyle(plate) : null;
+      const reserve = getComputedStyle(document.body).getPropertyValue('--stats-h').trim();
+      const boxOf = (node) => { const b = node.getBoundingClientRect();
+        return [Math.round(b.x), Math.round(b.y), Math.round(b.width), Math.round(b.height)]; };
+      console.log('[pet] bar', JSON.stringify({
+        exists: !!el,
+        hidden: el?.classList.contains('hidden'),
+        items: [...(el?.querySelectorAll('.item') || [])].map((it) => ({
+          cls: it.className,
+          level: it.dataset.level || null,
+          text: it.textContent,
+          box: boxOf(it),
+          svg: !!it.querySelector('svg')
+        })),
+        /* 外层是撑满的定位容器，内层 .plate 才是看得见的牌 —— 两个都打，
+         * 才能看出"牌"有没有真的比容器窄。 */
+        outerBox: el ? boxOf(el) : null,
+        plateBox: plate ? boxOf(plate) : null,
+        platePadOnFull: plate && el
+          ? Math.round((el.getBoundingClientRect().width - plate.getBoundingClientRect().width) * 10) / 10
+          : null,
+        barBg: cs?.backgroundImage?.slice(0, 40) || cs?.backgroundColor,
+        barRadius: cs?.borderRadius,
+        reserve,
+        bodyH: document.body.clientHeight,
+        stageH: stage.clientHeight,
+        /* 恒等式是 **stageH = bodyH − reserve**（#stage 的 bottom 就是 --stats-h）。
+         * ⚠️ STATS_GAP 不在这里 —— 它是 layout() 内部从 stageH 再扣的取景留白，
+         *    不进 CSS 布局。早期版本把它也算进来，恒等式永远不成立（假报警）。 */
+        sumOk: Math.abs(stage.clientHeight - (document.body.clientHeight - parseFloat(reserve || 0))) < 2
+      }));
+      const sw = await window.pet?.saveShot?.('bar');
+      console.log('[pet] bar shot', JSON.stringify({ ink: sw?.ink, size: sw?.size }));
+    }, 14000);
+  }
+
   // 自检通道：带 ?snap=1 启动时触发一次窗口截图落盘（PET_SNAPSHOT=1）。
   // 走主进程 capturePage 而不是 pixi 的 extract —— Cubism 渲染时会改动
   // UNPACK_FLIP_Y_WEBGL 等全局 GL 状态，用 RenderTexture 导出会上下颠倒。
   // seam 是长时间纯观测通道，不做截图：capturePage 本身会引入卡顿，污染数据。
   // ink 自己也截图，这里要排除掉，否则会互相覆盖同一个 PNG。
   if (new URLSearchParams(location.search).has('snap') &&
-      !['seam', 'ink', 'look', 'hit'].includes(new URLSearchParams(location.search).get('snap'))) {
+      !['seam', 'ink', 'look', 'hit', 'bar'].includes(new URLSearchParams(location.search).get('snap'))) {
     const sweep = async (name) => {
       await new Promise((r) => setTimeout(r, 380));
       const sw = await window.pet?.saveShot?.(name);

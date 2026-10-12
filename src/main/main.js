@@ -40,7 +40,7 @@ const {
   resolveName, resolvePersona, loadConfig, saveConfig
 } = require('./config');
 const { startLocalServer } = require('./server');
-const { collectStats, formatStats } = require('./sysinfo');
+const { collectStats, formatStats, HUD_FIELDS, FULL_FIELDS } = require('./sysinfo');
 const { recognizeWav } = require('./speech');
 const { streamLLM, createStreamFilter } = require('./llm');
 const {
@@ -364,20 +364,42 @@ function syncAppearance() {
 
 /* ---- 悬浮显示：按配置定期把状态推给渲染层 ---- */
 let statsTimer = null;
+let statsGen = 0;   // 每次重排自增；旧的一轮循环靠它对不上号就自动退出
 
 function refreshStatsTimer() {
-  if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+  if (statsTimer) { clearTimeout(statsTimer); statsTimer = null; }
+  const gen = ++statsGen;
   const cfg = loadConfig();
   if (!cfg.monitor?.floating) return;
 
+  const ms = clamp(Number(cfg.monitor?.intervalMs) || 3000, 1000, 30000);
+
+  /* ⚠️ 用「跑完再排下一次」的自调度，**不要用 setInterval(push, ms)**。
+   *    踩过的坑：`push` 是异步的，一次要 ~1s（冷启动那次要 ~3.6s，因为 GPU
+   *    没有基线要补第二枪）。setInterval 到点就发、不管上一枪跑没跑完，
+   *    于是冷启动时第一枪还没结束，第二枪就叠上来了 —— 两次采样挨得太近
+   *    （< GPU_WIN_MIN 800ms），第二枪的 GPU 判成 'bad-window' 被丢掉，
+   *    表现就是「CPU/内存/温度都在，唯独 GPU 少了那一帧、下一帧才出现」。
+   *    改成自调度后，两枪之间必然隔着完整的间隔，不再互相踩基线。
+   * ⚠️ 用 generation 号而不是 `statsTimer === null` 判断"我是否被取消"：
+   *    重排会把 statsTimer 立刻赋成新值，旧循环等 push 回来后看到它非 null，
+   *    会以为自己还该活着 → 两个循环并存。gen 对不上就直接退出，干净。 */
+  const tick = async () => {
+    if (gen !== statsGen) return;
+    await push();
+    if (gen !== statsGen) return;          // push 期间被重排/关掉了 → 不再续
+    statsTimer = setTimeout(tick, ms);
+  };
+
   const push = async () => {
     if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return;
-    const s = await collectStats(true);
+    /* 只要悬浮小字真正画的那几项 —— 电量与网速不在这里显示，
+     * 取了就是每 3 秒白烧 2.5 秒的 PowerShell（网卡统计在本机很慢）。 */
+    const s = await collectStats(HUD_FIELDS);
     try { mainWindow.webContents.send('monitor:stats', s); } catch { /* ignore */ }
   };
-  push();
-  const ms = clamp(Number(cfg.monitor?.intervalMs) || 3000, 1000, 30000);
-  statsTimer = setInterval(push, ms);
+
+  statsTimer = setTimeout(tick, 0);
 }
 
 /* ============================================================
@@ -1147,7 +1169,10 @@ function buildMenuTemplate() {
  * 所以在这里先拦一道，命中就地回答；没命中才交给 streamLLM。
  */
 
-const RE_STATS = /(\bcpu\b|处理器|内存|占用率|磁盘|硬盘|[cC]\s*盘|网速|带宽|电量|电池|系统状态|电脑.{0,4}(怎么样|状态|还好))/;
+/* ⚠️ 温度这一类必须和主体绑在一起写（"电脑热不热"、"显卡温度多少"），
+ * 【不能】光留一个「温度」—— 否则"明天温度多少"这种问天气的会被拦下来
+ * 用显卡温度回答，答非所问。加 i 是为了 CPU / GPU 大写写法也能命中。 */
+const RE_STATS = /(\bcpu\b|\bgpu\b|处理器|显卡|内存|占用率|磁盘|硬盘|c\s*盘|网速|带宽|电量|电池|系统状态|电脑.{0,4}(怎么样|状态|还好)|(cpu|gpu|显卡|电脑|机器|机子).{0,4}(温度|发热|烫|热))/i;
 const RE_POMO_STOP = /(停|关掉|关|结束|取消).{0,4}(番茄|专注)/;
 const RE_POMO_START = /(开始|来个|开个|启动|进入).{0,4}(番茄|专注)/;
 const RE_REMIND_CLEAR = /(取消|清除|清空).{0,6}(提醒|闹钟)/;
@@ -1238,7 +1263,7 @@ async function tryLocalIntent(text) {
 
   // 4) 系统状态（放最后 —— 它最宽泛，前面几个更具体）
   if (RE_STATS.test(q)) {
-    const s = await collectStats(true);
+    const s = await collectStats(FULL_FIELDS);
     return emitLocal(formatStats(s), 'calm');
   }
 
@@ -1401,7 +1426,7 @@ function registerIpc() {
 
   /* ---- 系统状态 ---- */
   ipcMain.handle('monitor:query', async () => {
-    const s = await collectStats(true);
+    const s = await collectStats(FULL_FIELDS);
     return { ok: true, stats: s, text: formatStats(s) };
   });
 

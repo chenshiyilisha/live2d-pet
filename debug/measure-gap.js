@@ -1,4 +1,4 @@
-/* 量「人物」和「底座牌」各自的左右范围（CSS px），用来核对内容右靠量。
+/* 量「人物」和「底座牌」各自的左右范围（CSS px），用来核对居中 / 对齐。
  *
  * 为什么不能直接用 ?snap=ink 的 ink 包围盒：那个是**整窗**的，而底座牌比人物宽
  * （牌 147、人物约 100），左右边就变成牌的边，测不出人物在哪 —— 测出来的
@@ -9,9 +9,8 @@
  *   1) 先生成一张窗口截图（PET_SNAPSHOT=bar 会在 14s 存 debug/pet-bar.png）
  *   2) ./node_modules/electron/dist/electron.exe debug/measure-gap.js debug/pet-bar.png
  *
- * 对当前布局的期望值（窗口 308×344，DPR 1.5）：
- *   plate.cssX1 ≈ 283（= 窗宽 308 − CONTENT_RIGHT_PAD 24）
- *   chara.cssX1 ≈ 258（人物右边缘离窗口右边约 50）
+ * 对当前布局的期望值（窗口 308×344，DPR 1.5；2026-10-12 晚起人物与牌都恒居中）：
+ *   两者中心都应落在窗宽一半附近（±2px 光学修正），左右各留约 80px。
  */
 const { app, nativeImage } = require('electron');
 

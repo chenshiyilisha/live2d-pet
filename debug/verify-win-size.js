@@ -1,21 +1,20 @@
 'use strict';
-/* 窗口宽度「常驻窄 / 说话时宽」的验收脚本。
+/* 窗口宽度「固定为对话框那一档」的验收脚本。
  *
- * 背景：宽度原先由一条比例定死（高 × 8/9），于是窗口右边站着人、左边空着
- * 135px；现在宽度由**内容**决定 —— 渲染层算好报给主进程，主进程只负责落成
- * setBounds（并且钉住右边缘）。这条链路上有几件事**在界面上看不出来**，
- * 只能量：
+ * 演变史：宽度原先由比例定死（高 × 8/9）→ 人物站右边、左边空 135px；
+ * 2026-10-12 上午改成「内容决定宽度」（常驻窄、对话宽）→ 点一下输入条窗口
+ * 就伸缩一次、人物跟着挪；当晚用户定稿："可以根据对话框固定位置大小，
+ * 不需要点击后再调整" → **恒 ≥ 对话框那一档（TALK_W）**，宽度只在换模型 /
+ * 改缩放 / 开关底座时可能变，对话开关不动窗口分毫。
+ *
+ * 这条链路上有几件事**在界面上看不出来**，只能量：
  *
  *   1) 主进程到底怎么采纳渲染层报的宽度（含夹取、非法值、以及"报过之后粘住"）；
- *   2) 常驻宽必须装得下底座牌（148px）—— 装不下就是把牌裁掉，
- *      而"牌被裁掉"看起来只是"牌有点靠左"；
- *   3) 对话宽必须给够气泡 / 输入条要的宽度 —— 给不够就是把聊天框挤窄，
- *      这条最容易在"顺手把窗口调小一点"时被破坏；
- *   4) 常驻宽必须 ≥ 196，否则内容会从「离右边固定 96px」掉进「在窗口里居中」，
- *      切换宽窄时人物会挪一两像素；
- *   5) 常驻宽必须真的**小于**对话宽 —— 否则这功能等于没做。注意这只在
- *      「内容本身没气泡宽」时该成立：墨水宽 ≥ 260 的人本来就得占满气泡那一档，
- *      那时常驻 == 对话是**正确**行为，不该判失败。
+ *   2) 宽度必须装得下底座牌（148px）—— 装不下就是把牌裁掉；
+ *   3) 宽度必须给够气泡 / 输入条要的宽度 —— 给不够就是把聊天框挤窄；
+ *   4) ⚠️ 关键：宽度算式**不得依赖对话态** —— 算式里再出现 talking /
+ *      bubble / composer 就是把"点击后调整"加了回来；
+ *   5) 平时宽度必须**正好**等于 TALK_W（不多不少）：多了又回到"左边白占一片"。
  *
  * ⚠️ pet.js 里的常量与算式是**从源码里切出来的**，不是手抄的：手抄副本一脱节，
  *    这里量出来的宽度就是假的（同 tray-dump.js 切 LIMITS 的做法）。
@@ -82,8 +81,8 @@ const expectH = Math.round(work.height * 0.375);
 check(ws.SIZE.h === expectH, `首帧高度 = 可用高 × 0.375 = ${expectH}（本机 912 → 342）`);
 check(ws.SIZE.w === 320, `渲染层还没报数时用首帧占位宽（${ws.SIZE.w}）`);
 
-/* 报一个真实值 */
-const idle = 198;
+/* 报一个真实值（对话框那一档的宽度） */
+const idle = 308;
 check(ws.applyStageWidth(idle) === idle && ws.SIZE.w === idle,
   `采纳渲染层报的宽度（${idle}）`);
 check(ws.SIZE.h === expectH, '只改宽度，高度不动');
@@ -129,7 +128,6 @@ const exprConst = (name, scope) => {
 };
 
 const PLATE_HALF = numConst('PLATE_HALF');
-const CONTENT_RIGHT_PAD = numConst('CONTENT_RIGHT_PAD');
 const CONTENT_PAD = numConst('CONTENT_PAD');
 const TALK_W = exprConst('TALK_W', {
   BUBBLE_W: numConst('BUBBLE_W'),
@@ -147,61 +145,61 @@ const CONTENT_W_EXPR = pick(/const contentW = ([^;]+);/, 'syncStageWidth 里的 
 const WANT_EXPR = pick(/const want = Math\.round\(([^;]+)\);/, 'syncStageWidth 里的 want');
 
 /* 给定"人物墨水宽"，算出渲染层会上报的窗口宽 */
-function expectWidth(inkW, talking) {
+function expectWidth(inkW) {
   const contentW = new Function('petRect', 'PLATE_HALF', 'CONTENT_PAD',
     'return (' + CONTENT_W_EXPR + ');')({ w: inkW }, PLATE_HALF, CONTENT_PAD);
-  return Math.round(new Function('contentW', 'talking', 'TALK_W',
-    'return (' + WANT_EXPR + ');')(contentW, talking, TALK_W));
+  return Math.round(new Function('contentW', 'TALK_W',
+    'return (' + WANT_EXPR + ');')(contentW, TALK_W));
 }
 
 console.log('\n══════ 2. 渲染层：宽度算式与几条硬性不变量 ══════\n');
 
 const plateW = PLATE_HALF * 2;
-/* 「一直走右靠那一支」的阈值：SHIFT = max(0, W/2 − PLATE_HALF − CONTENT_RIGHT_PAD)
- * 要 > 0，就得 W ≥ 2×(PLATE_HALF + CONTENT_RIGHT_PAD)。 */
-const anchorMin = 2 * (PLATE_HALF + CONTENT_RIGHT_PAD);
-/* 内容放得下气泡的临界墨水宽：再宽下去窗口本来就得跟气泡一样宽，收窄无从谈起。 */
-const narrowUpTo = TALK_W - CONTENT_PAD * 2;
+/* 内容放得下气泡的临界墨水宽：再宽下去窗口才需要比对气泡那一档更宽。 */
+const growFrom = TALK_W - CONTENT_PAD * 2;
 
 console.log(`  切出来的常量：底座牌 ${plateW}px · 内容两侧留白 ${CONTENT_PAD}px · ` +
-            `气泡 / 输入条需要的宽度 ${TALK_W}px`);
-console.log(`  右靠阈值：${anchorMin}px　收窄临界墨水宽：${narrowUpTo}px\n`);
+            `对话框那一档宽 ${TALK_W}px\n`);
 
 /* 墨水宽取一串值扫过去：不变量该对**任何**墨水宽都成立，而不是只对本机那一档。
  * 本机实测（?snap=bar）是 150px。 */
 const INK_SAMPLES = [80, 120, 148, 150, 180, 260, 400];
 
-let fitFail = 0, talkFail = 0, orderFail = 0, narrowFail = 0, anchorFail = 0;
+let fitFail = 0, dialogFail = 0, exactFail = 0, growFail = 0;
 const rows = [];
 for (const ink of INK_SAMPLES) {
-  const idleW = expectWidth(ink, false);
-  const talkW = expectWidth(ink, true);
-  rows.push([ink, idleW, talkW, idleW - plateW]);
-  if (idleW < plateW + CONTENT_PAD * 2) fitFail++;      // 底座牌会被裁
-  if (talkW < TALK_W) talkFail++;                       // 聊天框会被挤窄
-  if (talkW < idleW) orderFail++;                       // 说话反而变窄
-  if (idleW < anchorMin) anchorFail++;                  // 掉出右靠分支
-  /* 「收窄」只在**内容本身没气泡宽**时才谈得上：
-   * 墨水宽 ≥ 260 的人（或用户把缩放拉得很大）本来就得占满 TALK_W，
-   * 那时常驻 == 对话是正确行为，不是没收窄。 */
-  if (ink < narrowUpTo && idleW >= talkW) narrowFail++;
+  const w = expectWidth(ink);
+  rows.push([ink, w, w - TALK_W]);
+  if (w < plateW + CONTENT_PAD * 2) fitFail++;          // 底座牌会被裁
+  if (w < TALK_W) dialogFail++;                         // 聊天框会被挤窄
+  if (ink < growFrom && w !== TALK_W) exactFail++;      // 平时该正好是 TALK_W
+  if (ink >= growFrom && w !== ink + CONTENT_PAD * 2) growFail++;  // 放不下才变宽
 }
 
-console.log('  墨水宽 →  常驻宽 / 对话宽（内容两侧合计留白）');
-for (const [ink, i, t, pad] of rows) {
-  console.log(`    ${String(ink).padStart(3)} →  ${String(i).padStart(4)} / ${String(t).padStart(4)}   （${pad}px）`);
+/* ⚠️ 关键（源码级断言）：宽度算式不得依赖对话态 ——
+ * 「点开输入条窗口不伸缩」是这套固定宽度的全部意义，
+ * 算式里再出现 talking / bubble / composer 就是把"点击后调整"加了回来。 */
+const talkCoupled = /talking|bubble|composer/i.test(CONTENT_W_EXPR + ' ' + WANT_EXPR);
+
+console.log('  人物墨水宽 →  窗口宽（相对对话框档位的差）');
+for (const [ink, w, d] of rows) {
+  console.log(`    ${String(ink).padStart(3)} →  ${String(w).padStart(4)}   （${d >= 0 ? '+' : ''}${d}px）`);
 }
 console.log('');
 
-check(fitFail === 0, `常驻宽恒 ≥ 底座牌 ${plateW} + 两侧 ${CONTENT_PAD}（牌不会被窗口裁掉）`);
-check(talkFail === 0, `对话宽恒 ≥ ${TALK_W}（气泡 / 输入条不会被挤窄）`);
-check(orderFail === 0, '对话宽恒 ≥ 常驻宽（不会「一说话窗口反而变窄」）');
-check(narrowFail === 0,
-  `墨水宽 < ${narrowUpTo} 时对话宽恒 > 常驻宽（确实收窄了，否则这功能等于没做）`);
-check(anchorFail === 0,
-  `⚠️ 关键：常驻宽恒 ≥ ${anchorMin} —— 一直走右靠那一支（` +
-  `人物中心距窗口右边固定 ${PLATE_HALF + CONTENT_RIGHT_PAD - 2}px），` +
-  '切换宽窄时她一个像素都不动。低于这个值会掉进「在窗口里居中」，切换时挪窝');
+check(fitFail === 0, `宽度恒 ≥ 底座牌 ${plateW} + 两侧 ${CONTENT_PAD}（牌不会被窗口裁掉）`);
+check(dialogFail === 0, `宽度恒 ≥ ${TALK_W}（气泡 / 输入条不会被挤窄）`);
+check(exactFail === 0,
+  `墨水宽 < ${growFrom} 时宽度恒**正好** = ${TALK_W}（不多不少，多了又是"左边白占一片"）`);
+check(growFail === 0,
+  `墨水宽 ≥ ${growFrom}（大模型 / 大缩放）时宽度 = 墨水宽 + 两侧留白（放不下才变宽）`);
+check(!talkCoupled,
+  '⚠️ 关键：宽度算式不依赖对话态 —— 点开 / 收起输入条窗口一个像素都不动');
+/* 人物恒居中是 layout() 的事（要跑起来才量得到，见 ?snap=ui 实拍），
+ * 这里能拦的是右靠机制的回流：CSS 变量与常量都不该再出现。 */
+check(!/content-shift|contentShift|CONTENT_RIGHT_PAD/.test(PET_SRC) &&
+      !/content-shift/.test(read('src/renderer/style.css')),
+  '⚠️ 关键：已移除的「内容右靠」机制没有回流（--content-shift / CONTENT_RIGHT_PAD）');
 
 console.log('\n════════════════════════════════════════');
 if (failures) {

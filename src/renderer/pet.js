@@ -733,12 +733,10 @@ async function boot() {
       if (state === State.IDLE) {
         model.focus(pointer.x, pointer.y, { instant: false });
       } else if (state === State.LISTENING || state === State.THINKING) {
-        /* 「正前方」= 人物身体中心，**不是窗口中心**：人物右靠了 contentShift 像素
-         * （见 PLATE_HALF 那段），继续用 w/2 她就会一直微微偏左看。
-         * 这里坐标在 canvas 缓冲里，所以要把 CSS 的偏移乘回 ZOOM。
-         * ⚠️ 闲时的 focus(pointer.x, pointer.y) 不用改 —— 光标和人物在同一套坐标里，
-         *    相对位置自动是对的。 */
-        model.focus(w / 2 + contentShift * ZOOM, h * 0.35, { instant: false });
+        /* 「正前方」= 人物身体中心 = 窗口中心（人物恒居中，+2 光学修正可忽略）。
+         * 闲时的 focus(pointer.x, pointer.y) 不用改 —— 光标和人物在同一套坐标里，
+         * 相对位置自动是对的。 */
+        model.focus(w / 2, h * 0.35, { instant: false });
       }
     }
   }, null, PIXI.UPDATE_PRIORITY.LOW);
@@ -968,40 +966,19 @@ const SHOW_FRACTION = 0.55;
  * 太挤；14px 给出约 5px 的干净缝隙。见 layout() 里 H 的算法。 */
 const STATS_GAP = 14;
 
-/* 内容整体右靠（人物与底座牌**一起**移）。
- *
- * 为什么需要：窗口宽度是由气泡和输入条决定的（两者 left/right:14 铺满窗口，
- * 收起输入条时又是 280px 的对话气泡在用），而人物只占窗口中间约 100px。
- * 窗口本身是**全透明**的，「人在窗口里居中」这件事用户根本看不见 ——
- * 他看见的只有「人离屏幕右边缘还有多远」。实测（窗口 308 宽、屏 1707）：
- * 人物右边缘离窗口右边 106px、底座牌 80px，加上贴边留白一共 120+px 的空白，
- * 视觉上就是"她没站在右下角"。
- *
- * 取值方式：让**底座牌的右边缘**离窗口右边 CONTENT_RIGHT_PAD 像素 ——
- * 用"离右边的距离"而不是"往右挪多少"，是因为牌的宽度是固定的 CSS 值、
- * 不跟屏幕缩放走，前者在任何窗口宽度下都成立。
- *
- * ⚠️ PLATE_HALF 是量出来的：牌宽 = 2×--stats-col(67) + 左右 padding 12 + 边框 2
- *    = 148，半宽 74。改 style.css 的 --stats-col 要跟着改这里。
- *    它只影响"shift 取多少"，**不影响人物与牌的对齐** —— 两者是各自按同一个
- *    shift 摆的（人物在这里，牌在 CSS 的 padding-left），所以牌变宽变窄都不会
- *    让人物偏出牌心。
- * ⚠️ 窗口窄到放不下时 shift 会被压到 0（见 layout 里的 max(0, …)），
- *    宁可不动，也不把牌推出窗口右边被裁掉。 */
+/* 底座牌的半宽。牌宽 = 2×--stats-col(67) + 左右 padding 12 + 边框 2 = 148，
+ * 半宽 74。改 style.css 的 --stats-col 要跟着改这里。
+ * 用途只剩一个：syncStageWidth 里给窗口宽度托底（内容再少也不能比牌窄）。
+ * （2026-10-12 起「内容右靠」机制已移除 —— 用户改要求人物恒居中、
+ *  窗口固定为对话框那一档宽，见 syncStageWidth 那段。） */
 const PLATE_HALF = 74;
-const CONTENT_RIGHT_PAD = 24;
 
-/* 窗口宽度由这几个量决定（算法在 syncStageWidth）：
- *   · 常驻：max(人物墨水宽, 底座牌宽) + 左右各 CONTENT_PAD
- *   · 气泡 / 输入条露出来时：再取 max(…, BUBBLE_W + 2×UI_PAD)
- * 于是平时窗口只包住人物与底座（左边不再白占一大片），一说话就撑开。
- * 两个都是固定 px 的 UI（字号 13.5、圆角、内边距都不跟屏幕缩放走），
- * 所以「对话宽」这一档不乘屏幕比例 —— 换显示器，聊天框该多宽还是多宽。
- * ⚠️ CONTENT_PAD 取 24 不是随手定的：常驻宽 = max(墨水宽, 底座牌 148) + 2×24
- *    **恒 ≥ 196**，而 196 正是 layout 里 `SHIFT = max(0, W/2 − PLATE_HALF −
- *    CONTENT_RIGHT_PAD)` 从 0 转正的阈值 —— 保证常驻这一档也落在「离窗口右边
- *    固定 96px」的分支上，于是切换宽窄时人物**一个像素都不动**（低于 196 会
- *    掉进"在窗口里居中"那一支，两种档位下她会差个一两 px）。
+/* 窗口宽度固定为「对话框那一档」（2026-10-12，用户："可以根据对话框固定位置
+ * 大小，不需要点击后再调整"）：
+ *   宽 = max( 人物墨水宽, 底座牌宽 ) + 左右各 CONTENT_PAD，**再对齐到 ≥ TALK_W**。
+ * 也就是：平时就顶着气泡 / 输入条需要的宽度（两者 left/right:14 铺满窗口），
+ * 点开 / 收起输入条**宽度一字不变** → 人物、底座、气泡全都不挪窝；
+ * 只有换模型 / 改缩放（人物墨水变宽）时窗口才跟着变宽。
  * ⚠️ BUBBLE_W / UI_PAD 对应 style.css 里 #bubble / #composer 的
  *    left:14 / right:14，改那边要跟着改这里（同 PLATE_HALF 与 --stats-col 的关系）。 */
 const CONTENT_PAD = 24;
@@ -1023,11 +1000,6 @@ let CANVAS_OFF = { x: -97.8, y: -378 };
 let MAP = { x: 0, y: 0 };   // 保留：历史上用来记插件 viewport 的固定偏置，实测恒为 0
 
 let petRect = { x: 0, y: 0, w: 0, h: 0 };
-
-/* 内容整体右靠量（CSS px），由 layout() 现算写入（取值理由见 PLATE_HALF 那段）。
- * 存成模块级是因为除了 layout() 自己，**「聆听时抬头看用户」那处也要用** ——
- * 那个锚点是按"人物正前方"算的，用窗口中心的话，她右靠之后会一直微微偏左看。 */
-let contentShift = 0;
 
 function layout() {
   if (!app || !model || !holder) return;
@@ -1078,13 +1050,11 @@ function layout() {
   //    结果人物整体偏左约 37px（底座居中、人物不居中）。详见 params.js 的模型表。
   const HEAD_PAD = headPadPx(H);
   const INK_TOP_C = vh * INK_TOP_C_RATIO;   // 随画布高现算，不能写死（见模型表的坑）
-  /* 内容整体右靠量（见上面 PLATE_HALF / CONTENT_RIGHT_PAD 那段说明）。
-   * 写进 CSS 变量，底座的容器（#stats 的 padding-left）与气泡小尖角读同一个值；
-   * 人物这边直接加在锚点上 —— 三处共用这一个数，才不会一处动一处不动。 */
-  const SHIFT = Math.max(0, W / 2 - PLATE_HALF - CONTENT_RIGHT_PAD);
-  contentShift = SHIFT;
-  document.body.style.setProperty('--content-shift', `${Math.round(SHIFT)}px`);
-  CANVAS_OFF.x = (W / 2 + 2 + SHIFT) - INK_CX_K * s;
+  /* 人物**恒居中**（2026-10-12 定稿，用户："人物要居中"+"按对话框固定大小，
+   * 不需要点击后再调整"）：身体中心锚在窗口中线（+2 是标定时的光学修正）。
+   * 底座牌与气泡小尖角在 CSS 里也各居中，大家天然对齐，不再有右靠量。
+   * （曾经的「内容右靠」机制随窗口宽度固定而移除，别再往回加。） */
+  CANVAS_OFF.x = (W / 2 + 2) - INK_CX_K * s;
   CANVAS_OFF.y = HEAD_PAD - (INK_TOP_C + INK_TOP_K * s);
   canvas.style.left = `${CANVAS_OFF.x}px`;
   canvas.style.top = `${CANVAS_OFF.y}px`;
@@ -1093,13 +1063,13 @@ function layout() {
   // 用实测墨水的宽高，比旧的 BODY 矩形准（旧值偏小、水平还偏右 48px，
   // 结果点头顶那一片会被判成"非角色"而穿透）。
   //
-  // ⚠️ 中心写成 `INK_CX_K*s + CANVAS_OFF.x` 而不是 `W/2+2+SHIFT`：
-  //    两者数学上**恒等**（因为 CANVAS_OFF.x 就是按 (W/2+2+SHIFT) − INK_CX_K*s
+  // ⚠️ 中心写成 `INK_CX_K*s + CANVAS_OFF.x` 而不是 `W/2+2`：
+  //    两者数学上**恒等**（因为 CANVAS_OFF.x 就是按 (W/2+2) − INK_CX_K*s
   //    解出来的），但这么写让「命中矩形锚在人物实际落点上」这件事一眼可见 ——
   //    2026-10-12 改 INK_CX_K 标定值时，中间的 canvas 偏移量变了一个大数，
   //    若沿用字面 W/2+2 会让人怀疑矩形没跟着动。用同一条式子的两面表达，
-  //    就永远不会脱节（这次加 SHIFT 时它自动跟着动了，正是这个写法的好处）。
-  const bodyCx = INK_CX_K * s + CANVAS_OFF.x;    // 身体中心在窗口里的 x（≡ W/2+2+SHIFT）
+  //    就永远不会脱节。
+  const bodyCx = INK_CX_K * s + CANVAS_OFF.x;    // 身体中心在窗口里的 x（≡ W/2+2）
   petRect = {
     x: bodyCx - (INK_W / 2) * s,
     y: HEAD_PAD,
@@ -1115,7 +1085,6 @@ function layout() {
     console.log('[pet] layout', JSON.stringify({
       stage: [W, H], canvas: [vw, vh], scale: Number(s.toFixed(5)),
       cubism: [CANVAS_W, CANVAS_H], zoom: ZOOM, off: [CANVAS_OFF.x, CANVAS_OFF.y],
-      shift: Math.round(SHIFT),                                          // 内容整体右靠量
       bodyCx: r(bodyCx),                                                 // 身体中心落点
       inkTopC: Number(INK_TOP_C.toFixed(2)),                             // = vh×0.2
       headY: HEAD_PAD,                                                  // 墨水顶部落点
@@ -1441,33 +1410,47 @@ function hideUI() {
   setState(State.IDLE);
 }
 
-/* ---- 窗口宽度：平时只包住内容，气泡 / 输入条一出现就撑开 ----
+/* ---- 窗口宽度：固定为「对话框那一档」，只有内容真放不下才变宽 ----
  *
- * 为什么需要：窗口原先宽 308，而人物墨水的横向只占 x=135..289 —— 左边整整
- * 135px 是空的。窗口全透明，那片空白用户看不见，但窗口是实打实占了那么大
- * 一块（截图按窗口取、窗口列表里都是它）。
+ * 演变史（改之前先读懂，别把删掉的东西加回来）：
+ *   · 最早宽 308 恒定，但人物墨水只占右边 154 → 左边白占 135px（用户嫌空）。
+ *   · 2026-10-12 上午改成「内容决定宽度」：常驻收窄到人物+底座，对话再撑开 ——
+ *     结果点一下输入条窗口就伸缩一次，人物跟着挪，用户不满意。
+ *   · 当晚定稿（用户："可以根据对话框固定位置大小，不需要点击后再调整"）：
+ *     **恒 ≥ TALK_W**，宽度只在换模型 / 改缩放 / 开关底座时可能变，
+ *     对话开关不动窗口分毫 → 人物、底座、气泡谁都不用"调整"。
  *
  * 为什么宽度由渲染层算：人物的墨水宽 = f(窗口高, 用户设的缩放, 模型)，
  * 只有这边量得到（petRect 就是它）。
  *
- * ⚠️ 主进程改宽度时**右边缘钉死**（见 main.js 的 setStageWidth），而人物的
- *    锚点是「离窗口右边固定 96px」—— 两边合起来，窗口怎么伸缩她都不动。
+ * ⚠️ 主进程改宽度时**右边缘钉死**（见 main.js 的 setStageWidth）：人物恒居中，
+ *    窗口在左边伸缩时她随窗口中心走 —— 但宽度已与对话态无关，
+ *    日常使用中这条 setBounds 路径几乎不再触发。
  * ⚠️ 只在数值变了时上报：layout() 会因为尺寸 / 缩放 / 换模型反复重跑。 */
 let stageWantW = 0;
 
 function syncStageWidth() {
+  /* 对话态挂 body（CSS 据此把底座牌整块淡出）：牌（bottom:4）与输入条
+   * （bottom:14）都贴着窗口底，横向必然重叠 —— 牌会糊在输入条右端的
+   * 麦克风 / 发送键上。⚠️ 只藏牌、不动 --stats-h：舞台不重新让高，
+   * 人物不因对话开关而缩放一丁点。只看输入条：say() 的纯气泡不压着牌。 */
+  const composerOpen = !composer.classList.contains('hidden');
+  document.body.classList.toggle('talking', composerOpen);
   if (!app || !model || !petRect.w) return;    // 还没布局过，报出来的会是假值
-  const talking = !bubble.classList.contains('hidden') || !composer.classList.contains('hidden');
   const contentW = Math.max(petRect.w, PLATE_HALF * 2) + CONTENT_PAD * 2;
-  const want = Math.round(Math.max(contentW, talking ? TALK_W : 0));
+  /* ⚠️ 宽度与对话态**无关**（恒 ≥ TALK_W）—— 点开 / 收起输入条不伸缩，
+   *    这正是"按对话框固定大小，不需要点击后再调整"的落点。
+   *    千万别把 talking 拌回这行算式：那会让每次对话开关都动一次窗口。 */
+  const want = Math.round(Math.max(contentW, TALK_W));
   if (want === stageWantW) return;
   stageWantW = want;
   window.pet?.setStageWidth?.(want);
 }
 
 /* 气泡 / 输入条的显隐有十来处调用点，逐个补一行迟早漏一个 ——
- * 漏掉的表现就是「气泡显示了但窗口没撑开」，聊天框被挤窄。
- * 直接盯 class 最保险：MutationObserver 的回调排在本次绘制之前，看不出延迟。 */
+ * 漏掉的表现就是「底座牌没让位、糊在输入条上」。
+ * 直接盯 class 最保险：MutationObserver 的回调排在本次绘制之前，看不出延迟。
+ * （宽度已不随对话态变，这里只剩 body.talking 一件事要跟着刷。） */
 for (const el of [bubble, composer]) {
   new MutationObserver(syncStageWidth).observe(el, { attributes: true, attributeFilter: ['class'] });
 }

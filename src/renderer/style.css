@@ -13,10 +13,6 @@ html, body {
   /* 底部底座给舞台让出的高度。0 = 没开悬浮显示，行为与以前完全一致；
    * 开启后由 renderStats 量出底座真实高度写进来（见 style.css 的 #stats 一节）。 */
   --stats-h: 0px;
-  /* 内容整体右靠量（px）。由 pet.js 的 layout() 按窗口宽算出来写进来，
-   * 人物、底座牌、气泡小尖角**读同一个值**，所以三处一定一起动。
-   * 为什么需要、取值怎么来，见 pet.js 的 PLATE_HALF / CONTENT_RIGHT_PAD 那段。 */
-  --content-shift: 0px;
 }
 
 /* 舞台铺满窗口，canvas 承载 Live2D。
@@ -64,9 +60,8 @@ html, body {
 #bubble::after {
   content: "";
   position: absolute;
-  /* 小尖角跟着人物走：气泡本体仍是满窗宽（收窄它会挤坏长回复的排版），
-   * 只把这个尖角右移到人物身下 —— 否则人物右靠之后，尖角会指着她的左边。 */
-  left: calc(50% + var(--content-shift, 0px));
+  /* 小尖角指人物身下：人物恒居中（窗口中线），50% 正好是她。 */
+  left: 50%;
   top: -8px;
   width: 14px;
   height: 14px;
@@ -211,11 +206,6 @@ html, body {
    *    这样既拿到窄牌，又不踩收缩包裹的坑（.plate 内部是定宽行，不折行）。 */
   left: 10px;
   right: 10px;
-  /* 左内边距 = 2×右靠量：flex 的居中是在**内容盒**里做的，所以内容盒整体右移
-   * 2S，牌的中心就正好右移 S —— 恰好跟人物在 layout() 里加的 S 对齐。
-   * ⚠️ 这不是"装饰性 padding"（下面那条注释说的"不画 padding"指的是别让它
-   *    有可见的底色/边框），只是为了把牌心推到人物身下。 */
-  padding-left: calc(2 * var(--content-shift, 0px));
   /* 底部留白从 6px 收到 4px —— 底座能矮一点是一点（用户要求"短一点"）。
    * ⚠️ 这个值同时是 measureStatsReserve() 里 +4 的那一项，改这里要同步改
    *    pet.js，否则舞台让出的高度和底座实际占的高度对不上。见那条注释。 */
@@ -234,6 +224,12 @@ html, body {
   transition: opacity 0.25s ease;
 }
 #stats.hidden { opacity: 0; }
+
+/* 对话（输入条可见）时底座整块让位：牌（bottom:4）与输入条（bottom:14）都贴着
+ * 窗口底，横向必然重叠 —— 牌会糊在输入条右端的麦克风 / 发送键上（用户截图实测）。
+ * 开输入条整块淡出、收起再淡回；⚠️ --stats-h 不动（舞台不重新让高），
+ * 人物不因对话开关而缩放。类名由 pet.js 的 syncStageWidth() 挂在 body 上。 */
+body.talking #stats { opacity: 0; }
 
 /* 看得见的那块"牌"：宽度收缩到内容（用户要求"窄一点"）。
  * 固定 2 行 × 2 列（用户要求）—— 用「两行 + 每行两个」的显式结构，

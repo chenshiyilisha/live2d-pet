@@ -24,14 +24,29 @@ let failures = 0;
 const ok = (s) => console.log('  ✅ ' + s);
 const no = (s) => { failures++; console.log('  ❌ ' + s); };
 
-/* node 的 https 默认**不读** http_proxy，所以这里是直连，不用清代理变量。 */
+/* node 的 https 默认**不读** http_proxy，所以这里是直连，不用清代理变量。
+ *
+ * ⚠️ 必须带认证头（有令牌时）。未认证的 GitHub API 只有 **60 次/小时/IP**，
+ * 用光之后所有请求都变 403，而响应体是一段**合法 JSON**（`{"message":"API rate
+ * limit exceeded ..."}`）—— 本脚本早期版本没有这个头，于是把这段错误当成了
+ * Release 对象，报出「tag 是 undefined / 一个资产都没有 / 缺少 latest.yml」，
+ * **看起来像 Release 传坏了，其实 Release 好好的**（2026-10-12 实际踩过，
+ * 差点让作者重传 114 MB）。带令牌后是 5000 次/小时。
+ *
+ * ⚠️ 令牌只发给 api.github.com。资产地址会 302 到
+ * `release-assets.githubusercontent.com`（另一个主机），给那里带令牌属于
+ * 白白泄露凭据 —— 所以按主机判断，不是无脑加。 */
 function get(url, { raw = false } = {}) {
+  const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '';
+  const isApi = /^https:\/\/api\.github\.com\//.test(url);
   return new Promise((resolve, reject) => {
+    const headers = {
+      'User-Agent': 'ayan-release-check',
+      Accept: raw ? '*/*' : 'application/vnd.github+json'
+    };
+    if (token && isApi) headers.Authorization = `Bearer ${token}`;
     const req = https.get(url, {
-      headers: {
-        'User-Agent': 'ayan-release-check',
-        Accept: raw ? '*/*' : 'application/vnd.github+json'
-      }
+      headers
     }, (res) => {
       // GitHub 的 releases/download 会 302 到 objects.githubusercontent.com
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -90,6 +105,26 @@ function fetchText(url) {
       process.exit(1);
     }
     rel = JSON.parse(r.body);
+
+    /* 拦一段"能解析、但根本不是 Release"的 JSON —— 最常见的是限流
+     * （403 + {"message":"API rate limit exceeded ..."}）和 401（令牌无效）。
+     * 不拦这一下，下面所有检查都会拿 undefined 去判，报出
+     * 「tag 是 undefined / 一个资产都没有 / 缺少 latest.yml」这类**假故障**，
+     * 让人以为 114 MB 白传了、要重传。 */
+    if (!rel || !rel.tag_name) {
+      const msg = (rel && rel.message) || r.body.slice(0, 200);
+      no(`拉不到 Release 对象（HTTP ${r.status}）：${msg}`);
+      console.log('');
+      if (/rate limit/i.test(r.body)) {
+        console.log('  → 未认证请求上限 60 次/小时/IP，已用尽。带上令牌重跑：');
+        console.log(`     GH_TOKEN=<PAT> node tools/verify-release.js ${wanted}`.trimEnd());
+      } else if (r.status === 401) {
+        console.log('  → 令牌无效或已过期。');
+      } else if (r.status === 403) {
+        console.log('  → 权限不足（Fine-grained PAT 需要该仓库的 Contents: Read）。');
+      }
+      process.exit(1);
+    }
   } catch (err) {
     no('拉取 Release 失败：' + err.message);
     console.log('（网络不通的话换一下网络环境再试）');

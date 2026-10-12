@@ -618,7 +618,12 @@ async function boot() {
     backgroundAlpha: 0,            // 关键：透明背景，否则会出现黑底方块
     // 画布尺寸由 layout() 自己定：要做成窗口的 ZOOM 倍，比窗口大，
     // 多出来的部分由 #stage 裁掉（模型溢出画布会让裁剪遮罩渲染失败）。
-    antialias: true,
+    // ⚠️ antialias 必须关（2026-10-12 实测）：MSAA 在这里纯烧显存。
+    //   canvas 已经是显示尺寸的 ~4.6 倍超采样（ZOOM 2.898 × DPR 1.5），
+    //   合成时的降采样本身就是最好的抗锯齿，MSAA 属于重复劳动 ——
+    //   实拍对比（debug/pet-bar-*.png）发丝 / 眼睛 / 衣缘看不出任何差别，
+    //   而 GPU 进程内存 333MB → 265MB（-68MB，见 debug/baseline-empty.js 的对照法）。
+    antialias: false,
     autoDensity: true,
     resolution: window.devicePixelRatio || 1,
     // pixi v8 默认会优先尝试 WebGPU；在禁用了 WebGPU 的 Chromium 上这条路径
@@ -628,7 +633,7 @@ async function boot() {
     // 像素级命中测试要读回 framebuffer（见 maxAlphaNear）。
     // 默认 false 时浏览器合成后会清掉绘制缓冲，渲染循环之外 readPixels
     // 只能读到空白 —— 所以必须开。代价是合成时多一次拷贝，这个尺寸无感。
-    preserveDrawingBuffer: true
+    preserveDrawingBuffer: true    // [实验2] 恢复 true，单独测 antialias 的贡献
   });
 
   // ⚠️ 必须把 Application 实例挂到 window.app 上。

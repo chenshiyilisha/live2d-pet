@@ -1931,6 +1931,26 @@ if (!gotLock) {
       setTimeout(() => setQuiet(true, 'PET_QUIET'), 8000);
       setTimeout(() => setQuiet(false, 'PET_QUIET-end'), 18000);
     }
+
+    /* 诊断口子：`PET_MEM=1` 时每 8 秒把各进程内存打一条日志（打 6 条就停）。
+     *
+     * 为什么用 app.getAppMetrics() 而不是外部的 tasklist：后者只知道 PID 和
+     * 一个总量，**分不清哪个进程是 GPU 进程** —— 而"内存到底占在哪"这个问题的
+     * 答案几乎全在进程类型上（实测 GPU 进程比 renderer 还大，用 tasklist 看
+     * 就是四个匿名数字，根本判断不了）。这个 API 是官方的，直接给进程类型。 */
+    if (process.env.PET_MEM === '1') {
+      let n = 0;
+      const memTimer = setInterval(() => {
+        const parts = app.getAppMetrics().map((m) => {
+          const mb = (kb) => Math.round(kb / 1024);
+          const mm = m.memory || {};
+          return `${m.type}:${m.pid} ws=${mb(mm.workingSetSize || 0)} ` +
+                 `peak=${mb(mm.peakWorkingSetSize || 0)} cpu=${(m.cpu?.percentCPUUsage ?? 0).toFixed(1)}%`;
+        });
+        console.log('[mem]', JSON.stringify({ n: ++n, parts }));
+        if (n >= 6) clearInterval(memTimer);
+      }, 8000);
+    }
   });
 
   // 桌宠：关掉窗口不等于退出，托盘还活着

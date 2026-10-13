@@ -1160,12 +1160,23 @@ function buildMenuTemplate() {
       if (section === 'appearance') syncAppearance();
       // 关掉"全屏静默"要立刻退出静默状态，不能等她再切一次窗口
       if (section === 'quiet') refreshQuietWatcher();
+      /* ⚠️ 快捷键必须**当场重注册**：globalShortcut 只在启动时注册过一次，
+       *    不重跑就得到重启才生效（默认关之后这条尤其要紧 —— 用户刚打开
+       *    开关、按下去没反应，看着就像坏了）。registerHotkeys 自己会先
+       *    unregisterAll，关闭时它只打一行日志直接返回。 */
+      if (section === 'hotkeys') registerHotkeys();
     }
   });
 
+  /* 托盘里的快捷键提示必须**跟着 hotkeys 开关走**：全局快捷键默认关着
+   * （见 config.js 的默认值取舍），此时菜单里还写「{ Ctrl+Shift+A }」就是
+   * 骗人 —— 用户按下去毫无反应，只会以为是 bug。关掉时整条提示不显示。 */
+  const hotkeysOn = isOn('hotkeys', 'enabled', false);
+  const hk = (accel) => (hotkeysOn ? { accelerator: accel } : {});
+
   /* ---------- 外观与形象 ---------- */
   const appearanceMenu = [
-    ...appearanceSubmenu(cfg, { accelerators: true }),
+    ...appearanceSubmenu(cfg, { accelerators: hotkeysOn }),
     { type: 'separator' },
     flag('appearance', 'alwaysOnTop', '窗口置顶')
   ];
@@ -1200,6 +1211,34 @@ function buildMenuTemplate() {
   ];
 
   /* ---------- 小工具 ---------- */
+  /* 定时提醒默认关（见 config.js 的默认值取舍），所以这一组必须按开关分两种样子：
+   * ⚠️ 关着的时候原来那几条「N 分钟后提醒我」点了**什么都不会发生** ——
+   *    addReminder() 读到开关关着就直接 return null，而旧写法照样弹一句
+   *    "5 分钟后提醒你"，连提示都在骗人。现在关掉时整组收成一条
+   *    「启用定时提醒」，开启后才是正常的几条。
+   * ⚠️ 番茄钟不受这个开关影响：它由用户点「开始」才计时，本身就是明确意图。 */
+  const reminderOn = isOn('reminder', 'enabled', false);
+  const reminderItem = reminderOn
+    ? {
+        label: '定时提醒',
+        submenu: [
+          { label: '5 分钟后提醒我', click: () => { if (addReminder(5, '5 分钟到了。')) toast('5 分钟后提醒你'); } },
+          { label: '15 分钟后提醒我', click: () => { if (addReminder(15, '15 分钟到了。')) toast('15 分钟后提醒你'); } },
+          { label: '25 分钟后提醒我', click: () => { if (addReminder(25, '25 分钟到了。')) toast('25 分钟后提醒你'); } },
+          { type: 'separator' },
+          { label: '清除全部提醒', click: () => { clearReminders(); toast('提醒已清空'); } }
+        ]
+      }
+    : {
+        label: '定时提醒（已关闭）',
+        submenu: [
+          {
+            label: '启用定时提醒',
+            click: () => { patchConfig('reminder', { enabled: true }); toast('定时提醒已开启'); }
+          }
+        ]
+      };
+
   const toolsMenu = [
     {
       label: pomo ? `番茄钟（${pomo.phase === 'work' ? '专注' : '休息'}中 · 剩 ${Math.ceil(pomo.leftSec / 60)} 分）` : '番茄钟',
@@ -1210,16 +1249,7 @@ function buildMenuTemplate() {
         { label: '停止', enabled: !!pomo, click: () => { stopPomodoro(); toast('番茄钟已停'); } }
       ]
     },
-    {
-      label: '定时提醒',
-      submenu: [
-        { label: '5 分钟后提醒我', click: () => { addReminder(5, '5 分钟到了。'); toast('5 分钟后提醒你'); } },
-        { label: '15 分钟后提醒我', click: () => { addReminder(15, '15 分钟到了。'); toast('15 分钟后提醒你'); } },
-        { label: '25 分钟后提醒我', click: () => { addReminder(25, '25 分钟到了。'); toast('25 分钟后提醒你'); } },
-        { type: 'separator' },
-        { label: '清除全部提醒', click: () => { clearReminders(); toast('提醒已清空'); } }
-      ]
-    }
+    reminderItem
   ];
 
   /* ---------- 设置 ---------- */
@@ -1288,8 +1318,8 @@ function buildMenuTemplate() {
 
   // 顶层只保留这些 —— 平铺项一律进上面的组
   return Menu.buildFromTemplate([
-    { label: '显示 / 隐藏', accelerator: 'Ctrl+Shift+A', click: toggleVisible },
-    { label: '回到右下角', accelerator: 'Ctrl+Shift+C', click: moveToCorner },
+    { label: '显示 / 隐藏', ...hk('Ctrl+Shift+A'), click: toggleVisible },
+    { label: '回到右下角', ...hk('Ctrl+Shift+C'), click: moveToCorner },
 
     { type: 'separator' },
     { label: '外观与形象', submenu: appearanceMenu },

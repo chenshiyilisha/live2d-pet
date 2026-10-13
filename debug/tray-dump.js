@@ -73,6 +73,11 @@ function sliceFn2(source, name) {
 const cfgSrc = fs.readFileSync(path.join(ROOT, 'src/main/config.js'), 'utf8');
 const constSrc = [
   sliceObjConst(cfgSrc, 'LIMITS'),
+  /* 🔴 DEFAULT_CONFIG 必须**从源码切**，不能手抄：菜单里每个复选框的勾选态
+   * 都来自它（isOn 读的就是这份默认值），手抄副本一脱节，dump 出来的
+   * "默认勾了哪些"就是假的 —— 而"哪些该默认关"恰恰是这里最想验的东西
+   * （2026-10-13 之前这里是一份手写的桩，勾选态完全不可信）。 */
+  sliceObjConst(cfgSrc, 'DEFAULT_CONFIG'),
   sliceLineConst(src, 'clampScale'),
   sliceLineConst(src, 'clampOpacity'),
   /* 菜单标签里要显示「重命名（当前：XX）」，XX 由 resolveName 算出来。
@@ -93,22 +98,9 @@ const rec = (name) => (...a) => { calls.push(name + '(' + a.map((x) => JSON.stri
 
 const sandbox = {
   console,
-  loadConfig: () => ({
-    name: '',
-    persona: '',
-    personaParts: {},
-    appearance: { scale: 1.0, opacity: 1.0, model: 'hiyori', alwaysOnTop: true },
-    motion: { enabled: true, edgeSnap: true, wander: true },
-    interaction: { rightMenu: true, headPat: true, dragReact: true, pokeReact: true },
-    monitor: { floating: false },
-    quiet: { enabled: true, fps: 12 },
-    reminder: { enabled: true },
-    asr: { enabled: false },
-    tts: { enabled: true },
-    proactive: { enabled: true },
-    hotkeys: { enabled: true }
-  }),
-  isOn: (s, k, def) => def,
+  /* ⚠️ loadConfig / isOn **不在这里手写**，见下面 vm.runInContext 那段：
+   *    它们是 Node 侧的闭包，看不见 vm 里的词法常量 DEFAULT_CONFIG，
+   *    必须放进 vm 里定义才能真的读到默认值。 */
   clamp: (v, a, b) => Math.min(b, Math.max(a, v)),
   pomodoroStatus: () => null,
   SCALE_STEP: 0.06,
@@ -135,6 +127,8 @@ const sandbox = {
   stopPomodoro: rec('stopPomodoro'),
   addReminder: rec('addReminder'),
   clearReminders: rec('clearReminders'),
+  /* 勾选「全局快捷键」时会当场重注册（见 flag()）。这里只记一笔，不真的注册。 */
+  registerHotkeys: rec('registerHotkeys'),
   toast: rec('toast'),
   promptRename: rec('promptRename'),
   promptPersona: rec('promptPersona'),
@@ -153,7 +147,22 @@ const sandbox = {
 };
 
 vm.createContext(sandbox);
-vm.runInContext(constSrc, sandbox);   // LIMITS / clampScale / clampOpacity
+vm.runInContext(constSrc, sandbox);   // LIMITS / DEFAULT_CONFIG / clamp* / resolveName …
+
+/* loadConfig / isOn 必须在 **vm 内部**定义：Node 侧写的闭包看不见 vm 的
+ * 词法常量（DEFAULT_CONFIG 是 `const`，不会挂到 global 上），在 Node 里
+ * 引用它只会得到一个 ReferenceError。而函数声明在 vm 顶层会挂到该 context
+ * 的 global 上，所以下面这两句既让 loadConfig 能被菜单代码调到，
+ * 又保证 isOn 读到的就是**源码里的那份默认值**。
+ *
+ * loadConfig 返回深拷贝：菜单代码里到处是 `cfg.xxx` 读取，但万一有谁手滑
+ * 改了一下，也不该污染后续调用（真实实现每次都是重新读文件）。 */
+vm.runInContext(
+  'function loadConfig() { return JSON.parse(JSON.stringify(DEFAULT_CONFIG)); }\n' +
+  'function isOn(section, key, def) {\n' +
+  '  const v = DEFAULT_CONFIG[section] ? DEFAULT_CONFIG[section][key] : undefined;\n' +
+  '  return v === undefined || v === null ? def : !!v;\n' +
+  '}', sandbox);
 vm.runInContext(fnSrc, sandbox);
 
 sandbox.buildMenuTemplate();
@@ -162,6 +171,7 @@ if (!top) throw new Error('没截获到模板');
 
 let rows = 0;
 let flags = 0;
+const checkedFlags = [];    // 默认就勾上的功能项（给下面那行汇总用）
 const dump = (items, depth) => {
   for (const it of items) {
     if (it.type === 'separator') { console.log('  '.repeat(depth) + '──────────'); continue; }
@@ -169,7 +179,7 @@ const dump = (items, depth) => {
     const acc = it.accelerator ? '   { ' + it.accelerator + ' }' : '';
     const en = it.enabled === false ? '   (disabled)' : '';
     console.log('  '.repeat(depth) + '- ' + it.label + kind + acc + en);
-    if (it.type === 'checkbox') flags++;
+    if (it.type === 'checkbox') { flags++; if (it.checked) checkedFlags.push(it.label); }
     if (depth === 0) rows++;
     if (it.submenu) dump(it.submenu, depth + 1);
   }
@@ -178,3 +188,6 @@ const dump = (items, depth) => {
 console.log('===== 托盘菜单结构 =====');
 dump(top, 0);
 console.log('\n顶层可点/可展开条目: ' + rows + '（不含分隔线），复选框 ' + flags + ' 个');
+/* 这一行是「默认值取舍」的检视口（见 config.js 顶部那段红灯规则）：
+ * 打扰类 / 抢资源的项不该出现在这里。 */
+console.log('默认勾选: ' + (checkedFlags.length ? checkedFlags.join(' · ') : '（无）'));

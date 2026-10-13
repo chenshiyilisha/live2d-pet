@@ -774,14 +774,26 @@ async function boot() {
   pokeIdleTimer();
 
   /* 底座先摆个转圈顶着：第一条 monitor:stats 要等主进程采到数才来
-   * （GPU 占用是两枪求差，冷启动必然晚一拍）。不摆的话这段时间窗口底部是空的，
-   * 看着像"今天没开悬浮显示"。
+   * （常驻采样器得先跑一次 nvidia-smi，冷启动必然晚一拍）。不摆的话这段时间
+   * 窗口底部是空的，看着像"今天没开悬浮显示"。
    * ⚠️ 放在这里（模型挂好之后）而不是读配置的时候：renderStatsLoading 会量高度
    *    并调 layout()，那会儿 app / model / holder 得已经就位。 */
   scheduleStatsLoading();
 
   /* ?snap= 探针在 diag.js。不带这个参数时不加载。 */
   if (new URLSearchParams(location.search).has('snap')) {
+    /* 顺手报一次 WebGL 后端 —— 双 GPU 机器上「到底用了哪块卡」只能问 GL 自己。
+     * WMI 的 GPUEngine 计数器是**按 luid 分实例**的，光看计数器分不出归属
+     * （核显和独显各有一串实例，加起来是个四不像的数）。
+     * 拿不到 debug 扩展时退回被脱敏的 gl.RENDERER，仍能看出厂商。 */
+    try {
+      const gl = app.renderer.gl;
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      const rd = (k, fallback) => (dbg ? gl.getParameter(dbg[k]) : gl.getParameter(fallback));
+      console.log('[pet] webgl backend RENDERER=' + rd('UNMASKED_RENDERER_WEBGL', gl.RENDERER) +
+                  ' | VENDOR=' + rd('UNMASKED_VENDOR_WEBGL', gl.VENDOR));
+    } catch (e) { console.log('[pet] webgl 后端探测失败:', e && e.message); }
+
     const { attachSnapProbes } = await import('./diag.js');
     attachSnapProbes({
       app: () => app,
@@ -1777,7 +1789,11 @@ window.pet?.on?.('monitor:stats', (s) => renderStats(s));
 const STAT_ITEMS = [
   { key: 'cpu',  label: 'CPU',  get: (s) => (typeof s.cpu === 'number' ? `${s.cpu}%` : null),           pct: (s) => s.cpu },
   { key: 'mem',  label: '内存', get: (s) => (s.mem ? `${s.mem.percent}%` : null),                        pct: (s) => s.mem?.percent },
-  { key: 'gpu',  label: 'GPU',  get: (s) => (typeof s.gpu === 'number' ? `${s.gpu}%` : null),           pct: (s) => s.gpu },
+  { key: 'gpu',  label: 'GPU',  get: (s) => (typeof s.gpu === 'number' ? `${s.gpu}%` : null),           pct: (s) => s.gpu,
+    /* 口径是**独立显卡**（NVIDIA），不是核显 —— 双 GPU 笔记本上这两块差得很远
+     * （2026-10-12 用户就在这上面问过："取的好像不是独立显卡的"）。
+     * 标签放不下"NVIDIA"四个字母，靠 title 说清楚。 */
+    hint: '独立显卡（NVIDIA）利用率' },
   /* 温度：**标签写「温度」**，不能写「GPU」—— 它紧跟在「GPU 45%」后面，
    * 写成 "GPU 48°C" 读起来是"GPU 又 48"，纯属重复。
    * ⚠️ 也不能不消歧：系统监视语境里「温度」默认指 CPU，用户第一反应是
@@ -1843,8 +1859,9 @@ function buildPlate(list, buildItem) {
 /* 画底座：CPU / 内存 / GPU / 温度，**固定排成 2 行 × 2 列**（切块在 buildPlate）。
  *
  * ⚠️ 每一项单独判存在，拿不到就**整项不画**，不能画成 0 或 "--"：
- *    GPU 占用要两枪才能求差（见 sysinfo 的 gpuStatus），冷启动第一帧没有
- *    基线；温度只有装了 NVIDIA 显卡才有来源。0% 和"取不到"看着是一回事，
+ *    GPU 占用与温度**同生共死**（都只有装了 NVIDIA 独显才有来源，
+ *    取自同一次 nvidia-smi 调用，见 sysinfo 的「GPU 占用」那段 ——
+ *    用户 2026-10-13 定规矩："没有就不取"）。0% 和"取不到"看着是一回事，
  *    但前者是假数据。
  * ⚠️ 不摆转圈的这段时间是**加载态**在顶（见 renderStatsLoading）——
  *    本函数一旦真的画过一次，statsSeen 就为真，转圈不会再回来。 */
@@ -1888,8 +1905,9 @@ function renderStats(s) {
 /* ============================================================
  *  底座的加载态（转圈）
  *
- *  为什么需要：第一条 monitor:stats 要等主进程那边采到数才来，
- *  而 GPU 占用是**两枪求差**（见 sysinfo 的 gpuStatus），冷启动必然不是"立刻"。
+ *  为什么需要：第一条 monitor:stats 要等主进程那边采到数才来 ——
+ *  常驻采样器得先把 powershell 拉起来、跑一次 nvidia-smi（≈1.5s），
+ *  所以冷启动必然不是"立刻"。
  *  这段时间窗口底部本来是空的 —— 看着像"今天没开悬浮显示"。
  * ========================================================== */
 

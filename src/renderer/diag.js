@@ -388,8 +388,9 @@ export function attachSnapProbes(live) {
 
   /* 诊断：底座（#stats）布局自检（?snap=bar）
    *
-   * 为什么要单独验：底座要等第一条 monitor:stats 推送才出现，而那条推送依赖
-   * GPU 两枪基线（~9s）。默认的 ?snap=1 截图在 2.6s 就拍了，那时底座还没出来，
+   * 为什么要单独验：底座要等第一条 monitor:stats 推送才出现，而那条推送要等
+   * 常驻采样器把 powershell 拉起来、跑一次 nvidia-smi（≈1.5s，早年还要等 GPU
+   * 两枪求差 ≈9s）。默认的 ?snap=1 截图在 2.6s 就拍了，那时底座可能还没出来，
    * 拍到的是一张"没有底座"的图 —— 看图会误判成"底座没生效"。
    * 这里等到 14s（底座必然已出）再打 DOM 几何 + 拍图。
    *

@@ -38,8 +38,8 @@ function cpuPercent() {
   return st.util;
 }
 
-/* 带原因版，理由同 gpuStatus —— 调用方要能区分"没有基线"（值得补枪）
- * 和"窗口不合适"（补枪无用）。 */
+/* 带原因版：调用方要能区分"没有基线"（值得补枪）和"窗口不合适"（补枪无用）。
+ * （GPU 那边曾经也是这套，2026-10-13 改成 nvidia-smi 直读之后不再需要。） */
 function cpuStatus() {
   const cpus = os.cpus();
   if (!cpus || !cpus.length) return { util: null, reason: 'no-sample' };
@@ -79,77 +79,36 @@ async function cpuPercentFresh() {
 
 /* ---------- GPU 占用 ---------- */
 
-/* 为什么不用 Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine：
+/* 🔴 口径（2026-10-13 修正）：**有 NVIDIA 独显就用独显的利用率**。
+ *
+ * 之前是「WMI 的 GPUEngine(engtype_3D) 跨实例求和」，在**双 GPU 机器上是错的**：
+ * 那些实例是**按 luid 分**的，核显与独显各有一串，求和出来的是「两块卡加在一起」，
+ * 既不等于核显也不等于独显。实测本机（Intel UHD + RTX 4070）：
+ *   · 桌宠渲染在**核显**上 —— `?snap=` 打的 webgl backend 是
+ *     "ANGLE (Intel, Intel(R) UHD Graphics (0x0000A78B), Direct3D11)"，
+ *     且 GPUEngine 里 Electron 那个 GPU 进程的实例**全落在核显的 luid 上**；
+ *   · 于是求和的结果几乎全是核显的占用 —— 用户看到的是「核显的 GPU 占用」
+ *     （2026-10-12 用户报："取的好像不是独立显卡的，好像是核心显卡的"，属实）。
+ * 现在改成问 nvidia-smi 要独显的 `utilization.gpu`，**和温度同一个调用**
+ * （一次拿两个值，实测 ~180ms，与 WMI 的 161ms 同量级，不额外加开销）。
+ *
+ * 🔴 **没有 N 卡就整项不取**（用户 2026-10-13 明确："没有就不取"）——
+ *    与温度完全同一个规矩：不硬凑、更不用核显的数字冒充独显。
+ *    所以底座上「GPU 占用」和「温度」是**同生共死**的一对：有 N 卡就都有，
+ *    没有就都不画。（AMD 独显目前也归到"没有"——只用 WMI 取不到可靠的
+ *    独显口径，宁可空着。）
+ *
+ * 为什么不用 Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine：
  * 本机实测那个 **formatted 类恒返回 0**（613 个实例全是 0），是坏的；
- * 同名的 raw 类有真实的累计值。所以走「两枪求差」—— 和 cpuPercent 完全同构。
+ * 同名的 raw 类才有真实的累计值（要用就得两枪求差）。这条坑记在这里是给
+ * 将来想拿 WMI 补 CPU 温度之类的人看的 —— 本文件的 GPU 已经不用它了。
  *
- * 为什么不用 Get-Counter '\GPU Engine(*engtype_3D)\Utilization Percentage'：
- * 数值是对的（Task Manager 就是这套语义），但它**一次调用要 1.6 秒**
- * （PDH 要枚举上百个实例，还内部自己等采样窗口），而 raw 单枪只要 0.3 秒，
- * 求差在 Node 里是免费的。悬浮小字每 3 秒刷一次，这是常态开销，省下来值得。
- *
- * 口径：只取 engtype_3D（3D 引擎），跨实例求和。
- *   - 只取 3D：VideoDecode / Copy 那些引擎的占用跟"卡不卡"关系不大，
- *     混进来会让看视频时的读数虚高。
- *   - 求和而非取最大：GPU 引擎是「每进程每引擎」一个实例，任务管理器里
- *     一个程序的占用就是它所有实例之和。代价是多引擎（3D 与 Compute
- *     同时忙）时会略高于 100%，已 clamp 到 100。
+ * 原先那一支的口径是「engtype_3D 跨实例求和」，连同两枪求差的一整套
+ * （GPU_WIN_MIN / lastGpuSample / gpuStatus / 补枪）**2026-10-13 整体移除**：
+ * 求和那条路在双 GPU 机器上口径就是错的（见上），而"没有独显就不取"之后
+ * 它再没有存在的场景。留下的只有 nvidia-smi 直接给的一个百分比，
+ * 代码反而短了一大截（少了一次求差、一次补枪、一套窗口合法性判定）。
  */
-const GPU_WIN_MIN = 800;      // 采样窗口下限（ms）：太短了噪声大
-const GPU_WIN_MAX = 20000;    // 上限：隔太久的两枪算出来是"这段时间的平均"
-const GPU_FRESH_MS = 1200;    // 冷启动没有基线时，补第二枪的间隔
-
-let lastGpuSample = null;
-
-/* 把 PowerShell 那一枪的原始数据整理成可求差的形式。 */
-function gpuMakeSample(raw) {
-  if (!raw || !Array.isArray(raw.eng)) return null;
-  const list = raw.eng.map((o) => [String(o.n), Number(o.u) || 0]);
-  return { t100: Number(raw.t100) || 0, list, map: new Map(list) };
-}
-
-/* 传入这一枪，返回它相对上一枪算出的占用率（并把基线换成这一枪）。
- *
- * 🔴 返回 null 有**两种原因**，调用方必须区分（见 gpuStatus）：
- *      a) 根本没有基线（冷启动第一枪）→ 值得补一枪
- *      b) 有基线但两次之间的时间窗不合适 → 补枪没用，等下一次自然推送
- *    早先的写法把两者混为一谈（`util === null` 就补枪），后果是：任何
- *    两次采样间隔 < GPU_WIN_MIN 的调用都会白等 1.2 秒再打一枪，
- *    墙钟翻三倍。实测 verify-stats 连打两枪时报的 2.2s "热路径开销"
- *    就是这个假象 —— 真实 3 秒节奏下热路径只有 ~450ms。别再退回去。
- *
- * ⚠️ 绝不返回一个凭空的数：宁可这一帧不显示，也别让人看到错的占用率。
- *    （这条和 cpuPercent 里"落到区间外就丢掉旧基线"是同一个理由。）
- */
-function gpuPercent(sample) {
-  return gpuStatus(sample).util;
-}
-
-/* 带原因的状态版：{ util, reason }。
- *   reason: 'ok'        算出数了
- *           'no-baseline'  没有上一枪（冷启动，值得补枪）
- *           'bad-window'   有基线但时间窗不合适（补枪无用）
- *           'no-sample'    这一枪没取到数据（保留旧基线）
- */
-function gpuStatus(sample) {
-  if (!sample) return { util: null, reason: 'no-sample' };
-  const prev = lastGpuSample;
-  lastGpuSample = sample;
-  if (!prev) return { util: null, reason: 'no-baseline' };
-  const dt = sample.t100 - prev.t100;
-  if (dt <= 0) return { util: null, reason: 'bad-window' };
-  const ms = dt / 10000;                 // Timestamp_Sys100NS 是 100ns 单位
-  if (ms < GPU_WIN_MIN || ms > GPU_WIN_MAX) return { util: null, reason: 'bad-window' };
-  let busy = 0;
-  for (const [n, u] of sample.list) {
-    const before = prev.map.get(n);
-    if (before === undefined) continue;  // 这一枪才出现的实例没有基线
-    const d = u - before;
-    if (d > 0) busy += d;                // 负值是实例被回收后复用，丢掉
-  }
-  return { util: Math.round(clamp((busy / dt) * 100, 0, 100)), reason: 'ok' };
-}
-
 function memInfo() {
   const total = os.totalmem();
   const free = os.freemem();
@@ -221,8 +180,8 @@ let lastNetSample = null;
  * 没有 NVIDIA 显卡就**干脆不显示这一行**，不硬凑一个来路不明的数。
  */
 
-/* 按需拼一个取数脚本。键名压到 6 字符以内 —— 这份 JSON 每 3 秒要过一遍
- * 命令行，而 engtype_3D 的实例数有上百个。 */
+/* 按需拼一个取数脚本。键名压到 6 字符以内 —— 这份 JSON 每 3 秒要过一遍命令行，
+ * 键名越短，"每拍白带的固定开销"越小。 */
 function sensorScript(want) {
   const L = ['$o = [ordered]@{}'];
 
@@ -231,20 +190,15 @@ function sensorScript(want) {
     L.push('if ($b) { $o.batPct = [int]$b.EstimatedChargeRemaining; $o.batChg = [bool]($b.BatteryStatus -eq 2) }');
   }
 
-  if (want.gpu) {
-    L.push("$s = Get-CimInstance Win32_PerfRawData_GPUPerformanceCounters_GPUEngine -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*engtype_3D*' }");
-    L.push('if ($s) {');
-    L.push('  $e = @(); $t = [long]0');
-    L.push('  foreach ($x in $s) { $e += [pscustomobject]@{ n = $x.Name; u = [long]$x.UtilizationPercentage }; $t = [long]$x.Timestamp_Sys100NS }');
-    L.push('  $o.t100 = $t; $o.eng = $e');
-    L.push('}');
-  }
-
-  if (want.temp) {
+  /* GPU 占用与温度**同源**：都只认 nvidia-smi（**独显**口径，见文件头那段）。
+   * 一次调用拿两个值（拆成两次就是白付一次进程启动）。
+   * 没有 N 卡（或这一拍读不到）就两个都不填 —— 与温度同一个规矩：
+   * 不硬凑、更不用核显的数字冒充独显。 */
+  if (want.gpu || want.temp) {
     L.push("$smi = Join-Path $env:SystemRoot 'System32\\nvidia-smi.exe'");
     L.push('if (Test-Path $smi) {');
-    L.push('  $line = & $smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>$null | Select-Object -First 1');
-    L.push("  if ($line -match '^\\s*(\\d+)') { $o.tempC = [int]$Matches[1] }");
+    L.push("  $line = & $smi --query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader,nounits 2>$null | Select-Object -First 1");
+    L.push("  if ($line -match '^\\s*(\\d+)\\s*,\\s*(\\d+)\\s*$') { $o.nvGpu = [int]$Matches[1]; $o.tempC = [int]$Matches[2] }");
     L.push('}');
   }
 
@@ -254,32 +208,27 @@ function sensorScript(want) {
 
 /* ---------- 常驻传感器采样进程 ---------- */
 
-/* 🔴 为什么要有这个东西（这是「GPU 占用慢一拍」的真正根因，别再走回头路）：
+/* 🔴 为什么要有这个东西（别再走回头路）：
  *
- * GPU 占用是**累计计数器求差**，那么"这一枪相对上一枪"的差值除以时间就是占用率。
- * 之前上一枪来自**上一次推送**，而推送间隔是 3 秒、加上采集本身 1 秒 ——
- * 实测窗口 **4050 ms**。也就是说：屏幕上那个 GPU 数字，描述的是
- * **刚刚过去的整整一个周期**。你刚启动一个吃显卡的程序，要等下一整拍
- * （约 4 秒）才看得到它涨上去；关掉之后又要多显示一拍才落回来。
- * 这不是"少了数据"，是这个数**天生晚一拍**。
- *
- * （CPU 其实同一套求差、同一个毛病，只是 CPU 负载起落平缓，肉眼看不出来；
- *   GPU 负载往往是一瞬间拉满，所以它最先露馅。）
- *
- * 修法：让采样**连续**进行。一个常驻 powershell 每 1 秒读一枪原始计数器，
- * 主进程维护"最近两次"求差 → 窗口固定 1 秒，读到的永远是**眼前这一秒**。
- *
- * 顺带把这条热路径的开销也去掉了，实测数据支持这个取舍：
- *   - 常驻进程里单次查询只要 71~133 ms（首次 222 ms，模块加载只付一次）
- *   - 而每 3 秒起一个新进程，固定启动开销就有 ~500 ms，加上查询与 nvidia-smi
- *     实测一次 push 要 1035 ms —— 比常驻方案**更贵**，还更慢。
+ * 一句话：**每 3 秒起一个新的 powershell 太贵，而且数太旧**。
+ *   - 一个 powershell.exe 的固定启动开销就有 ~500ms（模块自动加载），
+ *     加上 nvidia-smi 的 ~180ms，实测一次 push 要 1035ms；
+ *   - 而且那时拿到的读数只能描述"上一次推送到现在"这一整段（约 4 秒），
+ *     用户刚打开一个吃显卡的程序，要等下一整拍才看得到它涨上去。
+ * 常驻之后：一个 powershell 每 1 秒读一枪，单次查询只要 ~180ms
+ * （首次 222ms，模块加载只付一次），读到的是**眼前这一秒**。
  * 所以这不是"为了准而变费"，是把延迟和开销一起降下来了。
+ *
+ * （历史备注：这个东西最初是为了修「GPU 占用慢一拍」—— 那时 GPU 走 WMI 的
+ *   累计计数器，要两枪求差，而"上一枪"来自上一次推送，窗口 4050ms。
+ *   2026-10-13 GPU 改成 nvidia-smi 直读以后，求差那一步没有了，
+ *   但"常驻比每拍起进程便宜得多"这一点没变，所以采样器留着。
+ *   CPU 那边仍是求差（os.cpus() 的累计值，主进程自己算，不经过这里）。）
  *
  * ⚠️ 只在该用的时候开：悬浮显示关着、或全屏静默中，立刻停掉（见 main.js 的
  *    refreshStatsTimer）。一条常驻进程哪怕很便宜，也不该在不需要时白跑。 */
 
-const SAMPLE_MS = 1000;      // 采样间隔（= 求差窗口）。1000 是"够新鲜"与"够便宜"的折中
-const TEMP_EVERY = 3;        // 温度每 3 拍取一次：nvidia-smi 本身要 100~640ms，且这个量变得慢
+const SAMPLE_MS = 1000;      // 采样间隔。1000 是"够新鲜"与"够便宜"的折中
 const LIVE_TTL = 5000;       // 读数超过这么久没更新就当过期（采样进程挂了时的兜底）
 
 let sensorChild = null;
@@ -297,10 +246,18 @@ const live = { gpu: null, gpuAt: 0, tempC: null, tempAt: 0, ticks: 0, gpuOk: fal
 /* 采样脚本。和 fullscreen.js 里那份同构，同样两条纪律：
  * 纯 ASCII + `-EncodedCommand`，以及每 10 拍自查父进程还在不在
  * （Windows 上父进程退出不会带走子进程，不留野进程）。 */
+/* 采样脚本。和 fullscreen.js 里那份同构，同样两条纪律：
+ * 纯 ASCII + `-EncodedCommand`，以及每 10 拍自查父进程还在不在
+ * （Windows 上父进程退出不会带走子进程，不留野进程）。
+ *
+ * 每拍只起**一个** nvidia-smi（一次拿利用率 + 温度，实测 ~180ms，
+ * 与原先那条 WMI 查询的 161ms 同量级）。原先温度是每 3 拍取一次的分频，
+ * 现在去掉：利用率每拍都要，而两个值同一次调用就能拿到，
+ * 分频反而要把这一次调用拆成"每拍一次取利用率 + 每 3 拍一次取温度"= 更贵。 */
 function sensorWatchScript(parentPid) {
   return [
     "$ErrorActionPreference = 'SilentlyContinue'",
-    '$smi = Join-Path $env:SystemRoot \'System32\\nvidia-smi.exe\'',
+    "$smi = Join-Path $env:SystemRoot 'System32\\nvidia-smi.exe'",
     '$hasSmi = Test-Path $smi',
     '$parent = ' + parentPid,
     '$i = 0',
@@ -311,15 +268,9 @@ function sensorWatchScript(parentPid) {
     '    if (-not (Get-Process -Id $parent -ErrorAction SilentlyContinue)) { break }',
     '  }',
     '  $o = [ordered]@{}',
-    '  $s = Get-CimInstance Win32_PerfRawData_GPUPerformanceCounters_GPUEngine -ErrorAction SilentlyContinue | Where-Object { $_.Name -like \'*engtype_3D*\' }',
-    '  if ($s) {',
-    '    $e = @(); $t = [long]0',
-    '    foreach ($x in $s) { $e += [pscustomobject]@{ n = $x.Name; u = [long]$x.UtilizationPercentage }; $t = [long]$x.Timestamp_Sys100NS }',
-    '    $o.t100 = $t; $o.eng = $e',
-    '  }',
-    '  if ($hasSmi -and (($i % ' + TEMP_EVERY + ') -eq 1)) {',
-    '    $line = & $smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>$null | Select-Object -First 1',
-    '    if ($line -match \'^\\s*(\\d+)\') { $o.tempC = [int]$Matches[1] }',
+    '  if ($hasSmi) {',
+    "    $line = & $smi --query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader,nounits 2>$null | Select-Object -First 1",
+    "    if ($line -match '^\\s*(\\d+)\\s*,\\s*(\\d+)\\s*$') { $o.nvGpu = [int]$Matches[1]; $o.tempC = [int]$Matches[2] }",
     '  }',
     '  $w.WriteLine(($o | ConvertTo-Json -Depth 4 -Compress))',
     '  $w.Flush()',
@@ -398,16 +349,15 @@ function handleSensorLine(line) {
   live.ticks++;
   lastTickAt = Date.now();
 
-  /* ⚠️ 求差放在主进程做（复用 gpuStatus），不放进 PowerShell ——
-   *    这样"窗口合不合适"的判定只有一处实现，能被 verify-stats 覆盖。 */
-  if (r && Array.isArray(r.eng)) {
-    const st = gpuStatus(gpuMakeSample(r));
-    if (st.util !== null) {
-      live.gpu = st.util;
-      live.gpuAt = Date.now();
-      live.gpuOk = true;
-      flushGpuWaiters();
-    }
+  /* GPU 只有一条口径：nvidia-smi 给的**独显**百分比（见文件头那段），
+   * 拿过来就能用 —— 没有两枪求差那一步了。
+   * ⚠️ 没有 N 卡时脚本根本不带这个字段，这里自然什么都不做；上层于是永远
+   *    拿不到 GPU 读数，底座那一格就不画（和温度一个待遇）。 */
+  if (r && typeof r.nvGpu === 'number') {
+    live.gpu = Math.round(clamp(r.nvGpu, 0, 100));
+    live.gpuAt = Date.now();
+    live.gpuOk = true;
+    flushGpuWaiters();
   }
   if (r && typeof r.tempC === 'number') {
     live.tempC = r.tempC;
@@ -441,12 +391,8 @@ function liveTemp() {
 /* 常驻采样器是不是"活着、且确实还会继续给数"。
  *
  * 这个判据只有一个用途：**决定要不要另起一个进程现打一枪**。
- *
- * 🔴 为什么必须能答"是"：采样器和 slowPart 的兜底路径**共用同一个 lastGpuSample
- *    基线**，谁后打谁就把对方的窗口改小。实测撞出过：兜底那一枪落在采样器
- *    上一拍之后不到 GPU_WIN_MIN(800ms)，算出来是 bad-window → 这一帧的 GPU
- *    被静默丢掉 —— 用户看到的就是「首次加载时 GPU 比别的项慢一拍才出现」。
- *    采样器 ≤1s 就会给新数，等它比抢它划算（还少起一个 powershell）。
+ * 采样器活着时就不该再起进程 —— 它 ≤1s 就给新数，等它比自己去打划算
+ * （少付一次 powershell 启动开销，也不会两条路互相干扰）。
  *
  * 两段判据：
  *   ① 刚收到读数（< 2.5 拍）—— 正常状态；
@@ -465,10 +411,10 @@ function sensorAlive() {
 
 /* ── 「等第一个 GPU 读数」 ──
  *
- * GPU 占用是累计计数器求差，采样器**第一拍只建基线**、第二拍才有数（≈2.8s）。
- * 主进程的第一次推送如果不等它，那一帧就是"半张牌"：CPU / 内存 / 温度先出，
+ * 采样器要先把 powershell 拉起来、再跑一次 nvidia-smi 才吐第一行（实测 ≈1.5s）。
+ * 主进程的第一次推送如果不等它，那一帧就是"半张牌"：CPU / 内存先出，
  * 牌上留一个空位，GPU 下一拍才补进来 —— 正是用户说的「GPU 比别的项慢一拍」。
- * 等它一次（~2.8s）换来"首次出现就是完整的一张牌"，比先给半张再补更干净。
+ * 等它一次换来"首次出现就是完整的一张牌"，比先给半张再补更干净。
  *
  * ⚠️ 采样器没在跑就立刻返回 false，**不许干等** —— 没有独显 / 采样器起不来的
  *    机器上，等是等不来的，只会白耽误时间（那时 slowPart 的兜底路径会负责出数）。 */
@@ -496,7 +442,7 @@ function waitForFirstGpu(ms = 4500) {
 }
 
 /* ⚠️ 「采样器转了 8 拍以上却一次都没给出这一项」= 这台机器根本没有这个数据源
- *    （没有 N 卡 → 没有温度；性能计数器类被禁用 → 没有 GPU 占用）。
+ *    （没有 N 卡 → GPU 占用与温度都没有；独显驱动异常 → nvidia-smi 取不到）。
  *    这时候必须把它标成"永远取不到"，否则 slowPart 每次推送都会为它
  *    白起一个 powershell 进程 —— 白白回到每 3 秒 1 秒开销的老路上，
  *    而结果永远是空的。这就是这台机器上"没有独显就整项不画"的正确代价：
@@ -514,9 +460,9 @@ async function slowPart(out, want) {
   let needGpu = false;
   let needTemp = false;
 
-  /* 🔴 采样器活着时**绝不现打一枪**（理由见 sensorAlive 上面那段）：
-   *    抢它的基线会把这一帧的 GPU 打没。它 ≤1s 就给新数，这一帧宁可不画
-   *    （交给上层等/下一拍），也不去抢。 */
+  /* 采样器活着时**绝不现打一枪**（理由见 sensorAlive 上面那段）：
+   * 它 ≤1s 就给新数，这一帧宁可不画（交给上层等 / 下一拍），
+   * 也不去重复起一个 powershell。 */
   const busy = sensorAlive();
 
   if (want.gpu) {
@@ -539,19 +485,10 @@ async function slowPart(out, want) {
   let r = await psJson(script, 4000);
   if (!r) return;
 
-  if (needGpu) {
-    let st = gpuStatus(gpuMakeSample(r));
-    /* 只有「真的没有基线」才补枪。
-     * ⚠️ 不能用 `st.util === null` 判 —— 那会把"窗口太短"也算进来，
-     *    于是每次调用都白等 1.2 秒再打一枪（见 gpuStatus 上面那段）。
-     *    'bad-window' 时补枪是没用的：这一枪已经把基线更新掉了，
-     *    再打一枪的窗口只会更短。让它这一帧不出数，下一次自然推送就好了。 */
-    if (st.reason === 'no-baseline') {
-      await new Promise((res) => setTimeout(res, GPU_FRESH_MS));
-      const r2 = await psJson(script, 4000);
-      if (r2) { r = r2; st = gpuStatus(gpuMakeSample(r2)); }
-    }
-    if (st.util !== null) out.gpu = st.util;
+  if (needGpu && typeof r.nvGpu === 'number') {
+    /* 独显口径：nvidia-smi 直接给百分比，没有"两枪求差"这一步，
+     * 也就不存在"没基线要补枪"的问题 —— 一枪就是结果。 */
+    out.gpu = Math.round(clamp(r.nvGpu, 0, 100));
   }
 
   if (needTemp && typeof r.tempC === 'number') out.tempC = r.tempC;

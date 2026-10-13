@@ -412,13 +412,13 @@ function refreshStatsTimer() {
    *    会以为自己还该活着 → 两个循环并存。gen 对不上就直接退出，干净。 */
   const tick = async () => {
     if (gen !== statsGen) return;
-    /* 🔴 第一枪之前先等采样器把 GPU 基线建好。
-     *    GPU 占用是累计计数器求差，采样器的**第一拍只建基线**、第二拍才有数
-     *    （约 2.8s）。不等它的话第一帧就是「半张牌」—— CPU / 内存 / 温度先出现，
+    /* 🔴 第一枪之前先等采样器吐出第一条读数。
+     *    常驻采样器得先把 powershell 拉起来、跑一次 nvidia-smi（≈1.5s）。
+     *    不等它的话第一帧就是「半张牌」—— CPU / 内存先出现，
      *    牌上留一个空位，GPU 下一拍才补进来，用户看到的就是
      *    「首次加载时 GPU 比别的项慢一拍」。
-     * ⚠️ 只等第一次：采样器没跑 / 这台机器没有 GPU 计数器时它立刻返回 false，
-     *    不会把后面的推送节奏也拖成 3s + 4.5s。 */
+     * ⚠️ 只等第一次：采样器没跑 / 这台机器没有 N 卡（GPU 与温度整项不画）时
+     *    它立刻返回 false，不会把后面的推送节奏也拖长。 */
     if (firstTick) {
       firstTick = false;
       await waitForFirstGpu();
@@ -1930,6 +1930,31 @@ if (!gotLock) {
     if (process.env.PET_QUIET === '1') {
       setTimeout(() => setQuiet(true, 'PET_QUIET'), 8000);
       setTimeout(() => setQuiet(false, 'PET_QUIET-end'), 18000);
+    }
+
+    /* 诊断口子：`PET_GPUINFO=1` 时打一条「Chromium 实际在用哪块 GPU」。
+     *
+     * 为什么需要：本机是核显 + 独显的双 GPU 笔记本，而 WMI 的 GPUEngine
+     * 计数器**同时**暴露两块卡的实例（按 luid 分）。那句「跨实例求和」到底
+     * 求的是谁，光看计数器分不出来 —— 得问 Chromium 自己。
+     * `auxAttributes.glRenderer` 里直接写着 ANGLE 解析到的适配器名
+     * （如 "ANGLE (Intel, Intel(R) UHD Graphics ...)"），这是硬证据。
+     *
+     * ⚠️ 12 秒才打：本机 GPU 进程启动阶段必崩一次、要等 main.js 的自动降级
+     *    重启跑完（见上面 GPU/GL 后端那段），太早问拿到的是半截状态。 */
+    if (process.env.PET_GPUINFO === '1') {
+      setTimeout(async () => {
+        try {
+          const b = await app.getGPUInfo('basic');
+          const aux = b.auxAttributes || {};
+          console.log('[gpuinfo] glRenderer=' + aux.glRenderer);
+          console.log('[gpuinfo] glVendor=' + aux.glVendor);
+          console.log('[gpuinfo] gpuDevice=' + JSON.stringify(b.gpuDevice));
+          console.log('[gpuinfo] featureStatus=' + JSON.stringify(app.getGPUFeatureStatus()));
+        } catch (e) {
+          console.warn('[gpuinfo] 取 GPU 信息失败:', e && e.message);
+        }
+      }, 12000);
     }
 
     /* 诊断口子：`PET_MEM=1` 时每 8 秒把各进程内存打一条日志（打 6 条就停）。

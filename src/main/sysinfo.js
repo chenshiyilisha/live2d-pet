@@ -228,7 +228,14 @@ function sensorScript(want) {
  * ⚠️ 只在该用的时候开：悬浮显示关着、或全屏静默中，立刻停掉（见 main.js 的
  *    refreshStatsTimer）。一条常驻进程哪怕很便宜，也不该在不需要时白跑。 */
 
-const SAMPLE_MS = 1000;      // 采样间隔。1000 是"够新鲜"与"够便宜"的折中
+/* 采样间隔的兜底值 —— 真正的节奏由 main.js 按**显示间隔**传进来
+ * （见 startSensorWatch）。显示每 3 秒才推一次，采样就没必要每秒一枪：
+ * 多出来的那两枪没有任何人看得到，只是白起两次 nvidia-smi（单次 ~180ms，
+ * 是这条路径的全部成本）。
+ * ⚠️ 两头都有理由：**不低于 1000**（底座那格要"眼前这一秒"的手感），
+ *    **不高于 LIVE_TTL**（再慢读数就算过期，查询会退回"现起一个进程打一枪"，
+ *    反而比常驻更贵）。 */
+const SAMPLE_MS = 1000;
 const LIVE_TTL = 5000;       // 读数超过这么久没更新就当过期（采样进程挂了时的兜底）
 
 let sensorChild = null;
@@ -237,6 +244,7 @@ let sensorStopped = true;
 let sensorRestarts = 0;
 let sensorRestartTimer = null;
 let sensorStartedAt = 0;   // 本次 spawn 的时刻（给"还没吐出第一行"的宽限期用）
+let sensorSampleMs = 0;    // 当前跑着的采样间隔（改间隔必须重启进程，见 startSensorWatch）
 let lastTickAt = 0;        // 最后一次收到读数的时刻（判"新不新鲜"）
 
 /* 常驻采样器给出的最近读数。没在采样 / 已过期时是 null，
@@ -245,16 +253,13 @@ const live = { gpu: null, gpuAt: 0, tempC: null, tempAt: 0, ticks: 0, gpuOk: fal
 
 /* 采样脚本。和 fullscreen.js 里那份同构，同样两条纪律：
  * 纯 ASCII + `-EncodedCommand`，以及每 10 拍自查父进程还在不在
- * （Windows 上父进程退出不会带走子进程，不留野进程）。 */
-/* 采样脚本。和 fullscreen.js 里那份同构，同样两条纪律：
- * 纯 ASCII + `-EncodedCommand`，以及每 10 拍自查父进程还在不在
  * （Windows 上父进程退出不会带走子进程，不留野进程）。
  *
  * 每拍只起**一个** nvidia-smi（一次拿利用率 + 温度，实测 ~180ms，
  * 与原先那条 WMI 查询的 161ms 同量级）。原先温度是每 3 拍取一次的分频，
  * 现在去掉：利用率每拍都要，而两个值同一次调用就能拿到，
  * 分频反而要把这一次调用拆成"每拍一次取利用率 + 每 3 拍一次取温度"= 更贵。 */
-function sensorWatchScript(parentPid) {
+function sensorWatchScript(parentPid, sampleMs) {
   return [
     "$ErrorActionPreference = 'SilentlyContinue'",
     "$smi = Join-Path $env:SystemRoot 'System32\\nvidia-smi.exe'",
@@ -274,14 +279,21 @@ function sensorWatchScript(parentPid) {
     '  }',
     '  $w.WriteLine(($o | ConvertTo-Json -Depth 4 -Compress))',
     '  $w.Flush()',
-    '  Start-Sleep -Milliseconds ' + SAMPLE_MS,
+    '  Start-Sleep -Milliseconds ' + sampleMs,
     '}'
   ].join('\n');
 }
 
-function startSensorWatch() {
+/* 起常驻采样器。sampleMs 由上层按显示节奏给（默认 SAMPLE_MS）。
+ * ⚠️ 间隔是**编码进脚本里的常量**，已经跑着的那份改不了 —— 所以间隔变了
+ *    必须重启进程才会生效（否则改了配置还是按老节奏采）。 */
+function startSensorWatch(sampleMs = SAMPLE_MS) {
   if (process.platform !== 'win32') return false;
-  if (sensorChild) return true;
+  if (sensorChild) {
+    if (sampleMs === sensorSampleMs) return true;
+    stopSensorWatch();
+  }
+  sensorSampleMs = sampleMs;
 
   sensorStopped = false;
   sensorRestarts = 0;
@@ -292,7 +304,7 @@ function startSensorWatch() {
     try {
       proc = spawn('powershell.exe', [
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-        '-EncodedCommand', Buffer.from(sensorWatchScript(process.pid), 'utf16le').toString('base64')
+        '-EncodedCommand', Buffer.from(sensorWatchScript(process.pid, sampleMs), 'utf16le').toString('base64')
       ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (err) {
       console.warn('[sensor] 起不了采样进程:', String(err?.message || err));
@@ -303,7 +315,7 @@ function startSensorWatch() {
     sensorChild = proc;
     sensorRestarts = 0;
     sensorStartedAt = Date.now();
-    console.log('[sensor] 采样进程已启动（每 ' + SAMPLE_MS + 'ms 一次）');
+    console.log('[sensor] 采样进程已启动（每 ' + sampleMs + 'ms 一次）');
 
     proc.stdout.setEncoding('utf8');
     sensorBuf = '';

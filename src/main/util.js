@@ -3,9 +3,9 @@
 /* 通用小工具。
  *
  * 放进这里的唯一标准：**纯函数、不碰 electron、不碰窗口**。
- * 这样一来谁都能 require 它而不会绕出循环依赖 —— 主进程的模块
- * （config / sysinfo / motion / menu）几乎都要用 clamp，让它们去
- * require 主文件是不行的（主文件又 require 它们）。
+ * 这样一来谁都能 require 它而不会绕出循环依赖 —— 主进程里用到 clamp 的
+ * （motion / reminder / sysinfo / main）直接 require 这里，绕开主文件
+ * （主文件再 require 它们，反过来就成环了）。
  */
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));

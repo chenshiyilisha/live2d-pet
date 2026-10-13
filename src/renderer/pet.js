@@ -1,5 +1,5 @@
 import * as PIXI from 'pixi.js';
-import { Live2DModel, config as live2dConfig } from '@naari3/pixi-live2d-display/cubism5';
+import { Live2DModel } from '@naari3/pixi-live2d-display/cubism5';
 
 /* 模型表 / 参数表 / 情绪姿态表 —— 全是只读的真相，见 params.js。
  * ⚠️ P 是 ESM 的 live binding：这里只能**读** P.XXX，不能赋值。 */
@@ -28,7 +28,14 @@ console.log('[pet] modules loaded');
  * ESM 的 import 绑定是只读的，跨模块赋值不成立。 */
 // 当前生效的模型（由主进程的 appearance.model 决定）
 let curModelName = 'hiyori';
-let MODEL_URL = MODELS.hiyori.url;
+
+/* 最近一次请求挂载的模型定义。
+ * mountModel 里那句 `await Live2DModel.from()` 要几百毫秒，这期间用户完全可能
+ * 又点了另一个模型 —— 先加载好的那份必须**丢掉**，否则两份纹理同时在场，
+ * 最后显示哪个取决于谁先 resolve。
+ * ⚠️ 不能拿 curModelName 当守卫：它要等 applyModelGeometry() 才更新，而那是
+ *    await 之后 —— 连点两次时第二次读到的还是旧名字，守卫形同虚设。 */
+let mountTarget = null;
 
 /* ============================================================
  *  DOM
@@ -243,6 +250,7 @@ async function mountModel(name) {
    *      （Cannot read properties of null (reading 'focus')）。
    * 先加载后替换把窗口缩到同步的几行里，两个问题一起没了。
    * 代价是切换瞬间内存里同时有两份纹理（画布 2400x4500），可以接受。 */
+  mountTarget = def;
   const next = await Live2DModel.from(def.url, {
     autoInteract: false,
     // 插件的默认策略只预加载 idle 那一组，TapBody 要等第一次点击才去 fetch
@@ -250,6 +258,12 @@ async function mountModel(name) {
     // 全部预加载掉，切换就是零延迟的。
     motionPreload: 'ALL'
   });
+  /* 加载期间又切了别的模型 → 这份已经过时：把刚拿到手的资源直接释放掉，
+   * 什么都不碰就返回（后来那次请求会自己把它要的挂上去）。 */
+  if (mountTarget !== def) {
+    try { next.destroy(); } catch { /* ignore */ }
+    return false;
+  }
   next.anchor.set(0, 0);
 
   /* ---- 2) 拆旧的。Cubism 的 GL 资源不释放的话，来回切几次就会
@@ -592,6 +606,7 @@ async function mountModel(name) {
     drawables: model.internalModel?.coreModel?.getDrawableCount?.(),
     params: model.internalModel?.coreModel?.getParameterCount?.()
   }));
+  return true;
 }
 
 async function boot() {
@@ -857,7 +872,7 @@ async function boot() {
  *  3. 别想推公式算落位。插件的 gl.viewport 是按「逻辑尺寸」写入的，
  *     却被 GL 当设备像素用（resolution=1.5 时画面只占画布左上 2/3），
  *     且真正生效的视口又不是 internalModel.viewport 里那个值。
- *     所以 window = s×画布坐标 + 常数 里的那个常数只能实测标定（见 MAP）。
+ *     所以 window = s×画布坐标 + 常数 里的那个常数只能实测标定。
  *
  *  4. 别想遍历 drawable 顶点自动量包围盒。Cubism Core 每调一次
  *     getDrawableVertexPositions 都在 WASM 堆上分配数组，几十个 drawable
@@ -931,7 +946,6 @@ function applyModelGeometry(name) {
   const m = MODELS[name];
   if (!m) return;
   curModelName = name;
-  MODEL_URL = m.url;
   INK_TOP_K = m.inkTopK;
   INK_H = m.inkH;
   INK_W = m.inkW;
@@ -1014,7 +1028,6 @@ const TALK_W = BUBBLE_W + UI_PAD * 2;
  * ⚠️ CANVAS_OFF 已改为 layout() 里**现算**（由 PET_SCALE / HEAD_PAD / INK_* 解出），
  *    下面的初值只是兜底，运行后会被覆盖。 */
 let CANVAS_OFF = { x: -97.8, y: -378 };
-let MAP = { x: 0, y: 0 };   // 保留：历史上用来记插件 viewport 的固定偏置，实测恒为 0
 
 let petRect = { x: 0, y: 0, w: 0, h: 0 };
 
@@ -1248,7 +1261,7 @@ function isOverPet(x, y) {
 
 /* 更新视线焦点。
  *
- * ⚠️ 别只依赖 mousemove —— 它只在**窗口内**触发，而窗口只有 368x418，
+ * ⚠️ 别只依赖 mousemove —— 它只在**窗口内**触发，而窗口只有三百来像素宽，
  *    鼠标一移出去，pointer 就冻在最后那个点上，目光跟着停住。
  *    所以主进程会按 30fps 轮询系统光标位置发过来（preload 的 onCursor），
  *    坐标同样是「相对窗口左上角」，和 e.clientX/clientY 完全一致，
@@ -1694,7 +1707,8 @@ window.pet?.onAppearance?.(async (a) => {
   }
   if (a.model && a.model !== curModelName) {
     try {
-      await mountModel(a.model);
+      const mounted = await mountModel(a.model);
+      if (!mounted) return;        // 期间又切了别的模型，这次的结果已经作废，别报"换好了"
       setEmotion('happy');
       showStatus(`换成${MODELS[a.model]?.label || a.model}了`);
     } catch (err) {
@@ -1742,9 +1756,21 @@ window.pet?.on?.('pet:wander-end', () => { setEmotion('calm'); });
 let quiet = false;
 let quietFps = 12;
 
-function applyQuietFrame() {
-  // pixi v8 的语义：0 = 不限帧（就是平时的默认行为）
-  const fps = quiet ? quietFps : 0;
+/* 窗口被用户藏进托盘了（主进程按窗口的 show/hide 事件推过来）。 */
+let hiddenByUser = false;
+
+/* 平常的帧率上限。
+ * ⚠️ 以前这里是 0（= 不限帧 = 跟着显示器刷新率跑）。这是个常驻挂件，待机动作
+ *    只有呼吸和眨眼，60fps 绰绰有余；而在高刷屏（120/144/165Hz）上"不限帧"
+ *    意味着白烧一倍以上的渲染开销，画面上却一个像素都看不出差别。 */
+const IDLE_FPS = 60;
+/* 藏进托盘时的帧率。不是 0、也不是 stop()（ticker 停了恢复要补一次全量重绘，
+ * 容易漏 —— 见下面 applyFrameCap 的说明）：1fps 足够让"她还在"成立，开销近零。 */
+const HIDDEN_FPS = 1;
+
+function applyFrameCap() {
+  // pixi v8 的语义：0 = 不限帧
+  const fps = hiddenByUser ? HIDDEN_FPS : (quiet ? quietFps : IDLE_FPS);
   try { if (app?.ticker) app.ticker.maxFPS = fps; } catch { /* ignore */ }
   /* ⚠️ 必须**两个 ticker 一起降**，只降 app.ticker 会漏掉一半开销。
    *    这里是本文件里最容易看漏的一处：上面的 `Live2DModel.registerTicker(PIXI.Ticker)`
@@ -1772,10 +1798,20 @@ window.pet?.on?.('pet:quiet', (d) => {
      * 已经有数字在显示时这个调用什么也不做（保留最后一帧读数，和以前一致）。 */
     dismissStatsLoading();
   }
-  applyQuietFrame();
+  applyFrameCap();
   if (changed) {
-    console.log('[pet] quiet', JSON.stringify({ quiet, fps: quiet ? quietFps : 0 }));
+    console.log('[pet] quiet', JSON.stringify({ quiet, fps: quiet ? quietFps : IDLE_FPS }));
   }
+});
+
+/* 窗口被藏起来 / 又露出来了（主进程在窗口的 show/hide 事件里推）。
+ * 藏起来 ≠ 不渲染：这个窗口开着 backgroundThrottling:false，Chromium 不会
+ * 自作主张降频，不显式压帧她就会一直满速画一个谁也看不到的模型。 */
+window.pet?.on?.('pet:visible', (d) => {
+  const hidden = d ? !d.visible : false;
+  if (hidden === hiddenByUser) return;
+  hiddenByUser = hidden;
+  applyFrameCap();
 });
 
 // 系统状态悬浮显示

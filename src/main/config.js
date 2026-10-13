@@ -302,6 +302,16 @@ function resolvePersona(cfg) {
  * 反复写 .bak、反复刷日志。 */
 let cfgCorruptHandled = false;
 
+/* 「读不了配置」时的失败原因（错误码）；成功读到就清空。
+ *
+ * ⚠️ 它存在的唯一理由是**拦住后面那次落盘**：读都读不到还照常写，等于拿手上
+ *    这份默认值把用户文件覆盖掉 —— 名字 / 人设 / API Key / 所有开关一次清零，
+ *    而且只有一行终端日志，界面上看不出任何异常。
+ *    所以 saveConfig 看到它非空就直接拒绝写入（见 saveConfig）。
+ *    ENOENT（还没配过）不算失败，那是正常状态。
+ *    （上面那段注释早就写明了这个危险，但代码一直是照写不误 —— 现在补上。） */
+let cfgUnreadable = null;
+
 /* 读配置。
  * ⚠️ 必须**逐段合并**而不是整对象覆盖：老的 config.json 里没有新加的段落
  *    （appearance / motion / interaction …），如果直接 { ...base, ...parsed }，
@@ -323,10 +333,13 @@ function loadConfig() {
     // a) ENOENT：首次运行，正常，用默认值
     // b) EACCES / EPERM / EBUSY / EMFILE 等：环境有问题，不该当成"没配过"
     if (err && err.code !== 'ENOENT') {
-      console.error('[config] 读不了配置文件（不是首次运行）：', err.code || err.message, cfgPath);
+      cfgUnreadable = err.code || String(err.message || err);
+      console.error('[config] 读不了配置文件（不是首次运行）：', cfgUnreadable, cfgPath,
+        '—— 本次运行不再往磁盘写配置（写了会把用户设置抹成默认值）');
     }
     return base;
   }
+  cfgUnreadable = null;      // 真读到了，解除写入封锁
 
   let parsed = null;
   try {
@@ -362,6 +375,14 @@ function loadConfig() {
 }
 
 function saveConfig(cfg) {
+  /* 读都读不到，就绝不能写 —— 见 cfgUnreadable 那段。
+   * 这比"写失败"更该早一步拦住：写失败只是这一次没存上，
+   * 写成功却是把用户的东西永久抹掉。 */
+  if (cfgUnreadable) {
+    console.error('[config] 拒绝写入：本次运行读不到配置（' + cfgUnreadable + '），',
+      '写回去会把用户设置抹成默认值。文件可读写后重启应用即可恢复。');
+    return false;
+  }
   try {
     fs.mkdirSync(app.getPath('userData'), { recursive: true });
     fs.writeFileSync(getConfigPath(), JSON.stringify(cfg, null, 2), 'utf8');
@@ -371,6 +392,10 @@ function saveConfig(cfg) {
     return false;
   }
 }
+
+/* 本次运行是否因为「读不到配置」而禁止落盘。
+ * 给上层做提示用 —— 这种情况下用户改设置会"点了没反应"，必须说清楚。 */
+function cfgReadBlocked() { return cfgUnreadable; }
 
 module.exports = {
   LIMITS,
@@ -386,5 +411,6 @@ module.exports = {
   resolveName,
   resolvePersona,
   loadConfig,
-  saveConfig
+  saveConfig,
+  cfgReadBlocked
 };

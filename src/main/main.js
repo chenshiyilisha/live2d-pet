@@ -37,8 +37,8 @@ const clampScale = (v) => clamp(Number(v) || 1, LIMITS.scale.min, LIMITS.scale.m
 const clampOpacity = (v) => clamp(Number(v) || 1, LIMITS.opacity.min, LIMITS.opacity.max);
 const {
   LIMITS, NAME_LIMITS, getConfigPath, DEFAULT_CONFIG,
-  PERSONA_PARTS, personaPartDefaults, buildPersonaFromParts, hasCustomParts,
-  resolveName, resolvePersona, loadConfig, saveConfig
+  PERSONA_PARTS, personaPartDefaults,
+  resolveName, resolvePersona, loadConfig, saveConfig, cfgReadBlocked
 } = require('./config');
 const { startLocalServer } = require('./server');
 const { collectStats, formatStats, startSensorWatch, stopSensorWatch, waitForFirstGpu, HUD_FIELDS, FULL_FIELDS } = require('./sysinfo');
@@ -160,7 +160,17 @@ function patchConfig(section, patch) {
   const next = { ...cur };
   if (section) next[section] = { ...(cur[section] || {}), ...patch };
   else Object.assign(next, patch);
-  saveConfig(next);
+  /* ⚠️ 落盘结果必须看一眼，再决定要不要说"改好了"。
+   *    saveConfig 有两种失败：磁盘写不进去，以及"本次运行读不到配置"
+   *    （那种情况下它**故意拒绝写**，见 config.js 的 cfgUnreadable）。
+   *    以前这里把返回值丢掉、菜单照样弹「大小 106%」—— 用户以为成功了，
+   *    重启一看没变，属于"提示与实际不符"。 */
+  if (!saveConfig(next)) {
+    const blocked = cfgReadBlocked();
+    toast(blocked
+      ? `配置读不了（${blocked}），这次改动没能保存`
+      : '设置没能写入磁盘，重启后可能不生效');
+  }
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.webContents.send('config:changed'); } catch { /* 窗口在销毁 */ }
   }
@@ -225,6 +235,12 @@ function createWindow() {
    * 否则「阿岩」会从这些地方漏出来。index.html 里的 <title> 是静态兜底，
    * 真正生效的是这一行。 */
   mainWindow.setTitle(resolveName(loadConfig()));
+
+  /* 可见性一变就通知渲染层。挂在窗口事件上、而不是在每个 hide/show 的调用点
+   * 各写一次：显示/隐藏分散在托盘、渲染层「隐藏」、第二实例、静默等好几处，
+   * 漏一处就有一处偷偷跑到满帧（用户还以为藏起来就省了）。 */
+  mainWindow.on('show', notifyVisibility);
+  mainWindow.on('hide', notifyVisibility);
 
   /* 启动时把生效的名字打出来。
    * 名字有三处落点（托盘 / 标题 / 人设自称），用户改名后如果哪一处没跟着变，
@@ -304,7 +320,7 @@ function createWindow() {
  * ==========================================================
  *
  * 渲染进程只能靠 mousemove 知道光标在哪，而 mousemove 只在**窗口内**触发。
- * 窗口才 368x418，鼠标一移出去就再也没有事件了，pointer 冻在最后那个点，
+ * 窗口才三百来像素宽、三百多高，鼠标一移出去就再也没有事件了，pointer 冻在最后那个点，
  * 表现就是「鼠标离开她附近，目光就不动了」。
  *
  * 修法：由主进程按固定节奏读系统光标位置，换算成「相对窗口左上角」的坐标
@@ -392,10 +408,14 @@ function refreshStatsTimer() {
    *     而且 GPU 那个数描述的是**眼前这一秒**而不是过去 4 秒（见 sysinfo.js）。
    * 关：立刻停掉。它再便宜也不该在没人看的时候白跑。 */
   const hudOn = !!cfg.monitor?.floating && !quiet;
-  if (hudOn) startSensorWatch(); else stopSensorWatch();
-  if (!hudOn) return;
+  if (!hudOn) { stopSensorWatch(); return; }
 
   const ms = clamp(Number(cfg.monitor?.intervalMs) || 3000, 1000, 30000);
+
+  /* 采样节奏**跟着显示节奏走**：显示每 ms 推一次，采样比它更密就是白烧 ——
+   * 多采的那几枪没有任何人看得到。上限压在 sysinfo 的 LIVE_TTL 以内，
+   * 否则读数会"过期"，查询反而退回更贵的"现起一个进程打一枪"。 */
+  startSensorWatch(clamp(ms, 1000, 5000));
 
   /* 本轮的第一次推送要不要先等 GPU（见 tick 里那段）。每轮 timer 重建都重置。 */
   let firstTick = true;
@@ -460,8 +480,6 @@ function refreshStatsTimer() {
  * ========================================================== */
 
 let quiet = false;
-
-function isQuiet() { return quiet; }
 
 function quietPayload() {
   const q = loadConfig().quiet || {};
@@ -983,10 +1001,21 @@ async function promptPersona() {
   return true;
 }
 
+/* 显示 / 隐藏。
+ * ⚠️ 窗口的 show/hide 事件里会通知渲染层（见 createWindow），
+ *    不需要在这里手动喊 —— 那正是"漏一处就有一处白烧 CPU"的来源。 */
 function toggleVisible() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isVisible()) mainWindow.hide();
   else { mainWindow.show(); mainWindow.setAlwaysOnTop(isOn('appearance', 'alwaysOnTop'), 'floating'); }
+}
+
+/* 窗口可见性变了，告诉渲染层。
+ * 她在隐藏期间没必要满速渲染一个谁也看不见的模型 —— 这个窗口开了
+ * backgroundThrottling:false，Chromium 不会因为"看不见"就降频。 */
+function notifyVisibility() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try { mainWindow.webContents.send('pet:visible', { visible: mainWindow.isVisible() }); } catch { /* ignore */ }
 }
 
 /* 把窗口钉到某块屏的右下角。

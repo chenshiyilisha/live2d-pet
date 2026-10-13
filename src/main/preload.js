@@ -14,6 +14,7 @@ const MAIN_EVENTS = [
   'pet:set-emotion',    // 右键菜单里选了表情
   'pet:play-motion',    // 右键菜单里选了动作
   'pet:quiet',          // 进入 / 退出全屏静默（渲染层据此降帧、闭嘴）
+  'pet:visible',        // 窗口显示 / 隐藏了（隐藏时降到 1fps，别白烧）
   'monitor:stats'       // 系统状态悬浮显示的数据
 ];
 

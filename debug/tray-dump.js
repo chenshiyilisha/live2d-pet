@@ -13,6 +13,9 @@ const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
 const src = fs.readFileSync(path.join(ROOT, 'src/main/main.js'), 'utf8');
+/* 版本号从 package.json 读，不手抄 —— 这里原先写死 '0.1.0'，
+ * 而包已经发到 0.1.3 了它还照报旧值（手抄副本脱节的活证据）。 */
+const PKG = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 
 // 切出函数源码：从 `function NAME(` 到下一个行首的 `}`
 const sliceFn = (name) => {
@@ -89,7 +92,12 @@ const constSrc = [
    * 它要遍历 PERSONA_PARTS。PERSONA_PARTS 的 def 又用了 EMOTION_TAGS，
    * 两个都从源码切。 */
   sliceLineConst(cfgSrc, 'EMOTION_TAGS'),
-  sliceArrConst(cfgSrc, 'PERSONA_PARTS')
+  sliceArrConst(cfgSrc, 'PERSONA_PARTS'),
+  /* ⚠️ SCALE_STEP 也要**从源码切**。它是 `const SCALE_STEP = LIMITS.scale.step`
+   *    这种派生写法，以前这里是手抄的 0.06 —— 一旦调了 LIMITS.scale.step，
+   *    dump 出来的"放大 / 缩小"步长就是假的，而且不会有任何报错。
+   *    必须排在 LIMITS 之后（它要拿 LIMITS 算）。 */
+  sliceLineConst(src, 'SCALE_STEP')
 ].join('\n');
 
 let captured = null;
@@ -103,7 +111,6 @@ const sandbox = {
    *    必须放进 vm 里定义才能真的读到默认值。 */
   clamp: (v, a, b) => Math.min(b, Math.max(a, v)),
   pomodoroStatus: () => null,
-  SCALE_STEP: 0.06,
   app: { getLoginItemSettings: () => ({ openAtLogin: false }), getPath: () => 'X', quit: rec('quit') },
   Menu: { buildFromTemplate: (t) => { captured = t; return { __menu: true }; } },
   patchConfig: rec('patchConfig'),
@@ -132,7 +139,7 @@ const sandbox = {
   promptPersona: rec('promptPersona'),
   // 更新模块（src/main/updater.js）。这里返回"没有新版"的静止状态，
   // 菜单标题里就不带状态后缀；要验"有新版时标题怎么变"就改这个返回值。
-  updaterStatus: () => ({ state: 'idle', version: '', current: '0.1.0', progress: 0, lastError: '' }),
+  updaterStatus: () => ({ state: 'idle', version: '', current: PKG.version, progress: 0, lastError: '' }),
   checkForUpdates: rec('checkForUpdates'),
   getConfigPath: () => 'X/config.json',
   saveConfig: rec('saveConfig'),

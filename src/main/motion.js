@@ -25,6 +25,11 @@ const win = () => {
 
 let moveAnim = null;
 
+/* doWander 里那个「溜达结束顺势贴边」的延后触发（1250ms 后）。
+ * 它到点也会写窗口位置，所以和 moveAnim 一样归 cancelMoveAnim() 管 ——
+ * 用户一上手（拖拽）就必须一起撤掉，否则两条 setBounds 打架。 */
+let snapGuard = null;
+
 /* 「暂停」= 全屏 / 游戏静默期间冻结一切自动移动（见 main.js 的 setQuiet）。
  *
  * ⚠️ 为什么不复用 motion.enabled 配置开关：那是**用户的选择**，这是**环境
@@ -37,11 +42,9 @@ function setMotionPaused(on) {
   if (next === paused) return;
   paused = next;
   if (paused) {
-    // 立刻收手：正在跑的平滑移动、排着的溜达、溜达结束后那次贴边，全部撤掉
+    // 立刻收手：平滑移动与溜达结束后的贴边（都在 cancelMoveAnim 里）、排着的溜达
     cancelMoveAnim();
     clearTimeout(wanderTimer);
-    clearTimeout(snapGuard);
-    snapGuard = null;
   } else {
     // 醒了之后按当前配置重新排一次（配置可能在这期间被改过）
     resetWanderTimer();
@@ -52,6 +55,12 @@ function isMotionPaused() { return paused; }
 
 function cancelMoveAnim() {
   if (moveAnim) { clearInterval(moveAnim); moveAnim = null; }
+  /* ⚠️ snapGuard 也必须一起撤 —— 它到点会自己跑一次 edgeSnap() → animateTo()。
+   *    原先这里只清 moveAnim，于是「溜达途中抓住她」之后 1.25 秒，那条自动贴边
+   *    照样触发，和用户手上的拖拽同时写 setBounds —— 正是本文件头禁令的那个
+   *    「一边跟着走一边自己抽搐」。拖完松手时 pet:drag-end 会自己贴边，
+   *    所以撤掉它不会让功能缺失。 */
+  if (snapGuard) { clearTimeout(snapGuard); snapGuard = null; }
 }
 
 /* 给诊断通道用：判断「拖拽有没有把溜达的平滑移动掐掉」，
@@ -102,8 +111,6 @@ function currentDisplay() {
   }
   return screen.getPrimaryDisplay();
 }
-
-let snapGuard = null;      // doWander 里那个延后触发的 set 拿它做取消
 
 function edgeSnap() {
   const w = win();

@@ -394,6 +394,5 @@ module.exports = {
   checkForUpdates,
   startDownload,
   installUpdate,
-  updaterStatus: status,
-  UPDATER_STATES: S
+  updaterStatus: status
 };

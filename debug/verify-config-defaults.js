@@ -132,6 +132,35 @@ console.log('\n══════ 4. 关掉的开关不会"点了没反应" ═�
   reminders.disposeReminders();
 }
 
+console.log('\n══════ 5. 读不到配置时**拒绝写入**（防抹掉用户数据）══════\n');
+{
+  /* 场景：config.json 被别的程序占着 / 权限不对 → readFileSync 抛非 ENOENT 的错。
+   * 老行为：loadConfig 回退默认值，而**下一次任何落盘（改大小、拖窗口）都会把
+   *   这份默认值整份写回** —— 名字 / 人设 / API Key / 开关一次清零，界面上还
+   *   完全看不出来。这是全项目唯一会静默丢用户数据的路径。
+   * 现在：读失败记下原因，saveConfig 直接拒绝写。
+   * 模拟手法：把 config.json 换成一个**同名目录** → readFileSync 报 EISDIR。 */
+  rmCfg();
+  writeCfg({ llm: { apiKey: 'do-not-lose-me' }, appearance: { scale: 1.2 } });
+  const before = fs.readFileSync(cfgFile, 'utf8');
+
+  fs.rmSync(cfgFile, { force: true });
+  fs.mkdirSync(cfgFile);                            // 用目录冒充"读不了的配置"
+  const cfg = config.loadConfig();
+  check(config.cfgReadBlocked() !== null, '读失败时记下了原因（cfgReadBlocked 非空）');
+  check(cfg.appearance.scale === 1, '读不到，这次只能回退默认值（如实反映）');
+
+  const saved = config.saveConfig({ ...cfg, appearance: { ...cfg.appearance, scale: 0.8 } });
+  check(saved === false, 'saveConfig 拒绝写入（返回 false）');
+
+  fs.rmdirSync(cfgFile);
+  fs.writeFileSync(cfgFile, before, 'utf8');        // 把用户的文件放回去
+  check(fs.readFileSync(cfgFile, 'utf8') === before, '磁盘上的用户配置**毫发无损**');
+
+  config.loadConfig();                              // 读得通了
+  check(config.cfgReadBlocked() === null, '文件恢复可读后，写入封锁自动解除');
+}
+
 /* 清理：临时目录 + 撤销 require 劫持 */
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
 Module.prototype.require = origRequire;

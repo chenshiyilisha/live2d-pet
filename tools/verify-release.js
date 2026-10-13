@@ -13,7 +13,16 @@
  *   node tools/verify-release.js v0.1.0     # 查指定 tag
  *
  * 退出码：0 全绿 / 1 有问题（可以直接挂到 CI 上）
+ *
+ * ⚠️ 第 3 步要**下载** Release 上的 latest.yml 正文来比对，而资产下载域名
+ * （release-assets.githubusercontent.com）在某些网络里根本连不上 —— 本机实测
+ * 直连超时、本地代理也不放行，同一时刻 api.github.com 却是通的。所以下不到时
+ * **自动降级**：改读本地 dist/latest.yml，再用 GitHub 返回的资产 sha256 摘要
+ * 与本地文件对算，把"传上去的字节是不是本地构建的那份"补上（见 3b）。
  */
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 const https = require('https');
 const { execFileSync } = require('child_process');
 
@@ -157,13 +166,62 @@ function fetchText(url) {
   }
   ok('latest.yml 在 Release 上');
 
-  const ymlText = (await fetchText(ymlAsset.browser_download_url)).body;
+  /* 优先拿 Release 上的正文比。下不到就降级 —— 这一步失败**不代表**发版有问题，
+   * 只说明当前网络到资产存储域名不通，别因此去重传 114 MB。（详见文件头注释） */
+  let ymlText = '';
+  let ymlFromLocal = false;
+  try {
+    ymlText = (await fetchText(ymlAsset.browser_download_url)).body;
+  } catch (err) {
+    const localYml = path.join(__dirname, '..', 'dist', 'latest.yml');
+    if (!fs.existsSync(localYml)) {
+      no(`下不到 Release 上的 latest.yml（${err.message}），本地也没有 dist/latest.yml 可比`);
+      process.exit(1);
+    }
+    console.log('  ⚠️  下不到 Release 上的 latest.yml，改用本地 dist/latest.yml 比对');
+    console.log(`     （${err.message}）`);
+    console.log('     这多半是当前网络到资产存储域名不通，不是发版出错；下面 3b 会补内容级校验。');
+    ymlText = fs.readFileSync(localYml, 'utf8');
+    ymlFromLocal = true;
+  }
   const ymlVersion = (ymlText.match(/^version:\s*(.+)$/m) || [])[1]?.trim();
   const ymlPath = (ymlText.match(/^path:\s*(.+)$/m) || [])[1]?.trim();
   const ymlSha = (ymlText.match(/^sha512:\s*(.+)$/m) || [])[1]?.trim();
   const fileUrls = [...ymlText.matchAll(/^\s*-\s*url:\s*(.+)$/gm)].map((m) => m[1].trim());
 
   console.log(`   清单里：version=${ymlVersion}  path=${ymlPath}`);
+
+  /* 3b：只在降级路径上跑。GitHub 从 2025 起给每个资产带 sha256 摘要
+   * （assets[].digest），拿它与本地 dist/ 里的同名文件对算，等价于确认
+   * 「远端存的就是本地构建的那一份字节」—— 比只比文件名和大小强得多，
+   * 能拦住"把上一次的旧 exe 传上去"这种最阴的错。 */
+  if (ymlFromLocal) {
+    console.log('');
+    console.log('3b. 远端资产与本地构建产物逐字节比对');
+    const hashFile = (f) => new Promise((res, rej) => {
+      const h = crypto.createHash('sha256');
+      const rs = fs.createReadStream(f, { highWaterMark: 4 * 1024 * 1024 });
+      rs.on('data', (c) => h.update(c));
+      rs.on('end', () => res(h.digest('hex')));
+      rs.on('error', rej);
+    });
+    for (const a of assets) {
+      const localFile = path.join(__dirname, '..', 'dist', a.name);
+      if (!fs.existsSync(localFile)) {
+        console.log(`   ℹ️  ${a.name}：本地 dist/ 里没有同名文件，跳过内容比对`);
+        continue;
+      }
+      const localSize = fs.statSync(localFile).size;
+      if (localSize !== a.size) { no(`${a.name} 大小不一致：远端 ${a.size} / 本地 ${localSize}`); continue; }
+      if (a.digest && /^sha256:/.test(a.digest)) {
+        const localDigest = 'sha256:' + (await hashFile(localFile));
+        if (localDigest === a.digest) ok(`${a.name}：字节级一致（${(a.size / 1048576).toFixed(2)} MB，sha256 对得上）`);
+        else no(`${a.name} sha256 不一致：远端 ${a.digest} / 本地 ${localDigest}`);
+      } else {
+        ok(`${a.name}：大小一致（${(a.size / 1048576).toFixed(2)} MB，服务端未给摘要）`);
+      }
+    }
+  }
 
   console.log('');
   console.log('4. 清单里提到的文件都在 Release 上');

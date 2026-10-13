@@ -92,10 +92,21 @@ function createStreamFilter(send, sendEmotion) {
 
 /* 流式对话。
  *
- * 参数：messages + { baseUrl, apiKey, model, send, sendEmotion }
+ * 参数：messages + { baseUrl, apiKey, model, extraBody, send, sendEmotion }
  * 没配 apiKey 时从 OFFLINE_REPLIES 里随机挑一句逐字吐出去 —— 走的是
- * 和真实回复**完全同一条通道**，渲染层不需要区分在线还是离线。 */
-async function streamLLM(messages, { baseUrl, apiKey, model, send, sendEmotion }) {
+ * 和真实回复**完全同一条通道**，渲染层不需要区分在线还是离线。
+ *
+ * `extraBody` 是给「各家服务自己的开关」留的口子，会浅合并进请求体。
+ * 为什么需要它：现在主流的混合思考模型（Qwen3 系、GLM、DeepSeek 的
+ * reasoning 版）**默认开着思考**，会在正文之前先流一段 `delta.reasoning_content`。
+ * 而下面只认 `delta.content`（见 while 循环里的注释），那段推理就被静默丢掉了 ——
+ * 现象是「气泡开着，半天不吐一个字」。实测魔搭的 Qwen3.8-Flash-Next：
+ * 不加这个开关首字 1087ms（其中 14 个推理分片），加 `{"enable_thinking":false}`
+ * 后 523ms，推理分片 0。各家键名不一样（`enable_thinking` / `thinking` /
+ * `chat_template_kwargs` 都见过），所以这里不做语义解释，原样透传。
+ * ⚠️ 合并顺序把 model / messages / stream 放在后面 —— 这三个是本层的契约，
+ *    不许被 extraBody 顶掉（verify-llm.js 有断言拦这条）。 */
+async function streamLLM(messages, { baseUrl, apiKey, model, extraBody, send, sendEmotion }) {
   const filter = createStreamFilter(send, sendEmotion);
 
   if (!apiKey) {
@@ -109,6 +120,7 @@ async function streamLLM(messages, { baseUrl, apiKey, model, send, sendEmotion }
   }
 
   const url = `${String(baseUrl).replace(/\/+$/, '')}/chat/completions`;
+  const extra = extraBody && typeof extraBody === 'object' && !Array.isArray(extraBody) ? extraBody : {};
   let res;
   try {
     res = await fetch(url, {
@@ -117,7 +129,7 @@ async function streamLLM(messages, { baseUrl, apiKey, model, send, sendEmotion }
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`
       },
-      body: JSON.stringify({ model, messages, stream: true })
+      body: JSON.stringify({ ...extra, model, messages, stream: true })
     });
   } catch (err) {
     return { ok: false, error: `连接失败：${err.message}` };
@@ -147,6 +159,9 @@ async function streamLLM(messages, { baseUrl, apiKey, model, send, sendEmotion }
       const payload = trimmed.slice(5).trim();
       if (payload === '[DONE]') continue;
       try {
+        // ⚠️ 只取 delta.content。推理型模型会另发 delta.reasoning_content，
+        //    这里**故意丢掉** —— 思考过程不该念给用户听（气泡 + TTS 都会念）。
+        //    代价是推理期间界面上什么都不出来，所以配了 extraBody 让上层能关掉思考。
         const delta = JSON.parse(payload).choices?.[0]?.delta?.content;
         if (delta) filter.push(delta);
       } catch { /* 跳过不完整分片 */ }

@@ -1,10 +1,11 @@
 import * as PIXI from 'pixi.js';
-import { Live2DModel } from '@naari3/pixi-live2d-display/cubism5';
+import { Live2DModel, MotionPriority } from '@naari3/pixi-live2d-display/cubism5';
 
 /* 模型表 / 参数表 / 情绪姿态表 —— 全是只读的真相，见 params.js。
  * ⚠️ P 是 ESM 的 live binding：这里只能**读** P.XXX，不能赋值。 */
 import {
-  MODELS, MODEL_NAME, INK_TOP_C_RATIO, P, State, EMOTION
+  MODELS, MODEL_NAME, INK_TOP_C_RATIO, P, State, EMOTION,
+  EMO_SPEED, EMO_SPEED_DEFAULT
 } from './params.js';
 import { configureTTS, initTTS, speak, stopSpeak, ttsVoiceInfo } from './tts.js';
 import { abortRecording, configureRecorder } from './recorder.js';
@@ -85,6 +86,8 @@ let busy = false;
 // 口型
 let mouthPhase = 0;
 let mouthLevel = 0;
+// 说话时视线游移的相位（累积秒数，见 updateGaze 的 SPEAKING 分支）
+let speakPhase = 0;
 
 // 情绪
 let emotion = 'calm';
@@ -136,6 +139,26 @@ function readParam(id) {
   }
 }
 
+/* 播 / 停一个**事件驱动**的动作组（目前只有 Drag / Walk，都是本项目自制的，
+ * 见 tools/make-motions.js）。
+ *
+ * ⚠️ 别拿它播 Idle —— 待机是插件的内建调度（见 setState 附近那段说明），
+ *    手动播 Idle 用 NORMAL 优先级会抢断正在播的待机动作，把平滑交叉淡化
+ *    打成一次硬切。Drag / Walk 要的恰恰是「抢断」：抓住她 / 开始溜达的
+ *    那一刻必须立刻切过去，所以用 FORCE。
+ *
+ * 停止必须显式调 stopAllMotions()：这俩是 Loop:true 的持续动作，永远不
+ * finish，不停它就永远交不回给 idle 调度（画面会一直定格在挣扎/走路）。 */
+function playEventMotion(group) {
+  try { model?.motion?.(group, undefined, MotionPriority.FORCE); }
+  catch { /* 模型没这个组就算了 */ }
+}
+
+function stopEventMotions() {
+  try { model?.internalModel?.motionManager?.stopAllMotions?.(); }
+  catch { /* ignore */ }
+}
+
 /* 切情绪。目标变了之后由 ticker 逐帧插值过去，不会硬切。 */
 function setEmotion(name) {
   if (!EMOTION[name] || name === emotion) return;
@@ -148,7 +171,11 @@ function setEmotion(name) {
  * 这里用「先撤销上一帧增量、再写新值」的写法，而不是直接覆盖：
  * ParamAngleY 这类参数 focus() 每帧也在写，直接覆盖会把视线跟随压掉；
  * 而如果某个参数根本没别人写，直接写又会在帧间一层层累积。
- * 撤销法对这两种情况都成立。 */
+ * 撤销法对这两种情况都成立 —— 但它**只在调用顺序正确时**才成立：
+ * 必须在 updateGaze() 之后调（见主循环里那段说明）。
+ *
+ * ⚠️ 每个字段都要有对应的一行 put。EMOTION 表里加了字段、这里忘了写，
+ *    表现是"怎么调都不生效"而且完全不报错（verify-expressive.js 有断言）。 */
 function applyEmotion() {
   const put = (id, v) => {
     if (v === undefined) return;
@@ -157,21 +184,64 @@ function applyEmotion() {
     emoApplied[id] = v;
   };
 
-  put(P.BROW_L_Y, emoCur.browY);
-  put(P.BROW_R_Y, emoCur.browY);
+  // 眉 —— 左右分开写。这是"像人"和"像图"的分界：真实的表情从不完全对称
+  put(P.BROW_L_Y, emoCur.browLY);
+  put(P.BROW_R_Y, emoCur.browRY);
+  put(P.BROW_L_X, emoCur.browLX);
+  put(P.BROW_R_X, emoCur.browRX);
   put(P.BROW_L_ANGLE, emoCur.browAngle);
   put(P.BROW_R_ANGLE, emoCur.browAngle);
   put(P.BROW_L_FORM, emoCur.browForm);
   put(P.BROW_R_FORM, emoCur.browForm);
+  // 眼 / 嘴 / 脸红 / 肩
   put(P.MOUTH_FORM, emoCur.mouthForm);
   put(P.EYE_L_SMILE, emoCur.eyeSmile);
   put(P.EYE_R_SMILE, emoCur.eyeSmile);
   put(P.CHEEK, emoCur.cheek);
   put(P.SHOULDER, emoCur.shoulder);
-  put(P.ANGLE_Z, emoCur.headZ);
-  put(P.ANGLE_Y, emoCur.headY);
   put(P.EYE_L, emoCur.eyeOpen);
   put(P.EYE_R, emoCur.eyeOpen);
+  // 头（歪 / 点）—— 会和 focus() 抢 ANGLE_Y/_Z，靠顺序共存，别提前
+  put(P.ANGLE_Z, emoCur.headZ);
+  put(P.ANGLE_Y, emoCur.headY);
+  // 呆毛（纯自由参数）+ 身体（物理输入 → 顺带带动头发/裙摆/缎带）
+  put(P.AHOGE, emoCur.ahoge);
+  put(P.BODY_Y, emoCur.bodyY);
+  put(P.BODY_Z, emoCur.bodyZ);
+}
+
+/* 视线 / 头部朝向。
+ *
+ * 四种状态各有各的「眼神」：
+ *   IDLE               —— 跟着光标跑（桌宠最基本的"她注意到你了"）
+ *   LISTENING/THINKING —— 看向正前方（用户在说话 / 她在想怎么说）
+ *   SPEAKING           —— 小幅游移。**原来这里根本没有这一支**，
+ *                         一开口眼珠就死盯一个方向冻住 —— 是"活"和"僵"
+ *                         之间最明显的一道线（2026-10-13 补上）。
+ *
+ * pointer 为 null（光标不在窗口内 / 还没收到第一帧）时**什么都不做**，
+ * 让情绪自己的歪头点头完整生效，而不是被一句"看向正前方"抹平。 */
+function updateGaze(dt) {
+  if (!pointer) return;
+  const w = app.screen.width;
+  const h = app.screen.height;
+
+  if (state === State.IDLE) {
+    /* 光标和人物在同一套窗口坐标里，直接喂原始坐标 —— 人物恒居中，
+     * 窗口中心就是"正前方"，相对位置自动是对的，不用自己减中心。 */
+    model.focus(pointer.x, pointer.y, { instant: false });
+  } else if (state === State.LISTENING || state === State.THINKING) {
+    model.focus(w / 2, h * 0.35, { instant: false });
+  } else if (state === State.SPEAKING) {
+    /* 两条**互不成整数倍**的低频正弦叠加。
+     * 单条正弦的周期感很重，一看就是"程序在摆"；两个不相关的频率叠起来
+     * 才像无意识的视线游移。幅度压得很小 —— 要的是"边说边想"，
+     * 不是"边说边摇头"。 */
+    speakPhase += dt;
+    const gx = w / 2 + Math.sin(speakPhase * 0.83) * 22 + Math.sin(speakPhase * 0.31) * 11;
+    const gy = h * 0.35 + Math.sin(speakPhase * 0.57 + 1.7) * 12;
+    model.focus(gx, gy, { instant: false });
+  }
 }
 
 /* ============================================================
@@ -337,13 +407,16 @@ async function mountModel(name) {
      *   之前这里写的是 motion?.setFadeIn?.(0.5)，可选链把「方法不存在」
      *   静默吞掉，等于一行都没执行，白折腾。
      *
-     * 另外：Hiyori.model3.json 里每个动作**已经显式写了** FadeInTime/FadeOutTime
-     *   = 0.5（素材 motion3.json 的 Meta 里没有，是 model3.json 的 definition
-     *   里给的），插件 createMotion() 会优先用 definition 的值 ——
-     *   所以淡化本来就是 0.5s，这里只是把值钉死，防止将来换组时被插件的
+     * 另外：官方动作的淡化时长写在 model3.json 的 definition 里（0.5s，
+     *   素材 motion3.json 的 Meta 里没有），插件 createMotion() 会优先用
+     *   definition 的值 —— 所以这里只是把值钉死，防止将来换组时被插件的
      *   默认值（idle 组默认 2000ms！）悄悄改掉。
+     *   自制的 Drag / Walk 在 definition 里写的是各自的快慢值（Drag 要快，
+     *   被抓住得立刻有反应），下面按 FADE_OVERRIDE 再钉一遍。
      */
     const FADE_SECONDS = 0.5;
+    /* 组级覆盖，来自 params.js 的 MODELS 表（那是唯一真相，别在这抄一份）。 */
+    const FADE_OVERRIDE = def.fadeOverride || {};
     const mm = model.internalModel?.motionManager;
     if (mm) {
       /* 哪些动作组**保持循环播放** —— 白名单：只有列进去的组才 loop。
@@ -360,8 +433,9 @@ async function mountModel(name) {
       const KEEP_LOOP = new Set(def.keepLoopGroups || []);
       const retime = (motion, group) => {
         try {
-          motion?.setFadeInTime?.(FADE_SECONDS);
-          motion?.setFadeOutTime?.(FADE_SECONDS);
+          const o = (group && FADE_OVERRIDE[group]) || {};
+          motion?.setFadeInTime?.(o.in ?? FADE_SECONDS);
+          motion?.setFadeOutTime?.(o.out ?? FADE_SECONDS);
           motion?.setLoop?.(!!(group && KEEP_LOOP.has(group)));
         } catch { /* 个别动作不支持就算了 */ }
       };
@@ -591,8 +665,13 @@ async function mountModel(name) {
   console.log('[pet] model mounted', JSON.stringify({
     name,
     drawables: model.internalModel?.coreModel?.getDrawableCount?.(),
-    params: model.internalModel?.coreModel?.getParameterCount?.()
+    params: model.internalModel?.coreModel?.getParameterCount?.(),
+    /* 有哪些动作组是「模型真的认得」的 —— 接线对不对，看这一行最快：
+     * 期望 Idle / TapBody / Drag / Walk 四组（后两个是自制动作）。 */
+    motions: Object.keys(model.internalModel?.motionManager?.motionGroups || {})
   }));
+  /* 人物刚画出来 → 重量一次头顶 y（悬浮气泡锚点）。慢一点等首帧画稳。 */
+  setTimeout(() => window.pet?.requestHeadMeasure?.(), 1500);
   return true;
 }
 
@@ -717,10 +796,27 @@ async function boot() {
      * 切模型时整段跳过就好（参数插值那些丢几帧无所谓，emotion 目标值还在）。 */
     if (!model) return;
 
-    // 情绪插值：指数逼近，和帧率无关
-    const k = 1 - Math.exp(-dt * 5.5);
+    /* 🔴 顺序：视线**先**，情绪**后**（2026-10-13 修，原来反了）。
+     *
+     * focus() 写的是 ParamAngleX/Y/Z 的**绝对值**。原来的顺序是先
+     * applyEmotion 写情绪的头部姿态、紧接着 focus 覆盖掉 —— 于是
+     * 只要光标存在（IDLE 场景下光标一直在），所有情绪的 headY/headZ
+     * 都被抹掉，等于歪头点头从来没真正生效过。
+     *
+     * 而 applyEmotion 的撤销法算的是
+     *     新值 = 当前值 − 我上帧写的 + 我本帧要写的
+     * 只有"当前值"里**已经含 focus 本帧写的量**时，减掉自己的历史增量
+     * 才等于"别人的贡献"，再加自己的值 —— 这才是叠加。放到 focus 前面，
+     * 读到的就是上帧的残留，视线的贡献会被吃掉。
+     * 两件事合起来只有一个正确顺序：focus 在前，applyEmotion 在后。 */
+    updateGaze(dt);
+
+    /* 情绪插值：指数逼近（与帧率无关），但**每个字段一个速度** ——
+     * 一张脸同时到位是木偶，错峰到位才像活人。速度表见 params.js 的 EMO_SPEED。
+     * 用 1 − e^(−dt·s) 而不是乘一个固定 k，是为了不同帧率下轨迹一致。 */
     for (const key in emoTarget) {
-      emoCur[key] += (emoTarget[key] - emoCur[key]) * k;
+      const sp = EMO_SPEED[key] ?? EMO_SPEED_DEFAULT;
+      emoCur[key] += (emoTarget[key] - emoCur[key]) * (1 - Math.exp(-dt * sp));
     }
     applyEmotion();
 
@@ -731,20 +827,6 @@ async function boot() {
     } else if (mouthLevel > 0) {
       mouthLevel = Math.max(0, mouthLevel - dt * 4);
       setParam(P.MOUTH_OPEN, mouthLevel);
-    }
-
-    // 空闲时视线跟随光标；聆听时抬头看向用户
-    if (pointer) {
-      const w = app.screen.width;
-      const h = app.screen.height;
-      if (state === State.IDLE) {
-        model.focus(pointer.x, pointer.y, { instant: false });
-      } else if (state === State.LISTENING || state === State.THINKING) {
-        /* 「正前方」= 人物身体中心 = 窗口中心（人物恒居中，+2 光学修正可忽略）。
-         * 闲时的 focus(pointer.x, pointer.y) 不用改 —— 光标和人物在同一套坐标里，
-         * 相对位置自动是对的。 */
-        model.focus(w / 2, h * 0.35, { instant: false });
-      }
     }
   }, null, PIXI.UPDATE_PRIORITY.LOW);
 
@@ -1096,6 +1178,9 @@ function layout() {
   /* 人物几何算完了 → 窗口宽度可能要跟着变（换模型 / 改缩放 / 开关底座都会走这里）。 */
   syncStageWidth();
 
+  /* 人物落点变了 → 让主进程重量头顶 y（悬浮气泡的锚点。节流在主进程侧）。 */
+  window.pet?.requestHeadMeasure?.();
+
   if (new URLSearchParams(location.search).has('snap')) {
     const r = (n) => Math.round(n);
     console.log('[pet] layout', JSON.stringify({
@@ -1316,7 +1401,10 @@ window.addEventListener('mousemove', (e) => {
         dragReacted = true;
         if (cfg?.interaction?.dragReact !== false) {
           setEmotion('surprised');
-          try { model?.motion('TapBody'); } catch { /* ignore */ }
+          /* 以前这里播的是 TapBody —— 那是"被戳一下"，跟"被拎起来"是两回事。
+           * Drag 是本项目自制的持续动作（tools/make-motions.js），
+           * 一直播到松手，观感是"她一路在挣扎"。 */
+          playEventMotion('Drag');
         }
       }
     }
@@ -1353,7 +1441,10 @@ window.addEventListener('mouseup', () => {
   dragging = false;
   window.pet?.dragEnd?.();          // 让主进程判断要不要贴屏幕边缘
   if (dragMoved) {
-    if (dragReacted) setEmotion('calm');   // 松手了，气消了
+    if (dragReacted) {
+      setEmotion('calm');          // 松手了，气消了
+      stopEventMotions();          // 停掉 Drag，交还给插件的 idle 调度
+    }
     return;
   }
   onPetClicked(downX, downY);
@@ -1403,6 +1494,13 @@ function onPetClicked(x, y) {
 /* 说一句就走 —— 不打开输入框、不占住对话状态。
  * 摸头抗议、定时提醒、番茄钟都用它。（正在对话时不会抢气泡。） */
 function say(text, autoHideMs = 9000) {
+  // 浮窗模式：整段交给悬浮气泡窗（autoHide 也由那边管），主窗 #bubble 不动
+  if (floatBubble()) {
+    clearTimeout(remindHideTimer);
+    window.pet?.floatSay?.(text, autoHideMs);
+    speak(text);
+    return;
+  }
   bubbleText.textContent = text;
   bubble.classList.remove('hidden');
   speak(text);
@@ -1421,8 +1519,12 @@ function showComposer() {
 
 function hideUI() {
   composer.classList.add('hidden');
-  bubble.classList.add('hidden');
-  bubbleText.textContent = '';
+  if (floatBubble()) {
+    window.pet?.floatHide?.();
+  } else {
+    bubble.classList.add('hidden');
+    bubbleText.textContent = '';
+  }
   setState(State.IDLE);
 }
 
@@ -1471,6 +1573,11 @@ for (const el of [bubble, composer]) {
   new MutationObserver(syncStageWidth).observe(el, { attributes: true, attributeFilter: ['class'] });
 }
 
+/* 气泡摆哪里？chat.floatBubble 开（默认）= 漫画气泡挂头顶上方的独立小窗
+ * （主进程 bubble.js），主窗里的 #bubble 不画 —— 否则它会压在人物胸口。
+ * 关 = 老布局，气泡压在输入条上方（会挡胸口那段，胜在单窗口简单）。 */
+const floatBubble = () => cfg?.chat?.floatBubble !== false;
+
 /* ============================================================
  *  对话
  * ========================================================== */
@@ -1479,11 +1586,14 @@ window.pet?.onChunk((text) => {
   if (!gotFirstChunk) {
     gotFirstChunk = true;
     setState(State.SPEAKING);
-    bubble.classList.remove('waiting');
+    // 浮窗模式下 waiting 态由气泡窗自己摘，主窗 #bubble 躺平不动
+    if (!floatBubble()) bubble.classList.remove('waiting');
   }
   replyBuffer += text;
-  bubbleText.textContent = replyBuffer;
-  bubble.scrollTop = bubble.scrollHeight;
+  if (!floatBubble()) {
+    bubbleText.textContent = replyBuffer;
+    bubble.scrollTop = bubble.scrollHeight;
+  }
 });
 
 // 情绪由主进程从回复的 [emo:xxx] 标签里解析出来后单独发过来，
@@ -1545,7 +1655,8 @@ function pokeIdleTimer() {
   clearTimeout(idleTimer);
   /* 全屏静默中不排新的主动搭话 —— 所有"人还在"的入口（点击、划过、提醒、
    * 改配置）都会走到这里，拦这一处就等于全部拦住。醒来时主进程那侧的
-   * resetWanderTimer 会带着新配置重新起一轮，这里不需要自己补。 */
+   * 闲置检测会重新武装（motion.js 的 refreshWanderConfig / setMotionPaused），
+   * 这里不需要自己补。 */
   if (quiet) return;
   if (!cfg || cfg.proactive?.enabled === false) return;
   // 下限 0.05 分钟（3 秒）：配置写错时不至于让角色一直碎碎念
@@ -1568,8 +1679,11 @@ async function proactiveSpeak() {
     const line = PROACTIVE_LINES[Math.floor(Math.random() * PROACTIVE_LINES.length)];
     setEmotion('smile');
     replyBuffer = line;
-    bubbleText.textContent = line;
-    bubble.classList.remove('hidden');
+    if (floatBubble()) window.pet?.floatSay?.(line);
+    else {
+      bubbleText.textContent = line;
+      bubble.classList.remove('hidden');
+    }
     speak(line);
     pokeIdleTimer();
     return;
@@ -1578,20 +1692,26 @@ async function proactiveSpeak() {
   busy = true;
   replyBuffer = '';
   gotFirstChunk = false;
-  bubbleText.textContent = '';
-  bubble.classList.add('waiting');
-  bubble.classList.remove('hidden');
+  /* 浮窗模式下的等待态由主进程 chat:proactive 里的 beginStream() 负责，
+   * 这里只管主窗 #bubble（回退模式）。 */
+  if (!floatBubble()) {
+    bubbleText.textContent = '';
+    bubble.classList.add('waiting');
+    bubble.classList.remove('hidden');
+  }
 
   let res;
   try { res = await window.pet.proactive(); } catch { res = { ok: false }; }
-  bubble.classList.remove('waiting');
+  if (!floatBubble()) bubble.classList.remove('waiting');
   busy = false;
 
   if (res?.ok) {
+    replyBuffer = replyBuffer.replace(/\s+$/, '');   // 同 sendMessage：收掉标签留下的空行
+    if (!floatBubble()) bubbleText.textContent = replyBuffer;
     history.push({ role: 'assistant', content: replyBuffer });
     saveHistory();
     speak(replyBuffer);
-  } else {
+  } else if (!floatBubble()) {
     bubble.classList.add('hidden');
     bubbleText.textContent = '';
   }
@@ -1609,12 +1729,15 @@ async function sendMessage() {
   if (history.length > 16) history.splice(0, history.length - 16);
 
   // 立刻用思考态占住，避免流式首字返回前的空窗
+  // （浮窗模式的等待态由主进程 chat:send 里的 beginStream() 负责）
   setState(State.THINKING);
   replyBuffer = '';
   gotFirstChunk = false;
-  bubbleText.textContent = '';
-  bubble.classList.add('waiting');
-  bubble.classList.remove('hidden');
+  if (!floatBubble()) {
+    bubbleText.textContent = '';
+    bubble.classList.add('waiting');
+    bubble.classList.remove('hidden');
+  }
 
   let res;
   try {
@@ -1623,17 +1746,21 @@ async function sendMessage() {
     res = { ok: false, error: String(err?.message || err) };
   }
 
-  bubble.classList.remove('waiting');
+  if (!floatBubble()) bubble.classList.remove('waiting');
 
   if (!res?.ok) {
     showStatus(res?.error || '请求失败');
     history.pop();
-    bubble.classList.add('hidden');
+    if (!floatBubble()) bubble.classList.add('hidden');
     setState(State.IDLE);
     busy = false;
     return;
   }
 
+  /* 情绪标签剥离后会在末尾留下空行（标签一般独占一行）—— 收掉，
+   * 否则每个气泡底下都挂着一两条空行。历史记录里也存干净的。 */
+  replyBuffer = replyBuffer.replace(/\s+$/, '');
+  if (!floatBubble()) bubbleText.textContent = replyBuffer;
   history.push({ role: 'assistant', content: replyBuffer });
   saveHistory();
   speak(replyBuffer);   // 有开语音就念出来，它会自己把状态切到 SPEAKING
@@ -1712,8 +1839,11 @@ window.pet?.on?.('pet:play-motion', (d) => {
 // 贴边 / 溜达 / 注意到你 —— 给点轻反馈，让人看得出"她是活的"
 window.pet?.on?.('pet:snapped', () => { setEmotion('calm'); });
 window.pet?.on?.('pet:noticed', () => { setEmotion('surprised'); });
-window.pet?.on?.('pet:wander-start', () => { setEmotion('happy'); });
-window.pet?.on?.('pet:wander-end', () => { setEmotion('calm'); });
+/* 溜达：主进程只在开始 / 结束各发一条，中间的窗口平移它自己管。
+ * Walk 是首尾闭合的循环动作（tools/make-motions.js），正好铺满这一段 ——
+ * 以前这里只换表情，人是整个平移过去的，像张贴纸。 */
+window.pet?.on?.('pet:wander-start', () => { setEmotion('happy'); playEventMotion('Walk'); });
+window.pet?.on?.('pet:wander-end', () => { setEmotion('calm'); stopEventMotions(); });
 
 /* ============================================================
  *  全屏静默（主进程判定你在打游戏 / 全屏看片）
@@ -1765,6 +1895,7 @@ window.pet?.on?.('pet:quiet', (d) => {
 
   if (changed && quiet) {
     stopSpeak();              // 正在念的那句立刻掐掉 —— 打游戏时突然出声最讨厌
+    stopEventMotions();       // 拖拽 / 溜达的动作也一起收（规矩 19：静默七处一起收手）
     clearTimeout(idleTimer);  // 撤掉已经排好的主动搭话（醒来会重排）
     /* 静默期间主进程**不再推数据**（refreshStatsTimer 开头就 return），
      * 所以"还在等第一条数据"的那段时间会一直转下去 —— 直接收掉。

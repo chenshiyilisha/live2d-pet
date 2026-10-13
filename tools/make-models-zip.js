@@ -63,11 +63,22 @@ function dosDateTime(d) {
 
 /* ---------------- 收集要打包的文件 ---------------- */
 
+/* 这些是**开发期的中间产物 / 备份**，不属于模型素材，绝不能进安装包：
+ *   · *.orig / *.bak —— tools/make-motions.js 改 Hiyori.model3.json 之前留的
+ *     还原点（它靠这个支持 --restore）。生成动作文件时会在素材目录里留一份，
+ *     不排掉就会跟着 zip 发给用户，白多一个没人认识的文件。
+ *   · 以 . 开头的（.DS_Store、编辑器临时文件等）
+ *   · *.cmo3 / *.can3 —— Cubism 工程文件，官方没随示例数据提供，有也不该传 */
+const SKIP_RE = /(\.orig|\.bak|\.cmo3|\.can3)$/i;
+
 function walk(dir, base, out) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.name.startsWith('.')) continue;
     const full = path.join(dir, e.name);
     if (e.isDirectory()) walk(full, base, out);
-    else if (e.isFile()) out.push({ full, name: path.relative(base, full).split(path.sep).join('/') });
+    else if (e.isFile() && !SKIP_RE.test(e.name)) {
+      out.push({ full, name: path.relative(base, full).split(path.sep).join('/') });
+    }
   }
 }
 
@@ -196,8 +207,28 @@ let ok = true;
 if (check[0] !== 0x50 || check[1] !== 0x4b) { ok = false; }
 if (nEntries !== entries.length) { ok = false; }
 
+/* 必备条目：缺任何一条，装上的客户端就会「拖拽 / 溜达没有动作」或者干脆起不来。
+ * 这两个动作是本项目手写的（tools/make-motions.js），素材目录被重新解压过一次
+ * 就会丢 —— 而"丢"在 zip 层面完全看不出来，只在用户那边表现为"功能没了"。 */
+const MUST = [
+  'models/hiyori/Hiyori.moc3',
+  'models/hiyori/Hiyori.model3.json',
+  'models/hiyori/motions/pet_drag.motion3.json',
+  'models/hiyori/motions/pet_walk.motion3.json'
+];
+const names = new Set(files.map((f) => f.name));
+const missing = MUST.filter((m) => !names.has(m));
+if (missing.length) ok = false;
+
+/* 反向：开发期中间产物不许漏进来（2026-10-13 实测 .orig 还原点混进过一次） */
+const leaked = files.filter((f) => SKIP_RE.test(f.name)).map((f) => f.name);
+if (leaked.length) ok = false;
+
 const rawTotal = files.reduce((s, f) => s + fs.statSync(f.full).size, 0);
 console.log(`打包 ${files.length} 个文件 → ${OUT}`);
 console.log(`  原始体积 ${(rawTotal / 1048576).toFixed(2)} MB，压缩后 ${(check.length / 1048576).toFixed(2)} MB`);
 console.log(`  自检：签名 ${ok ? 'PK ✓' : '✗'}，中央目录条目数 ${nEntries}${nEntries === entries.length ? ' ✓' : ' ✗'}`);
+if (missing.length) console.error('  ✗ 缺少必备条目：' + missing.join('、'));
+if (leaked.length) console.error('  ✗ 混进了开发期中间产物：' + leaked.join('、'));
 if (!ok) { console.error('自检未通过'); process.exit(1); }
+if (!missing.length && !leaked.length) console.log('  自检：必备条目齐全 ✓，无中间产物泄漏 ✓');

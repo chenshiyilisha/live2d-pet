@@ -127,7 +127,28 @@ const sandbox = {
   patchConfig: rec('patchConfig'),
   refreshTrayMenu: rec('refreshTrayMenu'),
   refreshStatsTimer: rec('refreshStatsTimer'),
-  resetWanderTimer: rec('resetWanderTimer'),
+  /* motion.js 的对外面（2026-10-13 改过一轮：原来的 resetWanderTimer 换成了
+   * refreshWanderConfig + 一堆用户上手钩子）。桩里照抄当前导出面 ——
+   * 少一个 main.js 就会在 require 出 undefined、调用时抛 "not a function"，
+   * 报错信息完全指不到这里。 */
+  refreshWanderConfig: rec('refreshWanderConfig'),
+  cancelMoveAnim: rec('cancelMoveAnim'),
+  cancelAutoMotion: rec('cancelAutoMotion'),
+  isMoveAnimRunning: () => false,
+  setMotionPaused: rec('setMotionPaused'),
+  animateTo: rec('animateTo'),
+  edgeSnap: rec('edgeSnap'),
+  setHome: rec('setHome'),
+  startIdleWatcher: rec('startIdleWatcher'),
+  onUserDragMove: rec('onUserDragMove'),
+  onUserDragEnd: rec('onUserDragEnd'),
+  notifyUserActivity: rec('notifyUserActivity'),
+  setIdleOverride: rec('setIdleOverride'),
+  startWander: rec('startWander'),
+  stopWander: rec('stopWander'),
+  wanderState: () => ({ mode: 'idle', wanderMoved: false, homePos: null, gen: 0, armed: 0 }),
+  currentDisplay: () => ({ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }),
+  disposeMotion: rec('disposeMotion'),
   syncAppearance: rec('syncAppearance'),
   /* buildMenuTemplate 里「全屏时自动静默」那一项会读模块级的 quiet 变量
    * 往标签后面加「（静默中）」。这个变量在沙箱里不存在 → ReferenceError，

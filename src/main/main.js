@@ -49,13 +49,17 @@ const {
   listReminders, startPomodoro, stopPomodoro, pomodoroStatus, disposeReminders
 } = require('./reminder');
 const {
-  configureMotion, cancelMoveAnim, isMoveAnimRunning, setMotionPaused,
-  edgeSnap, resetWanderTimer, disposeMotion, currentDisplay
+  configureMotion, cancelMoveAnim, cancelAutoMotion, isMoveAnimRunning, setMotionPaused,
+  edgeSnap, setHome, startIdleWatcher, refreshWanderConfig, startWander, wanderState,
+  setIdleOverride,
+  onUserDragMove, onUserDragEnd, notifyUserActivity,
+  disposeMotion, currentDisplay
 } = require('./motion');
 const {
   startFullscreenWatch, stopFullscreenWatch
 } = require('./fullscreen');
 const { configureUpdater, checkForUpdates, updaterStatus } = require('./updater');
+const bubble = require('./bubble');
 
 // 项目根目录，本地服务与托盘图标、诊断截图都以它为基准
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
@@ -174,6 +178,7 @@ function patchConfig(section, patch) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.webContents.send('config:changed'); } catch { /* 窗口在销毁 */ }
   }
+  bubble.refreshConfig();           // 气泡开关切到关：立刻把浮窗收掉
   refreshTrayMenu();
   return next;
 }
@@ -204,6 +209,11 @@ function getInitialBounds() {
 function createWindow() {
   refreshWinSize();                 // 先按当前屏幕定尺寸，后面 getInitialBounds 要用
   const { x, y } = getInitialBounds();
+
+  /* 「家」= 本次启动时她在的位置（用户 2026-10-13 明确了这个定义：
+   * 「初始位置」就是启动时的位置）。她溜达跑远之后，你一操作（动鼠标 /
+   * 敲键盘，系统级判定）她就会走回这里。详见 motion.js 的 setHome。 */
+  setHome(x, y);
 
   mainWindow = new BrowserWindow({
     width: SIZE.w,
@@ -299,20 +309,33 @@ function createWindow() {
     console.error('[renderer] process gone:', JSON.stringify(details));
   });
 
-  // 拖动停止后记住位置（moved 触发很密集，debounce 一下再落盘）
+  /* 拖动停止后记住位置（moved 触发很密集，debounce 一下再落盘）。
+   *
+   * ⚠️ **自动移动期间不保存**：溜达 / 回位也是 setBounds 写位置，照存不误的话
+   *    下次启动的「家」就是她上一轮溜达到的随机点 —— 越跑越偏，而且用户会
+   *    发现"她自己换地方住了"。所以自动动画跑着的时候直接跳过，
+   *    等用户真拖完松手（pet:drag-end 那条路）再落盘。 */
   let savePosTimer = null;
   mainWindow.on('moved', () => {
     clearTimeout(savePosTimer);
+    if (isMoveAnimRunning()) return;
     savePosTimer = setTimeout(() => {
-      if (!mainWindow) return;
+      if (!mainWindow || isMoveAnimRunning()) return;
       const [x, y] = mainWindow.getPosition();
       saveConfig({ ...loadConfig(), window: { x, y } });
     }, 600);
   });
 
   mainWindow.on('closed', () => {
+    bubble.dispose();     // 气泡窗比主窗命短：主人没了它也没必要留
     mainWindow = null;
   });
+
+  /* 气泡悬浮在主窗头顶上方（独立小窗），主窗动它就得跟着动。
+   * 'move' 在拖拽与程序化移动（溜达 / 回位 / 贴边）中连续触发，
+   * syncPosition 内部自带节流。 */
+  mainWindow.on('move', () => bubble.syncPosition());
+  mainWindow.on('resize', () => bubble.syncPosition());
 }
 
 /* ============================================================
@@ -497,6 +520,7 @@ function setQuiet(on, why) {
   setMotionPaused(quiet);
   refreshStatsTimer();
   syncAppearance();                 // 内部按 quiet 决定置顶
+  bubble.setQuiet(quiet);           // 悬浮气泡会盖住全屏应用，静默必须收掉
   try { mainWindow?.webContents.send('pet:quiet', quietPayload()); } catch { /* ignore */ }
   refreshTrayMenu();                // 菜单标题要能显示"静默中"
 }
@@ -1029,8 +1053,12 @@ function snapToCorner(win, workArea) {
 function moveToCorner() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   // 「回到右下角」= 她自己那块屏的右下角，不是主屏的
-  cancelMoveAnim();
-  snapToCorner(mainWindow, currentDisplay().workArea);
+  cancelAutoMotion();
+  const p = cornerPos(currentDisplay().workArea, SIZE.w, SIZE.h, MARGIN);
+  mainWindow.setBounds({ x: p.x, y: p.y, width: SIZE.w, height: SIZE.h });
+  /* 这是他**明确指定**"你就待这儿" → 家跟着搬过去。
+   * 不搬的话，她（或者用户）之后一动，回位又把她拉回启动位置，等于这个菜单项白点。 */
+  setHome(p.x, p.y);
 }
 
 /* 渲染层算好的「窗口该多宽」（DIP）在这里落地。
@@ -1117,7 +1145,7 @@ function toggleTTS() {
  * 现在的结构：
  *   显示/隐藏 · 回到右下角
  *   ├─ 外观与形象（大小 / 不透明度 / 置顶）
- *   ├─ 互动与行为（总开关 + 6 项）
+ *   ├─ 互动与行为（总开关 + 8 项）
  *   ├─ 功能开关  （朗读 / 搭话 / 悬浮 / 提醒 / 语音）
  *   └─ 小工具    （番茄钟 / 定时提醒）
  *   设置 · 退出
@@ -1171,7 +1199,7 @@ function buildMenuTemplate() {
     click: (item) => {
       patchConfig(section, { [key]: item.checked });
       if (section === 'monitor') refreshStatsTimer();
-      if (section === 'motion') resetWanderTimer();
+      if (section === 'motion') refreshWanderConfig();
       if (section === 'appearance') syncAppearance();
       // 关掉"全屏静默"要立刻退出静默状态，不能等她再切一次窗口
       if (section === 'quiet') refreshQuietWatcher();
@@ -1191,6 +1219,8 @@ function buildMenuTemplate() {
     { type: 'separator' },
     flag('motion', 'edgeSnap', '拖动后贴屏幕边缘'),
     flag('motion', 'wander', '闲置时自己溜达'),
+    flag('motion', 'returnOnActivity', '有人操作时回到原位'),
+    flag('chat', 'floatBubble', '对话气泡悬浮在头顶'),
     flag('interaction', 'rightMenu', '在角色身上右键出菜单'),
     flag('interaction', 'headPat', '摸头有专属反应'),
     flag('interaction', 'dragReact', '拖着走会挣扎'),
@@ -1387,12 +1417,21 @@ function fmtMinutes(mins) {
   return `${Math.round(mins * 60)} 秒`;
 }
 
+/* 聊天分片 / 情绪的**唯一出口**：主窗渲染层拿它累积 replyBuffer
+ * （驱动 TTS 朗读与历史保存），悬浮气泡窗拿它做流式显示。
+ * 别绕开这两个函数直接 webContents.send —— 气泡窗会漏字。 */
+function emitChatChunk(t) {
+  try { mainWindow?.webContents.send('chat:chunk', t); } catch { /* 窗口在销毁 */ }
+  bubble.appendChunk(t);
+}
+
+function emitChatEmotion(e) {
+  try { mainWindow?.webContents.send('chat:emotion', e); } catch { /* ignore */ }
+}
+
 /* 逐字发出去，和真实的流式回复走同一条通道，渲染层不用区分。 */
 async function emitLocal(text, emotion = 'calm') {
-  const filter = createStreamFilter(
-    (t) => mainWindow?.webContents.send('chat:chunk', t),
-    (e) => mainWindow?.webContents.send('chat:emotion', e)
-  );
+  const filter = createStreamFilter(emitChatChunk, emitChatEmotion);
   const full = `${text}\n[emo:${emotion}]`;
   for (const ch of full) {
     filter.push(ch);
@@ -1455,8 +1494,8 @@ function chatStream(messages) {
   const cfg = loadConfig();
   return streamLLM(messages, {
     ...cfg.llm,
-    send: (t) => mainWindow?.webContents.send('chat:chunk', t),
-    sendEmotion: (e) => mainWindow?.webContents.send('chat:emotion', e)
+    send: emitChatChunk,
+    sendEmotion: emitChatEmotion
   });
 }
 
@@ -1474,15 +1513,16 @@ function registerIpc() {
   ipcMain.on('pet:drag-move', (_e, { dx, dy }) => {
     if (!mainWindow) return;
 
-    /* ⚠️ 第一件事：把可能正在跑的平滑移动停掉。
+    /* ⚠️ 第一件事：把正在跑的自动移动（当前这一趟 + 溜达循环 + 回位）停掉，
+     * 并记下"他正抓着窗口"，拖拽期间一切自动移动让位。
      *
-     * animateTo（溜达 1100ms / 贴边 240ms）是个 24ms 的 setInterval，一直在
+     * animateTo（溜达 / 回位 / 贴边）是个 24ms 的 setInterval，一直在
      * setBounds 写窗口位置。如果不先停它，拖拽期间就有**两条循环同时写位置**：
      * 一条把你拖到的坐标写进去，另一条把动画的插值坐标写进去，
      * 表现是「溜达途中一把抓住她，窗口一边跟着走一边自己抽搐」，
      * 松手后（drag-end → edgeSnap）还要再抖一次。
      * 用户操作一律优先于自动动作，进来就把它掐掉。 */
-    cancelMoveAnim();
+    onUserDragMove();
 
     /* ⚠️ 拖窗口必须用 setBounds 并把 width/height 一起带上，**不能用 setPosition**。
      *
@@ -1541,14 +1581,27 @@ function registerIpc() {
   ipcMain.on('pet:stage-width', (_e, w) => setStageWidth(w));
 
   /* ---- 拖动结束 / 用户活动 ----
-   * 松手时先试一次贴边（配置开了才生效），再把「闲置溜达」的计时器推后。 */
+   *
+   * 松手要按顺序做三件事：
+   *   1. 通知 motion：用户手动拖放 = 对位置的明确指定 → 清掉"待回位"，
+   *      别把他刚放好的人拽回启动位置（她之后再溜达跑远了照样会被收回）；
+   *   2. 贴边（配置开了才生效）；
+   *   3. 等贴边那 240ms 跑完，再把最终位置落盘 —— moved 处理器里
+   *      "动画期间不保存"那条会跳过贴边写进去的位置（见那边的注释），
+   *      所以这里补一次，否则存下来的是松手瞬间、而不是贴边后的坐标。 */
   ipcMain.on('pet:drag-end', () => {
+    onUserDragEnd();
     edgeSnap();
-    resetWanderTimer();
+    setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      const { x, y } = mainWindow.getBounds();
+      saveConfig({ ...loadConfig(), window: { x, y } });
+    }, 500);
   });
 
-  // 渲染层节流后发来的"人还在"信号，用来推迟自主漫步
-  ipcMain.on('pet:activity', () => resetWanderTimer());
+  /* 渲染层节流后发来的"人还在"信号。
+   * 系统级闲置检测 1 秒才巡检一次，这条路让她**立刻**反应，不用等下一拍。 */
+  ipcMain.on('pet:activity', () => notifyUserActivity());
 
   /* ---- 在角色身上右键弹出的快捷菜单 ---- */
   ipcMain.on('pet:context-menu', () => {
@@ -1649,16 +1702,25 @@ function registerIpc() {
   });
 
   ipcMain.handle('chat:send', async (_e, messages) => {
-    // 本地能答的先答（系统状态 / 定时提醒 / 番茄钟），答不了的才交给对话后端
-    const last = [...(messages || [])].reverse().find((m) => m && m.role === 'user');
+    // 悬浮气泡：这一轮对话从现在开始显示（浮窗关着时是 no-op）
+    bubble.beginStream();
     try {
-      const local = await tryLocalIntent(last?.content);
-      if (local) return local;
+      // 本地能答的先答（系统状态 / 定时提醒 / 番茄钟），答不了的才交给对话后端
+      const last = [...(messages || [])].reverse().find((m) => m && m.role === 'user');
+      try {
+        const local = await tryLocalIntent(last?.content);
+        if (local) { bubble.endStream(); return local; }
+      } catch (err) {
+        console.warn('[intent] 本地意图处理失败:', String(err?.message || err));
+      }
+      const cfg = loadConfig();
+      const res = await chatStream([{ role: 'system', content: resolvePersona(cfg) }, ...messages]);
+      if (res?.ok) bubble.endStream(); else bubble.abortStream();
+      return res;
     } catch (err) {
-      console.warn('[intent] 本地意图处理失败:', String(err?.message || err));
+      bubble.abortStream();
+      throw err;
     }
-    const cfg = loadConfig();
-    return chatStream([{ role: 'system', content: resolvePersona(cfg) }, ...messages]);
   });
 
   ipcMain.handle('config:get', () => {
@@ -1695,15 +1757,33 @@ function registerIpc() {
   ipcMain.handle('chat:proactive', async () => {
     const cfg = loadConfig();
     if (cfg.proactive?.enabled === false) return { ok: false, error: 'disabled' };
-    return chatStream([
-      { role: 'system', content: resolvePersona(cfg) },
-      {
-        role: 'user',
-        content: '（主人已经有一阵子没搭理你了。主动开个话头，一句话就够，' +
-                 '别问"在忙吗"这种客套，按你的性子随口说点什么。）'
-      }
-    ]);
+    bubble.beginStream();
+    try {
+      const res = await chatStream([
+        { role: 'system', content: resolvePersona(cfg) },
+        {
+          role: 'user',
+          content: '（主人已经有一阵子没搭理你了。主动开个话头，一句话就够，' +
+                   '别问"在忙吗"这种客套，按你的性子随口说点什么。）'
+        }
+      ]);
+      if (res?.ok) bubble.endStream(); else bubble.abortStream();
+      return res;
+    } catch (err) {
+      bubble.abortStream();
+      throw err;
+    }
   });
+
+  /* say() 类整段播报进浮窗：渲染层的提醒 / 番茄钟 / 离线搭话走这两条 */
+  ipcMain.on('pet:float-say', (_e, p) => {
+    const o = typeof p === 'string' ? { text: p } : (p && typeof p === 'object' ? p : {});
+    const ms = Number(o.ms);
+    bubble.showFull(String(o.text || ''), Number.isFinite(ms) && ms > 0 ? ms : undefined);
+  });
+  ipcMain.on('pet:float-hide', () => bubble.hideNow());
+  /* 渲染层请求实量人物头顶 y（模型挂载 / 布局变化时），气泡底边锚头顶用 */
+  ipcMain.on('pet:head-measure', () => bubble.requestMeasure());
 
   /* 渲染层改配置的统一入口。对象段逐段合并（不能整段替换，否则丢默认键），
    * 落盘后把受影响的运行时状态一起同步：外观、悬浮统计、托盘勾选。 */
@@ -1725,7 +1805,7 @@ function registerIpc() {
     const ok = saveConfig(next);
     syncAppearance();
     refreshStatsTimer();
-    resetWanderTimer();
+    refreshWanderConfig();
     refreshQuietWatcher();
     refreshTrayMenu();
     try { mainWindow?.webContents.send('config:changed'); } catch { /* ignore */ }
@@ -1852,6 +1932,9 @@ if (!gotLock) {
       // 这里**故意**用主屏：窗口已经跑到所有显示器之外了，
       // 「离她最近的屏」没有意义，回主屏右下角才是用户能立刻找到的位置。
       snapToCorner(mainWindow, screen.getPrimaryDisplay().workArea);
+      // 落位变了，「家」也要跟着，否则之后一次回位又把她送回屏幕外
+      const r = mainWindow.getBounds();
+      setHome(r.x, r.y);
     }
     mainWindow.show();
     mainWindow.focus();
@@ -1873,6 +1956,10 @@ if (!gotLock) {
     }
 
     registerIpc();
+
+    // 悬浮气泡窗：主窗引用用 getter 注入（创建时机比 bubble 晚，不能直接传）
+    bubble.configureBubble({ getWindow: () => mainWindow });
+    bubble.registerBubbleIpc();
 
     // 透明窗口能不能生效，取决于合成走的是硬件路径还是软件路径。
     // 软件合成（gpu_compositing: disabled_software）下 Windows 的 transparent
@@ -1913,13 +2000,17 @@ if (!gotLock) {
         ({ x, y } = getInitialBounds());
       }
       mainWindow.setBounds({ x, y, width: SIZE.w, height: SIZE.h });
+      /* 窗口被重新落位了 → 「家」跟着走。
+       * 不跟的话，家里那个坐标已经不属于任何屏幕，她一回位就会被拉到
+       * 看不见的地方去（拔掉外接屏之后尤其明显）。 */
+      setHome(x, y);
     };
     screen.on('display-added', onDisplayChanged);
     screen.on('display-removed', onDisplayChanged);
     screen.on('display-metrics-changed', onDisplayChanged);
 
     refreshStatsTimer();
-    resetWanderTimer();
+    startIdleWatcher();
     refreshQuietWatcher();
     warnIfModelsMissing();
     initUpdater();
@@ -1930,6 +2021,39 @@ if (!gotLock) {
     if (process.env.PET_QUIET === '1') {
       setTimeout(() => setQuiet(true, 'PET_QUIET'), 8000);
       setTimeout(() => setQuiet(false, 'PET_QUIET-end'), 18000);
+    }
+
+    /* 诊断口子：`PET_WANDER=1` 时强制走一轮「溜达 → 有人操作 → 回位」。
+     *
+     * 为什么非要有这个口子：溜达的触发与保持都以**系统级闲置**
+     * （powerMonitor.getSystemIdleTime）为准 —— 你只要坐在电脑前、哪怕只是动
+     * 一下鼠标，闲置就永远是 0，她一辈子不会开始溜达；就算强行让她起步，
+     * 下一秒的巡检也会把你判成"有人"、把这一趟收掉。也就是说这个功能在
+     * "正在测它的人"眼皮底下**不可能自然触发**，只能像 PET_QUIET 那样给口子。
+     *   t=15s  伪造「系统已经闲置很久」+ 强制开始溜达（跳过闲置门槛）
+     *   t=40s  伪造「你刚动过鼠标」——**不直接调 notifyUserActivity**，
+     *          让真实的 idleTick 自己把她收回去，这样验的就是真路径
+     *   每秒   打一条状态（mode / 待回位标志 / 家 / 当前坐标），用来核对
+     *          "她真的走了多趟"和"最后停在离家 0px 的地方"。
+     * 用法：PET_WANDER=1 PET_SNAPSHOT=motion <electron> . */
+    if (process.env.PET_WANDER === '1') {
+      setTimeout(() => {
+        console.log('[wander] 伪造闲置 + 强制开始溜达');
+        setIdleOverride(9999);
+        startWander();
+      }, 15000);
+      setTimeout(() => {
+        console.log('[wander] 伪造"你刚动过鼠标"，交给真实的 idleTick 收她回来');
+        setIdleOverride(0);
+      }, 40000);
+      setInterval(() => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        const s = wanderState();
+        console.log('[wander]', JSON.stringify({
+          mode: s.mode, moved: s.wanderMoved, home: s.homePos, idleOv: s.idleOverrideSec,
+          at: mainWindow.getBounds()
+        }));
+      }, 1000);
     }
 
     /* 诊断口子：`PET_GPUINFO=1` 时打一条「Chromium 实际在用哪块 GPU」。

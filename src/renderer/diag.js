@@ -530,6 +530,10 @@ export function attachSnapProbes(live) {
   // UNPACK_FLIP_Y_WEBGL 等全局 GL 状态，用 RenderTexture 导出会上下颠倒。
   // seam 是长时间纯观测通道，不做截图：capturePage 本身会引入卡顿，污染数据。
   // ink 自己也截图，这里要排除掉，否则会互相覆盖同一个 PNG。
+  /* ⚠️ 排除列表里**不要**加 'mood' —— ?snap=mood 的探针就写在下面这个
+   *    setTimeout 回调内部，排除掉它是"把自己的探针一起跳过"（踩过一次：
+   *    表现是日志里一条 mood 都没有，看起来像探针没生效）。
+   *    代价只是多落一张默认截图（pet-shot.png），无害。 */
   if (new URLSearchParams(location.search).has('snap') &&
       !['seam', 'ink', 'look', 'hit', 'bar', 'load'].includes(new URLSearchParams(location.search).get('snap'))) {
     const sweep = async (name) => {
@@ -617,6 +621,57 @@ export function attachSnapProbes(live) {
           live.bubble.classList.remove('hidden');
           live.showComposer();
           await sweep('shot-ui');
+        }
+
+        /* ?snap=mood：8 档情绪全量截图 + 错峰到位的时间序列
+         *
+         *  1) 依次切 8 个情绪，每个停 1.6s 落一张图。**parameter 表里的正负号
+         *     只能靠这一步校准** —— "眉高低 +0.45 到底是上扬还是下压"
+         *     "BODY_Y +2.5 是前倾还是后仰" 推不出来，只能看图。
+         *  2) 在切 think 的那一拍起每 50ms 采一次 browLY / mouthForm / bodyZ。
+         *     这三个字段的速度是 9 / 4.5 / 2.2，故意拉开 —— 若错峰表生效，
+         *     到达目标 63% 的时刻应该依次是 ~111ms / ~222ms / ~455ms。
+         *     如果三个字段同拍到位，说明 EMO_SPEED 没被用上（退回单一速度）。
+         *     采的是**参数本身**（readParam），不是 emoCur —— 绕过插值层看真实结果。 */
+        if (new URLSearchParams(location.search).get('snap') === 'mood') {
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          const rd = (id) => Number((live.readParam(id) ?? 0).toFixed(4));
+          await wait(1200);
+
+          // --- ① 错峰时间序列（必须从 calm 起跳，所以放在截图循环之前）---
+          const trace = [];
+          const t0 = performance.now();
+          live.setEmotion('think');
+          for (let i = 0; i < 46; i++) {
+            trace.push([
+              Math.round(performance.now() - t0),
+              rd(live.P().BROW_L_Y), rd(live.P().MOUTH_FORM), rd(live.P().BODY_Z)
+            ]);
+            await wait(50);
+          }
+          console.log('[pet] mood-trace', JSON.stringify({
+            fields: ['t_ms', 'browLY', 'mouthForm', 'bodyZ'],
+            speed: { browLY: 9, mouthForm: 4.5, bodyZ: 2.2 },
+            rows: trace
+          }));
+
+          // --- ② 8 档情绪各落一张 ---
+          for (const name of ['calm', 'happy', 'smile', 'think', 'shy', 'serious', 'surprised', 'sleepy']) {
+            live.setEmotion(name);
+            await wait(1600);            // 等最慢的字段（bodyY/Z，2.2/s）到位
+            const snap = await window.pet?.saveShot?.('mood-' + name);
+            console.log('[pet] mood', JSON.stringify({
+              emo: name,
+              cur: live.emotion(),
+              browLY: rd(live.P().BROW_L_Y), browRY: rd(live.P().BROW_R_Y),
+              browLX: rd(live.P().BROW_L_X), browRX: rd(live.P().BROW_R_X),
+              ahoge: rd(live.P().AHOGE),
+              bodyY: rd(live.P().BODY_Y), bodyZ: rd(live.P().BODY_Z),
+              headZ: rd(live.P().ANGLE_Z), headY: rd(live.P().ANGLE_Y),
+              ink: snap?.ink
+            }));
+          }
+          console.log('[pet] mood done');
         }
 
         // ?snap=chat：走一遍完整对话链路（流式 + 情绪标签剥离 + 气泡 + 朗读）

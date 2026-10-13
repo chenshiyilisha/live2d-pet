@@ -59,7 +59,11 @@ export const MODELS = {
      *     一个都不能留 —— 全关，播完交给插件的 idle 调度接管。
      *   Drag / Walk：本项目手写的（tools/make-motions.js），专门做成首尾
      *     闭合的持续动作 —— 拖拽期间 / 溜达期间一直播，必须 loop。 */
-    keepLoopGroups: ['Drag', 'Walk']
+    keepLoopGroups: ['Drag', 'Walk'],
+    /* 组级淡化覆盖（秒）。Drag 是"被拎起来"的反应，0.5s 的淡入太钝 ——
+     * 抓上来半秒她才肯挣扎。pet.js 的 retime() 以这里为准。
+     * （只在定义了非默认值时才需要列进来，没列的组用 pet.js 的 0.5s。） */
+    fadeOverride: { Drag: { in: 0.12, out: 0.3 } }
   }
 };
 
@@ -70,6 +74,8 @@ export const MODEL_NAME = 'hiyori';
 
 /* 桃濑日和（Hiyori Momose）的参数表。它没有 exp3 表情文件，
  * 所以表情全部靠直控参数做 —— 反而比表情文件灵活（可连续插值）。 */
+/* ⚠️ 参数 ID 全部来自 hiyori 的 Hiyori.cdi3.json（70 个参数），
+ *    verify-expressive.js 会拿这份清单逐个回查 —— 拼错一个字母就会红。 */
 export const PARAM = {
   MOUTH_OPEN: 'ParamMouthOpenY',
   MOUTH_FORM: 'ParamMouthForm',
@@ -79,6 +85,11 @@ export const PARAM = {
   EYE_R_SMILE: 'ParamEyeRSmile',
   BROW_L_Y: 'ParamBrowLY',
   BROW_R_Y: 'ParamBrowRY',
+  /* 眉毛的**水平**分量（-1~1），和 BROW_*_Y 是两条独立的轴。
+   * 官方模型里它做「眉毛内侧向中间聚拢」的形状 —— 单边给值就是
+   * 「一边挑一边压」，困惑/怀疑/得意全靠它（2026-10-13 新增）。 */
+  BROW_L_X: 'ParamBrowLX',
+  BROW_R_X: 'ParamBrowRX',
   BROW_L_ANGLE: 'ParamBrowLAngle',
   BROW_R_ANGLE: 'ParamBrowRAngle',
   BROW_L_FORM: 'ParamBrowLForm',
@@ -88,8 +99,21 @@ export const PARAM = {
   ANGLE_Y: 'ParamAngleY',     // 头上下
   ANGLE_Z: 'ParamAngleZ',     // 头倾斜
   BODY_X: 'ParamBodyAngleX',
+  /* 身体的前后 / 侧倾（-10~10，单位是度 —— 和头部的 ANGLE_* 一样是角度，
+   * 别当成 -1~1 的归一值，写 0.5 是看不见的，要 2~5 才有感）。
+   * 🔴 它们是 **Cubism 物理的输入**（Hiyori.physics3.json 的 Input 里有，
+   *    ParamBodyAngleY 权重 100、Z 有 100/60/40 三档）—— 往这里喂一个值，
+   *    头发前后摆、侧发饰、两层裙摆、胸口、缎带会**一起**跟着动，而且因为
+   *    经过物理演算，自带滞后和回弹。这是全项目性价比最高的一组参数：
+   *    一个值带动七个输出。⚠️ 正因为过物理，别喂跳变值（见 EMO_SPEED 里
+   *    给它的低速）。 */
+  BODY_Y: 'ParamBodyAngleY',
+  BODY_Z: 'ParamBodyAngleZ',
   BREATH: 'ParamBreath',
   SHOULDER: 'ParamShoulder',
+  /* 呆毛 —— 日系角色的「第三条眉毛」。核实过：11 条物理链的 35 个输出里
+   * **没有它**，是纯自由参数，往里写不会跟物理打架。 */
+  AHOGE: 'ParamHairAhoge',
   ARM_LA: 'ParamArmLA',
   ARM_RA: 'ParamArmRA'
 };
@@ -115,17 +139,75 @@ export const State = {
  *
  *  Hiyori 没有 exp3 表情文件，表情全靠直控参数做。这样反而更好：
  *  参数能连续插值，表情是「长出来」的而不是硬切。
- *  数值按 Cubism 惯例——眉毛 -1~1、嘴形 -1~1（正=笑）、脸红 0~1、微笑眼 0~1。
- *  headZ 是歪头（度），headY 是点头（度）。
+ *
+ *  ⚠️ 两条约定，照做能省很多事：
+ *
+ *  1) **每个情绪必须写全 16 个字段，一个都不能省。**
+ *     插值循环是 `for (const key in emoTarget)` —— 目标表里缺哪个键，
+ *     哪个字段就永远停在切换前的旧值上（切到 A 再切到缺字段的 B，
+ *     眉毛就卡在 A 的姿态不动）。所以 verify-expressive.js 第一件事
+ *     就是断言 8 个情绪的键集合完全相同。
+ *
+ *  2) **别在这里写左右对称的值。** browLY/browRY、browLX/browRX 是
+ *     分开的两条 —— 真实人脸的表情几乎从不完全对称。全对称的眉毛
+ *     一眼就是「图在变形」，「一边挑一边压」才是「人在演」。
+ *
+ *  数值口径：眉 -1~1（正=上扬）、眉水平 -1~1、嘴形 -1~1（正=笑）、
+ *  脸红 0~1、微笑眼 0~1、睁眼 0~1；
+ *  headZ/headY 是歪头/点头（**度**，±30）；
+ *  bodyY/bodyZ 是身体前后/侧倾（**度**，±10）—— 过物理，
+ *  头发和裙摆会跟着甩（见 PARAM 里 BODY_Y 那段）。
  * ========================================================== */
 
 export const EMOTION = {
-  calm:      { browY: 0,     browAngle: 0,     browForm: 0,    mouthForm: 0,     eyeSmile: 0,    cheek: 0,    headZ: 0,   headY: 0,   eyeOpen: 1,    shoulder: 0 },
-  happy:     { browY: 0.45,  browAngle: 0.15,  browForm: 0,    mouthForm: 0.85,  eyeSmile: 1,    cheek: 0.2,  headZ: -4,  headY: -3,  eyeOpen: 0.95, shoulder: 0.1 },
-  smile:     { browY: 0.2,   browAngle: 0.1,   browForm: 0,    mouthForm: 0.55,  eyeSmile: 0.7,  cheek: 0.1,  headZ: -2,  headY: 0,   eyeOpen: 1,    shoulder: 0 },
-  think:     { browY: -0.35, browAngle: -0.45, browForm: 0.6,  mouthForm: -0.25, eyeSmile: 0,    cheek: 0,    headZ: 7,   headY: 2,   eyeOpen: 0.7,  shoulder: 0 },
-  shy:       { browY: -0.25, browAngle: 0.35,  browForm: 0,    mouthForm: 0.35,  eyeSmile: 0.55, cheek: 1,    headZ: 0,   headY: 6,   eyeOpen: 0.8,  shoulder: 0.25 },
-  serious:   { browY: -0.6,  browAngle: -0.25, browForm: 0,    mouthForm: -0.45, eyeSmile: 0,    cheek: 0,    headZ: 0,   headY: -1,  eyeOpen: 1,    shoulder: 0 },
-  surprised: { browY: 0.8,   browAngle: 0,     browForm: 0,    mouthForm: 0.15,  eyeSmile: 0,    cheek: 0.15, headZ: 0,   headY: -2,  eyeOpen: 1.05, shoulder: 0.35 },
-  sleepy:    { browY: -0.15, browAngle: 0.1,   browForm: 0,    mouthForm: 0.05,  eyeSmile: 0.25, cheek: 0.12, headZ: 4,   headY: 4,   eyeOpen: 0.35, shoulder: -0.1 }
+  /*                  眉高低      眉水平    眉角  眉形   嘴形  微笑眼 睁眼   脸红  歪头 点头  肩  呆毛  身前 身侧 */
+  calm:      { browLY: 0,     browRY: 0,     browLX: 0,     browRX: 0,     browAngle: 0,     browForm: 0,    mouthForm: 0,     eyeSmile: 0,    eyeOpen: 1,    cheek: 0,    headZ: 0,   headY: 0,   shoulder: 0,    ahoge: 0,    bodyY: 0,    bodyZ: 0 },
+  happy:     { browLY: 0.45,  browRY: 0.45,  browLX: 0,     browRX: 0,     browAngle: 0.15,  browForm: 0,    mouthForm: 0.85,  eyeSmile: 1,    eyeOpen: 0.95, cheek: 0.2,  headZ: -4,  headY: -3,  shoulder: 0.1,  ahoge: 0.5,  bodyY: 2.5,  bodyZ: 0 },
+  smile:     { browLY: 0.2,   browRY: 0.2,   browLX: 0,     browRX: 0,     browAngle: 0.1,   browForm: 0,    mouthForm: 0.55,  eyeSmile: 0.7,  eyeOpen: 1,    cheek: 0.1,  headZ: -2,  headY: 0,   shoulder: 0,    ahoge: 0.25, bodyY: 1.5,  bodyZ: 0 },
+  /* think 是唯一一个「有意不对称」的日常情绪：右眉压得比左眉低、两边眉尾
+   * 一内收一外展（browLX + / browRX −）→ 读出来是"困惑/在心里盘算"，
+   * 而全对称的皱眉只会读成"生气"。 */
+  think:     { browLY: -0.45, browRY: -0.2,  browLX: 0.35,  browRX: -0.3,  browAngle: -0.45, browForm: 0.6,  mouthForm: -0.25, eyeSmile: 0,    eyeOpen: 0.7,  cheek: 0,    headZ: 7,   headY: 2,   shoulder: 0,    ahoge: -0.35, bodyY: 0,   bodyZ: 2.5 },
+  shy:       { browLY: -0.25, browRY: -0.25, browLX: 0,     browRX: 0,     browAngle: 0.35,  browForm: 0,    mouthForm: 0.35,  eyeSmile: 0.55, eyeOpen: 0.8,  cheek: 1,    headZ: 0,   headY: 6,   shoulder: 0.25, ahoge: -0.2, bodyY: -3,   bodyZ: 0 },
+  serious:   { browLY: -0.6,  browRY: -0.6,  browLX: -0.4,  browRX: -0.4,  browAngle: -0.25, browForm: 0,    mouthForm: -0.45, eyeSmile: 0,    eyeOpen: 1,    cheek: 0,    headZ: 0,   headY: -1,  shoulder: 0,    ahoge: -0.1, bodyY: 1.5,  bodyZ: 0 },
+  surprised: { browLY: 0.8,   browRY: 0.8,   browLX: 0,     browRX: 0,     browAngle: 0,     browForm: 0,    mouthForm: 0.15,  eyeSmile: 0,    eyeOpen: 1.05, cheek: 0.15, headZ: 0,   headY: -2,  shoulder: 0.35, ahoge: 0.85, bodyY: -5,   bodyZ: 0 },
+  sleepy:    { browLY: -0.15, browRY: -0.15, browLX: 0,     browRX: 0,     browAngle: 0.1,   browForm: 0,    mouthForm: 0.05,  eyeSmile: 0.25, eyeOpen: 0.35, cheek: 0.12, headZ: 4,   headY: 4,   shoulder: -0.1, ahoge: -0.5, bodyY: 2.5,  bodyZ: 2.5 }
 };
+
+/* ============================================================
+ *  每个情绪字段的「逼近速度」（1/秒，指数逼近的时间常数倒数）
+ *
+ *  这一张表解决的是一件比"多加几个参数"更要紧的事：
+ *  **所有参数共用一个速度 = 整张脸同时到位 = 木偶。**
+ *  真实的脸是错峰动起来的（动画术语 overlapping action）：
+ *  眉毛最先反应（约 0.08s）、眼睛跟着、嘴中等、头更慢、身体最慢，
+ *  脸红则是血涌上来、本来就该是几秒的渐变。
+ *  同时到位时观感是"整张图在缩放"，错峰到位才像"表情从脸上长出来"。
+ *
+ *  ⚠️ 键集合必须和 EMOTION 的字段集**完全一致** —— 漏一个字段，
+ *     那一个就退化成 EMO_SPEED_DEFAULT，而且是静默的（verify 会拦）。
+ *  数值口径：越大越快。眉毛 ≈ 2× 头部，身体最小。
+ * ========================================================== */
+
+export const EMO_SPEED = {
+  // 眉毛 —— 最快，人的注意力先写在眉上
+  browLY: 9, browRY: 9, browLX: 9, browRX: 9, browAngle: 8, browForm: 8,
+  // 眼睛 —— 次之（睁眼/眯眼）
+  eyeSmile: 7, eyeOpen: 7,
+  // 呆毛 —— 头发有惯性，比脸慢半拍，翘起来才有"弹"的感觉
+  ahoge: 5,
+  // 嘴 —— 中等
+  mouthForm: 4.5,
+  // 脸红 —— 最慢的那一类，是渐变不是开关
+  cheek: 2.8,
+  // 头部 —— 慢（转个头是要花时间的）
+  headZ: 3.2, headY: 3.2,
+  // 肩 + 身体 —— 最慢：重心转移本来就慢，而且身体过物理，
+  //              喂快了物理会抖（见 PARAM 的 BODY_Y）
+  shoulder: 2.6, bodyY: 2.2, bodyZ: 2.2
+};
+
+/* EMOTION 里出现、但 EMO_SPEED 没列的字段兜底用什么速度。
+ * ⚠️ 它存在的意义是**别让插值崩**，不是"可以少写好几项"——
+ *    真走了这里说明 EMO_SPEED 漏了字段，verify-expressive.js 会报红。 */
+export const EMO_SPEED_DEFAULT = 5.5;

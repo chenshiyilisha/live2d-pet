@@ -58,6 +58,13 @@ contextBridge.exposeInMainWorld('pet', {
   // 主动搭话：闲置久了由主进程挑个话头
   proactive: () => ipcRenderer.invoke('chat:proactive'),
 
+  /* say() 类整段播报走悬浮气泡窗（chat.floatBubble 开启时）。
+   * 主进程在浮窗关闭时会安全忽略这两条 —— 主窗内的 #bubble 照旧画。 */
+  floatSay: (text, autoHideMs) => ipcRenderer.send('pet:float-say', { text, ms: autoHideMs }),
+  floatHide: () => ipcRenderer.send('pet:float-hide'),
+  /* 请求主进程实量人物头顶 y（悬浮气泡的锚点用） */
+  requestHeadMeasure: () => ipcRenderer.send('pet:head-measure'),
+
   // 托盘 / 右键菜单改了开关后主进程会通知过来
   onConfigChanged: (cb) => ipcRenderer.on('config:changed', () => cb()),
   onHistoryCleared: (cb) => ipcRenderer.on('history:cleared', () => cb()),

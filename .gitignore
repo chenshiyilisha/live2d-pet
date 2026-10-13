@@ -19,6 +19,9 @@ src/assets/models/
 #    itest.html、probe.sh、driver*.js …），不能一起 ignore 掉。
 debug/*.log
 debug/*.png
+# ⚠️ 例外：pet-driver.html 是 gen-driver.sh 从 src/renderer/index.html **现场生成**的
+#    驱动页（每次跑实跑都会重新生成、内容随 index.html 变），属于产物不属于工具。
+debug/pet-driver.html
 # 实跑诊断用的临时 user-data 目录（--user-data-dir 指过去，Electron 会往里
 # 写一堆缓存 / leveldb，全是可再生成的二进制，绝不能进库 —— 2026-10-13 误提交过一次）
 debug/.tmp-userdata/

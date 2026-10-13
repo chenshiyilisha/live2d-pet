@@ -12,7 +12,18 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const src = fs.readFileSync(path.join(ROOT, 'src/main/main.js'), 'utf8');
+
+/* 剖源码前必须把行尾统一成 \n。
+ *
+ * ⚠️ 本仓库 .gitattributes 是 `* text=auto` 且 core.autocrlf=true：任何一次
+ *    git checkout / 全新 clone 都会把工作区文件写成 **CRLF**，而下面那些
+ *    `indexOf('\n}\n')` 式的切片是按 LF 写的 —— 文件是 CRLF 时一处都切不到，
+ *    报出来的却是"找不到 XXX 的结尾"，看着像被剖的代码写错了
+ *    （2026-10-13 实际踩过：一次 git checkout 之后 tray-dump 就挂了）。 */
+const readSrc = (rel) =>
+  fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
+
+const src = readSrc('src/main/main.js');
 /* 版本号从 package.json 读，不手抄 —— 这里原先写死 '0.1.0'，
  * 而包已经发到 0.1.3 了它还照报旧值（手抄副本脱节的活证据）。 */
 const PKG = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
@@ -73,7 +84,7 @@ function sliceFn2(source, name) {
   return source.slice(head, tail + 3);
 }
 
-const cfgSrc = fs.readFileSync(path.join(ROOT, 'src/main/config.js'), 'utf8');
+const cfgSrc = readSrc('src/main/config.js');
 const constSrc = [
   sliceObjConst(cfgSrc, 'LIMITS'),
   /* 🔴 DEFAULT_CONFIG 必须**从源码切**，不能手抄：菜单里每个复选框的勾选态
@@ -127,7 +138,6 @@ const sandbox = {
   bumpScale: rec('bumpScale'),
   resetScale: rec('resetScale'),
   setOpacity: rec('setOpacity'),
-  setModel: rec('setModel'),
   toggleVisible: rec('toggleVisible'),
   moveToCorner: rec('moveToCorner'),
   startPomodoro: rec('startPomodoro'),

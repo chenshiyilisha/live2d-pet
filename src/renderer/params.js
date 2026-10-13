@@ -5,15 +5,17 @@
  * 没有 DOM、没有 pixi、没有任何运行时状态 —— 改这三张表不需要去看渲染循环。
  *
  * ⚠️ 唯一的可变导出是 P（当前生效的参数表）。ESM 的 import 绑定是**只读**的，
- *    所以只能在**本文件内**改它（refreshParamTable 就是干这个的）；
- *    别的模块 import { P } 之后只读 P.MOUTH_OPEN —— 这是有意为之。
+ *    所以只能在**本文件内**改它；别的模块 import { P } 之后只读
+ *    P.MOUTH_OPEN —— 这是有意为之。
  */
 
 /* ============================================================
  *  模型表
  *
- *  ⚠️ 每套模型的取景几何都是各自实测的，不能通用 —— 换模型 = 换 url
- *     + 换下面这一整组数。画布尺寸也不同（Hiyori 2976×4175，Haru 2400×4500）。
+ *  ⚠️ 下面这一整组几何数都是**实测拟合**出来的，不是推出来的，不能乱调。
+ *     表格结构保留（而不是拍平成一组常量），是为了将来真加第二套素材时
+ *     直接往里添一项、pet.js 侧不用改结构。画布 2976×4175（Cubism 画布，
+ *     不是窗口尺寸）。
  *
  *  几何量法：?snap=ink&pet=<小值>&pad=<大值> 把模型压到完整可见
  *  （被窗口裁掉的部分 capturePage 截不到），逐帧量像素包围盒，
@@ -52,45 +54,19 @@ export const MODELS = {
      * ⚠️ 换模型/换素材必须重新多帧标定，单帧会因举手/甩发把中心带偏。 */
     inkW: 897,              // 轮廓最大宽（穿透判定用，取偏大值）
     inkCxK: 971,            // **身体中心线** x = inkCxK × s（居中用）
-    /* 哪些动作组保持循环播放。
-     * Hiyori 的动作曲线首尾全不闭合（Meta 的 Loop:true 是标错的），
-     * 所以一个都不能留 —— 全关，播完交给插件的 idle 调度接管。 */
-    keepLoopGroups: []
-  },
-  haru: {
-    label: '春',
-    url: '/src/assets/models/haru/Haru.model3.json',
-    /* 画布 2400×4500。下面这组是**实测拟合**出来的（两组不同缩放的像素包围盒）：
-     *   墨水顶部(canvas 内) = vh×0.2 + 193·s
-     *   身体中心线 x        = 788·s          ← 水平方向是纯比例
-     *   墨水总高 3173 / 轮廓最大宽 640（画布单位，宽会随手臂摆动浮动，取的是偏大值，
-     *                            宁可让命中矩形略大，也别把身体判成透明）
-     *
-     * 实测原始数据（s → 墨水顶部在窗口里的位置，CSS px；pad 是当次设定的留白）：
-     *   s=0.21529 pad=300 → 228 ；s=0.10764 pad=100 → 35.2
-     * 换模型必须重标（量法见文件顶部说明）。 */
-    /* 基准缩放：按 hiyori 的取景反解出来的，让两个模型切来切去观感一致。
-     *
-     * 判据一（头一样大）：haru 头 542 画布单位，hiyori 463 → s=112/542 → 0.767
-     * 判据二（等高）：hiyori 有效墨水高 727 CSS，haru 3173 画布单位 → 0.790
-     * 两条差 3%，取中间 0.78：haru 头 113.8 CSS（比 hiyori 大 1.6%）。
-     *
-     * ⚠️ 别拿 "SHOW_FRACTION × INK_H × s 相等" 去推 —— hiyori 的 55% 处是腰际，
-     *    haru 的是 60%（她上身长），两个模型的墨水高里「看得见的那半身」占比不同。
-     *    按头部尺寸对齐才是可靠的，因为脸才是观感的锚点。 */
-    petScale: 0.78,
-    headPadRatio: 0.0431,
-    inkTopK: 193,
-    inkH: 3173,
-    inkW: 640,              // 轮廓最大宽（穿透判定用，取偏大值）
-    /* ⚠️ 与 hiyori 同样的问题：984 是**包围盒中心**，实测身体中心在 788，
-     *    偏右 196（≈ 30 CSS px），人物整体偏左 27.7px。见 hiyori 那段说明。 */
-    inkCxK: 788,            // **身体中心线** x = inkCxK × s（居中用）
-    /* Haru 的 Idle 组（haru_g_idle / m15）曲线首尾完全闭合，是真正的循环动作，
-     * 必须保持 loop；其余组（TapBody 里 m06 首尾差 21 度）一律关。 */
-    keepLoopGroups: ['Idle']
+    /* 哪些动作组**保持循环播放**（白名单，见 pet.js 的 KEEP_LOOP 那段）。
+     *   官方那 11 个动作：曲线首尾全不闭合（Meta 的 Loop:true 是标错的），
+     *     一个都不能留 —— 全关，播完交给插件的 idle 调度接管。
+     *   Drag / Walk：本项目手写的（tools/make-motions.js），专门做成首尾
+     *     闭合的持续动作 —— 拖拽期间 / 溜达期间一直播，必须 loop。 */
+    keepLoopGroups: ['Drag', 'Walk']
   }
 };
+
+/* 当前（也是唯一）模型的目录名 —— 全项目只在这里写一次这个字符串。
+ * 主进程、渲染层、诊断脚本都引用它，免得再出现「配置里写一个名字、
+ * 代码里比对另一个名字」这种两边不一致。 */
+export const MODEL_NAME = 'hiyori';
 
 /* 桃濑日和（Hiyori Momose）的参数表。它没有 exp3 表情文件，
  * 所以表情全部靠直控参数做 —— 反而比表情文件灵活（可连续插值）。 */
@@ -118,29 +94,13 @@ export const PARAM = {
   ARM_RA: 'ParamArmRA'
 };
 
-/* 不同模型的参数命名有细微差异，用别名表覆盖。
- * null = 这个模型没有对应参数 → 直接跳过（Cubism 对不存在的参数会静默忽略，
- * 但显式置 null 更清楚，也省掉一次没意义的调用）。
- * 对照 Haru.cdi3.json 得到：Haru 没有 ParamCheek（只有 ParamTere「照れ」）、
- * 也没有 ParamShoulder。 */
-export const PARAM_ALIAS = {
-  haru: {
-    CHEEK: 'ParamTere',
-    SHOULDER: null
-  }
-};
-
-/* 当前生效的参数表。mountModel 里按模型名刷新。 */
+/* 当前生效的参数表。
+ *
+ * 这里原本还有一张按模型改写参数名的别名表（给参数命名不同的那套素材兜底：
+ * 比如有的素材脸红参数叫 ParamTere、且根本没有肩参数）以及配套的
+ * refreshParamTable()。单一模型后别名无从谈起，两张表一起删了。
+ * 真加第二套素材时再回来加，别提前留一个永远走不到的空壳。 */
 export let P = { ...PARAM };
-
-export function refreshParamTable(name) {
-  const over = PARAM_ALIAS[name] || {};
-  const t = {};
-  for (const k of Object.keys(PARAM)) {
-    t[k] = Object.prototype.hasOwnProperty.call(over, k) ? over[k] : PARAM[k];
-  }
-  P = t;
-}
 
 export const State = {
   IDLE: 'idle',

@@ -13,7 +13,16 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const cfgSrc = fs.readFileSync(path.join(ROOT, 'src/main/config.js'), 'utf8');
+
+/* 剖源码前必须把行尾统一成 \n。
+ *
+ * ⚠️ 本仓库 .gitattributes 是 `* text=auto` 且 core.autocrlf=true：任何一次
+ *    git checkout / 全新 clone 都会把工作区写成 **CRLF**，而下面的
+ *    `indexOf('\n}\n')` 是按 LF 写的 —— CRLF 下一条都切不到，报的却是
+ *    "找不到 XXX 的结尾"，看着像被剖的代码写错了（2026-10-13 实际踩过）。 */
+const cfgSrc = fs
+  .readFileSync(path.join(ROOT, 'src/main/config.js'), 'utf8')
+  .replace(/\r\n/g, '\n');
 
 /* 从源码切出要测的部分 —— 不手抄（手抄副本一脱节，测的就是假代码）。
  * config.js 顶部 require('electron')，这里不能真 load，只能剖源码。 */

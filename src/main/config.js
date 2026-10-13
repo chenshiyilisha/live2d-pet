@@ -86,8 +86,9 @@ const DEFAULT_CONFIG = {
   appearance: {
     scale: 1.0,           // 人物缩放倍率，建议 0.6 ~ 1.3
     opacity: 1.0,         // 整窗不透明度，0.3 ~ 1.0
-    alwaysOnTop: true,    // 窗口置顶
-    model: 'hiyori'       // 'hiyori' | 'haru'
+    alwaysOnTop: true     // 窗口置顶
+    /* 这里原本有 model: 一个可选的模型名。春移除后模型固定成日和，
+     * 不再是可配置项 —— 名字只在 params.js 的 MODEL_NAME 写一次。 */
   },
   /* 互动行为（开关 + 各自参数）。
    * ⚠️ wander（闲置自己溜达）= 不打招呼就挪窗口，属于"自动移动"，

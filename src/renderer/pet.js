@@ -4,7 +4,7 @@ import { Live2DModel } from '@naari3/pixi-live2d-display/cubism5';
 /* 模型表 / 参数表 / 情绪姿态表 —— 全是只读的真相，见 params.js。
  * ⚠️ P 是 ESM 的 live binding：这里只能**读** P.XXX，不能赋值。 */
 import {
-  MODELS, INK_TOP_C_RATIO, P, refreshParamTable, State, EMOTION
+  MODELS, MODEL_NAME, INK_TOP_C_RATIO, P, State, EMOTION
 } from './params.js';
 import { configureTTS, initTTS, speak, stopSpeak, ttsVoiceInfo } from './tts.js';
 import { abortRecording, configureRecorder } from './recorder.js';
@@ -23,19 +23,15 @@ Live2DModel.registerTicker(PIXI.Ticker);
 
 console.log('[pet] modules loaded');
 
-/* 当前生效的模型（由主进程的 appearance.model 决定）。
- * 这两个是**可变状态**、且只有本文件写，所以不搬去 params.js ——
- * ESM 的 import 绑定是只读的，跨模块赋值不成立。 */
-// 当前生效的模型（由主进程的 appearance.model 决定）
-let curModelName = 'hiyori';
-
-/* 最近一次请求挂载的模型定义。
- * mountModel 里那句 `await Live2DModel.from()` 要几百毫秒，这期间用户完全可能
- * 又点了另一个模型 —— 先加载好的那份必须**丢掉**，否则两份纹理同时在场，
- * 最后显示哪个取决于谁先 resolve。
- * ⚠️ 不能拿 curModelName 当守卫：它要等 applyModelGeometry() 才更新，而那是
- *    await 之后 —— 连点两次时第二次读到的还是旧名字，守卫形同虚设。 */
-let mountTarget = null;
+/* 当前生效的模型名（初值来自 params.js 的 MODEL_NAME）。
+ * 是**可变状态**、且只有本文件写，所以不搬去 params.js ——
+ * ESM 的 import 绑定是只读的，跨模块赋值不成立。
+ *
+ * ⚠️ 这里曾经还有一个"单飞守卫"（记下最近一次请求挂载的模型，加载完比对，
+ *    不一致就把刚拿到的资源丢掉）。春移除后模型固定、mountModel 只在 boot
+ *    里调一次，守卫再没有能触发的路径 —— 连同它的源码级断言一起删了，
+ *    别让它烂在这儿冒充保护。 */
+let curModelName = MODEL_NAME;
 
 /* ============================================================
  *  DOM
@@ -125,7 +121,7 @@ function setIgnoreMouse(ignore) {
 }
 
 function setParam(id, value) {
-  if (!id) return;              // 该模型没有这个参数（见 PARAM_ALIAS）
+  if (!id) return;              // PARAM 表里没定义的键（占位，见 params.js）
   try {
     model?.internalModel?.coreModel?.setParameterValueById(id, value);
   } catch { /* 模型未就绪时忽略 */ }
@@ -223,15 +219,15 @@ function setState(next) {
  *  加载 / 切换模型
  * ==========================================================
  *
- * 这段原本直接写在 boot() 里，改成一个可以反复调用的函数，是为了支持
- * **运行时换模型**（托盘的"人物模型"菜单）。里面包含四件事：
+ * boot() 里调一次（名字与入参保留 —— name 是 MODELS 表的查表键）。
+ * 里面包含四件事：
  *   1) 加载 model3.json + 建 holder 容器
  *   2) 取景（layout）
  *   3) 动作播放参数规整（关循环 / 钉死淡化时长）
  *   4) pose 部件淡化收紧 + 手臂参数残值释放
  *
- * ⚠️ 第 3、4 步都是**按模型**设计的（Hiyori 和 Haru 的素材特性相反，
- *    见各自的注释），所以必须跟模型一起重装，不能只加载一次。
+ * ⚠️ 第 3、4 步是**贴着这份素材的实测特性**写的（见各段注释）——
+ *    真换一套素材时必须重新核对，不能照抄。
  */
 
 async function mountModel(name) {
@@ -243,14 +239,11 @@ async function mountModel(name) {
   abortRecording();
 
   /* ---- 1) 先把新模型加载好，**再**拆旧的 ----
-   * 顺序反过来会有两个后果（都是实测踩出来的）：
-   *   a) 旧的已经拆了、新的还在 await，中间那几百毫秒屏幕上什么都没有，
-   *      观感就是「一切模型闪一下空白」；
-   *   b) 这段时间 model 是 null，常驻的 ticker 会踩空
-   *      （Cannot read properties of null (reading 'focus')）。
-   * 先加载后替换把窗口缩到同步的几行里，两个问题一起没了。
-   * 代价是切换瞬间内存里同时有两份纹理（画布 2400x4500），可以接受。 */
-  mountTarget = def;
+   * boot 时 model / holder 都还是 null，下面"拆旧的"那几行其实是空转。
+   * 这个顺序不改成"先拆后建"，是为了保住当初踩出来的两条结论（真加第二套
+   * 素材时它们立刻又成立）：旧的拆早了会有几百毫秒空屏；那段窗口里
+   * model 是 null，常驻 ticker 会踩空
+   * `Cannot read properties of null (reading 'focus')`。 */
   const next = await Live2DModel.from(def.url, {
     autoInteract: false,
     // 插件的默认策略只预加载 idle 那一组，TapBody 要等第一次点击才去 fetch
@@ -258,16 +251,11 @@ async function mountModel(name) {
     // 全部预加载掉，切换就是零延迟的。
     motionPreload: 'ALL'
   });
-  /* 加载期间又切了别的模型 → 这份已经过时：把刚拿到手的资源直接释放掉，
-   * 什么都不碰就返回（后来那次请求会自己把它要的挂上去）。 */
-  if (mountTarget !== def) {
-    try { next.destroy(); } catch { /* ignore */ }
-    return false;
-  }
   next.anchor.set(0, 0);
 
-  /* ---- 2) 拆旧的。Cubism 的 GL 资源不释放的话，来回切几次就会
-   *         攒下一堆纹理（这套画布 2400x4500，纹理不小）。 ---- */
+  /* ---- 2) 拆旧的。Cubism 的 GL 资源不主动释放就会一直挂着
+   *         （这套画布 2976x4175，纹理不小）—— boot 时为空转，
+   *         真加第二套素材时这就是热换的那条路。 ---- */
   const prevModel = model;
   if (holder) {
     try { app.stage.removeChild(holder); } catch { /* ignore */ }
@@ -358,18 +346,17 @@ async function mountModel(name) {
     const FADE_SECONDS = 0.5;
     const mm = model.internalModel?.motionManager;
     if (mm) {
-      /* 哪些动作组**保持循环播放** —— 这是 Hiyori 和 Haru 最大的差别。
+      /* 哪些动作组**保持循环播放** —— 白名单：只有列进去的组才 loop。
        *
-       *   Hiyori  10 个动作的曲线首尾全都不闭合（合计 147 条），Meta 里的
-       *           Loop:true 是标错的 → 必须关：否则播到 Duration 会瞬间回绕，
-       *           观感就是「动作结尾卡一下」；更糟的是回绕让 isFinished()
-       *           永远不成立，插件内建的 idle 自动调度（MotionManager.update
-       *           → shouldRequestIdleMotion → startRandomMotion）也就永远不触发。
-       *   Haru    两条 Idle 动作首尾完全闭合（差值 0），本来就是循环动作 →
-       *           关掉反而会每 10 秒重新淡入一次；但 TapBody 组里的 m06
-       *           首尾差 21 度，那种必须关。
+       * 官方的 11 个动作（Idle 10 + TapBody 1）曲线首尾全都不闭合（Meta 里的
+       * Loop:true 是标错的）→ 一律要关：否则播到 Duration 会瞬间回绕，
+       * 观感就是「动作结尾卡一下」；更糟的是回绕让 isFinished()
+       * 永远不成立，插件内建的 idle 自动调度（MotionManager.update
+       * → shouldRequestIdleMotion → startRandomMotion）也就永远不触发。
        *
-       * 所以用白名单：只有列进去的组才保持 loop。 */
+       * 例外是自己手写的 Drag / Walk（见 tools/make-motions.js）：那两组就是
+       * 按「首尾闭合的持续动作」设计的，必须 loop —— 拖拽期间和溜达期间
+       * 一直播，松手 / 到点才交给 idle 调度。 */
       const KEEP_LOOP = new Set(def.keepLoopGroups || []);
       const retime = (motion, group) => {
         try {
@@ -703,7 +690,7 @@ async function boot() {
     console.log('[pet] clearpatch err', String(e));
   }
 
-  await mountModel(cfg?.appearance?.model === 'haru' ? 'haru' : 'hiyori');
+  await mountModel(MODEL_NAME);
   // 加载成功的显式证据：若模型没真正就绪，这里会先炸
   const core = model.internalModel?.coreModel;
   console.log('[pet] model ready', JSON.stringify({
@@ -849,8 +836,8 @@ async function boot() {
 /* ============================================================
  *  取景：半身（头顶 → 腰）
  *
- *  Haru 的 Cubism 画布是 2400x4500，角色本体只占里面一小块（约
- *  x 234~760、y 1659~4300），四周全是留白。按画布尺寸适配会让角色又小又偏，
+ *  Cubism 画布（2976x4175）里角色本体只占其中一块，四周全是留白。
+ *  按画布尺寸适配会让角色又小又偏，
  *  所以直接按半身取景。本体的坐标是量出来的：把模型缩到「画布刚好装进窗口
  *  高度」，截下窗口，统计「非透明 且 非纯白」像素的包围盒再反推。
  *
@@ -880,14 +867,14 @@ async function boot() {
  *
  *  5. 也别去动 internalModel.setupLayout()。里面的 scale()/translate()
  *     是在旧值上累乘/累加的，centeringTransform 会被再乘一次 pixelsPerUnit
- *     （Haru 是 2400），画布瞬间放大 2400 倍 —— 又一个"糊成一片白"。
+ *     （= 画布的 pixelsPerUnit），画布瞬间放大几千倍 —— 又一个"糊成一片白"。
  * ========================================================== */
 
 /* ---- 取景参数（换模型必须重标）----
  * 画布尺寸改成运行时从 internalModel 读，所以换模型不用改这里；
  * 下面这几组才是要标定的东西，换模型得重新量。 */
-let CANVAS_W = 2400;                     // Cubism 画布宽（兜底值，运行时会覆盖成真值）
-let CANVAS_H = 4500;                     // Cubism 画布高
+let CANVAS_W = 2976;                     // Cubism 画布宽（兜底值，运行时会覆盖成真值）
+let CANVAS_H = 4175;                     // Cubism 画布高
 
 let ZOOM = 2.898;                        // 画布相对窗口的放大倍数（见坑 1）
 
@@ -941,7 +928,7 @@ let INK_W = MODELS[curModelName].inkW;
 let INK_CX_K = MODELS[curModelName].inkCxK;
 
 /* 把 geometry / scale 从 MODELS 表刷进上面这些运行时变量。
- * 切模型、改用户缩放都走它，保证只剩一处真相（MODELS 表）。 */
+ * 改用户缩放走它，保证只剩一处真相（MODELS 表）。 */
 function applyModelGeometry(name) {
   const m = MODELS[name];
   if (!m) return;
@@ -952,7 +939,6 @@ function applyModelGeometry(name) {
   INK_CX_K = m.inkCxK;
   HEAD_PAD_RATIO = m.headPadRatio;
   PET_SCALE = PET_SCALE_OVERRIDE ?? (m.petScale * userScale);
-  refreshParamTable(name);
 }
 applyModelGeometry(curModelName);
 
@@ -1044,7 +1030,7 @@ function layout() {
   const H = stageEl.clientHeight - STATS_GAP;
   if (!W || !H) return;
 
-  // ---- 0) 画布尺寸以模型真值为准（Haru 2400x4500，Hiyori 不同）----
+  // ---- 0) 画布尺寸以模型真值为准（别信上面那两个兜底常量）----
   const im = model.internalModel;
   if (im?.originalWidth && im?.originalHeight) {
     CANVAS_W = im.originalWidth;
@@ -1694,28 +1680,15 @@ window.addEventListener('keydown', (e) => {
  *  主进程事件
  * ========================================================== */
 
-/* 外观：主进程改了人物大小 / 模型后推过来。
- *   - 大小：实时重算缩放，不用重载模型
- *   - 模型：整套重新挂载（取景几何、动作调优都要跟着换，见 mountModel） */
-window.pet?.onAppearance?.(async (a) => {
-  if (!a) return;
-  if (typeof a.scale === 'number') {
-    // 钳位后再比，否则主进程推来个越界值会每次都判定「变了」而反复重排
-    const before = userScale;
-    setUserScale(a.scale);
-    if (Math.abs(userScale - before) > 0.001) layout();
-  }
-  if (a.model && a.model !== curModelName) {
-    try {
-      const mounted = await mountModel(a.model);
-      if (!mounted) return;        // 期间又切了别的模型，这次的结果已经作废，别报"换好了"
-      setEmotion('happy');
-      showStatus(`换成${MODELS[a.model]?.label || a.model}了`);
-    } catch (err) {
-      console.error('[pet] 换模型失败', err);
-      showStatus('换模型失败：' + (err?.message || err));
-    }
-  }
+/* 外观：主进程改了人物大小后推过来 —— 只需实时重算缩放，不重载模型。
+ * 原本这里还有「模型」分支（运行时换模型 → 整套重新挂载：取景几何、
+ * 动作调优都要跟着换），春移除后模型固定，那条分支没有了。 */
+window.pet?.onAppearance?.((a) => {
+  if (!a || typeof a.scale !== 'number') return;
+  // 钳位后再比，否则主进程推来个越界值会每次都判定「变了」而反复重排
+  const before = userScale;
+  setUserScale(a.scale);
+  if (Math.abs(userScale - before) > 0.001) layout();
 });
 
 // 操作反馈小字（改了大小 / 透明度时主进程会发过来）

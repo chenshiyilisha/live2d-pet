@@ -48,8 +48,8 @@
 ```bash
 pnpm install
 
-# 模型（Hiyori / Haru，9 MB）不随仓库分发 —— 版权归 Live2D Inc.
-# 从 Releases 下载 models.zip，解压到 src/assets/，得到 src/assets/models/{hiyori,haru}/
+# 模型（Hiyori，版权归 Live2D Inc.）不随仓库分发
+# 从 Releases 下载 models.zip，解压到 src/assets/，得到 src/assets/models/hiyori/
 # 本地已有副本的话跳过这步。
 
 pnpm start          # 开发模式，直接起 Electron
@@ -138,17 +138,19 @@ https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js
 下载 Cubism SDK for Web，把其中的 `live2dcubismcore.min.js` 放到 `src/assets/` 即可
 （该路径已被 gitignore，不会误提交）。
 
-### Live2D 示例模型（Hiyori / Haru）
+### Live2D 示例模型（Hiyori）
 
-**模型文件不在本仓库里。** 它们是 Live2D 官方示例数据集中的 **Hiyori Momose** 与
-**Haru**，版权归 **Live2D Inc.** 所有，因此改为放在
+**模型文件不在本仓库里。** 它是 Live2D 官方示例数据集中的 **Hiyori Momose**，
+版权归 **Live2D Inc.** 所有，因此改为放在
 [Releases](https://github.com/chenshiyilisha/live2d-pet/releases) 的 `models.zip` 中，
 仓库只保留源码。
 
+> 2026-10-13：原先还带一个 **Haru**，已按要求移除 —— 应用现在固定使用日和。
+
 **从源码跑的话，需要两步**（本地已有副本就跳过）：
 
-1. 从 Releases 下载 `models.zip`（约 7.5 MB）
-2. 解压到 `src/assets/`，得到 `src/assets/models/hiyori/` 与 `src/assets/models/haru/`
+1. 从 Releases 下载 `models.zip`
+2. 解压到 `src/assets/`，得到 `src/assets/models/hiyori/`
 
 该目录已在 `.gitignore` 里，不会被误提交。
 
@@ -164,7 +166,9 @@ https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js
 
 - 一般用户与小规模企业（年营收 < 1000 万日元）可自由使用，含商用
 - **Hiyori Momose 不允许对角色设计做任何改动**（官方条款原文："No changes of any kind
-  to the design of this character are permitted"）
+  to the design of this character are permitted"）。本项目遵守这一条：新增的
+  `Drag` / `Walk` 动作文件只**驱动已有参数**，不触碰任何一张贴图、也不改角色造型
+  （生成方式与边界见 `tools/make-motions.js`）
 - 使用这些素材的作品需要附带官方要求的版权声明：
 
 > This content uses sample data owned and copyrighted by Live2D Inc. The sample data
@@ -187,7 +191,7 @@ https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js
 
 | 内容 | 版权 / 授权 |
 |---|---|
-| `src/assets/models/`（Hiyori / Haru，65 文件） | 版权归 **Live2D Inc.**，受 Free Material License 约束（见上一节）。**不在本仓库内**，从 Release 下载 |
+| `src/assets/models/`（Hiyori） | 角色版权归 **Live2D Inc.**，受 Free Material License 约束（见上一节）。**不在本仓库内**，从 Release 下载 |
 | `live2dcubismcore.min.js` | Live2D Inc. 的**专有软件**，本仓库不收录，运行时从官方 CDN 取回 |
 | `pixi.js`、`@naari3/pixi-live2d-display`、`electron-updater` | 各自作者的开源许可证（多为 MIT），**不在本仓库内**，随 `pnpm install` 获取 |
 

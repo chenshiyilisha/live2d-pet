@@ -169,7 +169,7 @@ if (!fs.existsSync(SRC)) {
 
 const files = [];
 /* ⚠️ 基准用 SRC 的**父目录**，这样条目名带 `models/` 前缀。
- * 若用 SRC 自身作基准，条目会变成 `hiyori/...`、`haru/...`，
+ * 若用 SRC 自身作基准，条目会变成 `hiyori/...`，
  * 使用者就得自己先建 models/ 目录才能解压到正确位置 —— 容易放错。 */
 walk(SRC, path.dirname(SRC), files);
 files.sort((a, b) => (a.name < b.name ? -1 : 1)); // 顺序固定 → 产物可复现

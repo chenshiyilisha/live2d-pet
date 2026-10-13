@@ -24,17 +24,29 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ROOT = path.join(__dirname, '..');
 
 /* ══════════════════ B. 源码级断言（先做，不依赖运行时） ══════════════════ */
-console.log('\n═══ B. pet.js：换模型的单飞守卫还在不在 ═══\n');
+console.log('\n═══ B. 春已经真的走干净（删一个模型最容易留半截）═══\n');
 {
+  /* 2026-10-13 用户『春去掉』。删模型最容易出的错是"改一半"：菜单没了、
+   * 配置键没了，但某个分支还在比那个名字，或者素材还留在 src/ 里跟着进安装包。
+   * 下面按文件逐个扫，比人眼可靠。 */
+  for (const f of [
+    'src/renderer/pet.js',
+    'src/renderer/params.js',
+    'src/main/main.js',
+    'src/main/config.js',
+    'tools/prepare-stage.js',
+    'debug/acceptance.js'
+  ]) {
+    const src = fs.readFileSync(path.join(ROOT, f), 'utf8');
+    check(!/haru/i.test(src), `${f} 里没有 haru 残留`);
+  }
   const petSrc = fs.readFileSync(path.join(ROOT, 'src/renderer/pet.js'), 'utf8');
-  check(/mountTarget = def;/.test(petSrc),
-    'mountModel 进 await 之前先登记目标模型');
-  check(/if \(mountTarget !== def\) \{[\s\S]{0,200}?return false;/.test(petSrc),
-    '加载完成时比对目标：变过就销毁刚加载的模型并 return false');
-  check(/const mounted = await mountModel\(a\.model\);\s*\n\s*if \(!mounted\) return;/.test(petSrc),
-    '调用方按返回值决定要不要报「换好了」');
+  check(!/mountTarget/.test(petSrc),
+    '换模型的单飞守卫（mountTarget）已随多模型一起删掉');
   check(!/\bMAP\b/.test(petSrc.replace(/见 MAP|（见 MAP）/g, '')),
     '没人读的 MAP 变量已经清掉（不会又长回来）');
+  check(!fs.existsSync(path.join(ROOT, 'src/assets/models/haru')),
+    'src/assets/models/haru 已经从仓库目录移走（素材不该继续进安装包）');
 }
 
 /* ══════════════════ A. 真跑 motion.js ══════════════════ */

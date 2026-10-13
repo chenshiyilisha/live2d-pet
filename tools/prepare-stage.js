@@ -237,7 +237,6 @@ const must = [
   'src/renderer/style.css',
   'src/assets/models/hiyori/Hiyori.model3.json',
   'src/assets/models/hiyori/Hiyori.moc3',
-  'src/assets/models/haru/Haru.model3.json',
   ...BUNDLES.map((b) => b.dst)
 ];
 const missing = must.filter((rel) => !fs.existsSync(path.join(STAGE, rel)));
@@ -249,7 +248,7 @@ if (missing.length) {
   if (missing.some((m) => m.startsWith('src/assets/models/'))) {
     console.error('');
     console.error('↑ 模型素材不随仓库分发。从 Releases 下载 models.zip，');
-    console.error('  解压到 src/assets/ 后重试（应得到 src/assets/models/{hiyori,haru}/）。');
+    console.error('  解压到 src/assets/ 后重试（应得到 src/assets/models/hiyori/）。');
   }
   process.exit(1);
 }

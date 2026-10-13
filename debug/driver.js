@@ -3,10 +3,10 @@
  * ⚠️ 必须跑在**真正的桌宠页面**里（debug/pet-driver.html 由 index.html 现场生成）。
  * 之前用 iframe 装真页面、父页面拨开关，是**错的** ——
  * mainWindow.webContents.send 只投递给主 frame，iframe 收不到 appearance:changed，
- * 表现就是「配置改了、models.haru 也写进盘了，但画面还是 hiyori」，很能骗人。
+ * 表现就是「配置改了、盘上也写进去了，但画面纹丝不动」，很能骗人。
  *
  * 这里走的完整链路：setConfig → config:set → syncAppearance →
- *   appearance:changed → onAppearance → mountModel。
+ *   appearance:changed → onAppearance → 重算缩放。
  */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -29,17 +29,5 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await window.pet.setConfig({ appearance: { scale: 1 } });
   await sleep(2500);
   log('scale restored');
-
-  await window.pet.setConfig({ appearance: { model: 'haru' } });
-  log('set model=haru');
-  await sleep(9500);
-  await window.pet.saveShot('d-haru');
-  log('shot haru');
-
-  await window.pet.setConfig({ appearance: { model: 'hiyori' } });
-  log('set model=hiyori');
-  await sleep(9500);
-  await window.pet.saveShot('d-back');
-  log('shot back');
   log('done');
 })().catch((e) => console.log('[drv] EXCEPTION ' + ((e && e.stack) || e)));

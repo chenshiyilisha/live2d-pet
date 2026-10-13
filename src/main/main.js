@@ -385,12 +385,11 @@ function syncAppearance() {
    *    把置顶恢复回来 —— 恢复路径只有这一条，不会漏。 */
   const onTop = !quiet && a.alwaysOnTop !== false;
   const scale = clampScale(a.scale);
-  const model = a.model === 'haru' ? 'haru' : 'hiyori';
 
   try { mainWindow.setOpacity(opacity); } catch { /* 某些合成模式下不支持 */ }
   try { mainWindow.setAlwaysOnTop(onTop, 'floating'); } catch { /* ignore */ }
   try {
-    mainWindow.webContents.send('appearance:changed', { scale, opacity, onTop, model });
+    mainWindow.webContents.send('appearance:changed', { scale, opacity, onTop });
   } catch { /* 窗口正在销毁 */ }
 }
 
@@ -606,7 +605,7 @@ function warnIfModelsMissing() {
 
   console.warn('[models] 找不到任何 Live2D 模型：' + modelsDir);
   console.warn('[models] 模型不随仓库分发。请从 Releases 下载 models.zip，');
-  console.warn('[models] 解压到 src/assets/ 后重启（应得到 src/assets/models/{hiyori,haru}/）。');
+  console.warn('[models] 解压到 src/assets/ 后重启（应得到 src/assets/models/hiyori/）。');
 }
 
 /* 自动更新：注入依赖 + 启动后延迟检查一次。
@@ -1103,12 +1102,6 @@ function setOpacity(v) {
   toast(`不透明度 ${Math.round(o * 100)}%`);
 }
 
-function setModel(name) {
-  patchConfig('appearance', { model: name === 'haru' ? 'haru' : 'hiyori' });
-  syncAppearance();
-  toast(`换成${name === 'haru' ? '春' : '日和'}`);
-}
-
 function toggleTTS() {
   const on = isOn('tts', 'enabled');
   patchConfig('tts', { enabled: !on });
@@ -1123,24 +1116,25 @@ function toggleTTS() {
  *
  * 现在的结构：
  *   显示/隐藏 · 回到右下角
- *   ├─ 外观与形象（大小 / 不透明度 / 人物模型 / 置顶）
+ *   ├─ 外观与形象（大小 / 不透明度 / 置顶）
  *   ├─ 互动与行为（总开关 + 6 项）
  *   ├─ 功能开关  （朗读 / 搭话 / 悬浮 / 提醒 / 语音）
  *   └─ 小工具    （番茄钟 / 定时提醒）
  *   设置 · 退出
  * 各组把**当前值写在组标题里**（缩放%、模型名），不展开也能一眼看到状态。
  */
-/* 外观三项（大小 / 不透明度 / 人物模型）。
+/* 外观两项（大小 / 不透明度）。
  *
  * 托盘和「点角色」的右键菜单各要一份，之前是**复制粘贴**出来的两份 ——
  * 改了一处忘另一处就会出现「托盘里能调、右键里调不了」这种不一致，
  * 而且两边的标题写法都漂了（`大小（100%）` vs `大小 100%`）。
- * 现在共用一份，托盘与右键菜单的内容完全一致。 */
+ * 现在共用一份，托盘与右键菜单的内容完全一致。
+ *
+ * 原来的第三项「人物模型」随春一起移除 —— 只剩日和，再摆一个永远只有
+ * 一条的单选菜单纯属噪音（托盘顶层还等着省行数）。 */
 function appearanceSubmenu(cfg) {
   const scale = Math.round(clampScale(cfg.appearance?.scale) * 100);
   const opacity = clampOpacity(cfg.appearance?.opacity);
-  const model = cfg.appearance?.model === 'haru' ? 'haru' : 'hiyori';
-  const label = model === 'haru' ? '春' : '日和';
 
   return [
     {
@@ -1160,13 +1154,6 @@ function appearanceSubmenu(cfg) {
         checked: Math.abs(opacity - v) < 0.02,
         click: () => setOpacity(v)
       }))
-    },
-    {
-      label: `人物模型（${label}）`,
-      submenu: [
-        { label: '日和 Hiyori', type: 'radio', checked: model === 'hiyori', click: () => setModel('hiyori') },
-        { label: '春 Haru', type: 'radio', checked: model === 'haru', click: () => setModel('haru') }
-      ]
     }
   ];
 }
@@ -1576,7 +1563,7 @@ function registerIpc() {
       shell.openPath(p);
     };
 
-    /* 外观三项收进一个子菜单，免得「点一下角色」弹出来的面板跟托盘一样长。
+    /* 外观两项收进一个子菜单，免得「点一下角色」弹出来的面板跟托盘一样长。
      * 内容与托盘**共用** appearanceSubmenu()，两边完全一致。 */
     const appearanceSub = appearanceSubmenu(cfg);
 

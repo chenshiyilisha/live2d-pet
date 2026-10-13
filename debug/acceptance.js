@@ -86,7 +86,6 @@ const must = [
   'resources/app/vendor/pixi.js/dist/pixi.mjs',
   'resources/app/vendor/@naari3/pixi-live2d-display/dist/cubism5.es.js',
   'resources/app/src/assets/models/hiyori/Hiyori.moc3',
-  'resources/app/src/assets/models/haru/Haru.moc3',
   'resources/app/src/assets/live2dcubismcore.min.js'
 ];
 for (const rel of must) {

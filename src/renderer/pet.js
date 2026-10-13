@@ -600,7 +600,7 @@ async function boot() {
   try {
     cfg = await window.pet?.getConfig?.();
     hasApiKey = !!cfg?.llm?.apiKey;
-    // 用户调的人物大小（托盘 / 快捷键 / 右键菜单），必须在 mountModel 之前生效 ——
+    // 用户调的人物大小（托盘 / 右键菜单），必须在 mountModel 之前生效 ——
     // mountModel 里的 applyModelGeometry() 会把它乘进 PET_SCALE
     setUserScale(cfg?.appearance?.scale);
   } catch { cfg = null; }
@@ -879,7 +879,7 @@ let ZOOM = 2.898;                        // 画布相对窗口的放大倍数（
 /* 人物缩放 = 当前模型的基准值 × 用户倍率。
  *
  *   基准值写死在 MODELS 表里（改动要重新标定几何，别乱调）；
- *   用户倍率来自 appearance.scale，托盘 / 快捷键 / 右键菜单都能实时改。
+ *   用户倍率来自 appearance.scale，托盘 / 右键菜单都能实时改。
  *
  * 缩放只乘在 holder.scale 上，不改 canvas 尺寸，所以**缩小永远安全**；
  * 调大要小心模型溢出 canvas（溢出会让 Cubism 的裁剪遮罩渲染失败，整块糊白）。

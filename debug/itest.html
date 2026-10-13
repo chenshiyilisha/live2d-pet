@@ -29,7 +29,7 @@ const J = (v) => { try { return JSON.stringify(v); } catch { return String(v); }
   /* ---- 0) 配置结构：新段必须都在（验证逐段合并没丢键）---- */
   const cfg = await pet.getConfig();
   say('config: ' + J(cfg));
-  for (const k of ['appearance', 'motion', 'interaction', 'monitor', 'reminder', 'asr', 'hotkeys']) {
+  for (const k of ['appearance', 'motion', 'interaction', 'monitor', 'reminder', 'asr']) {
     ok(`config.${k} 存在`, cfg[k] && typeof cfg[k] === 'object', J(cfg[k]));
   }
 
@@ -96,7 +96,7 @@ const J = (v) => { try { return JSON.stringify(v); } catch { return String(v); }
   ok('config:set 落盘成功', setRes === true, J(setRes));
   const cfg2 = await pet.getConfig();
   ok('appearance.opacity 生效', cfg2?.appearance?.opacity === 0.88, J(cfg2?.appearance));
-  ok('其他段没被整段覆盖', cfg2?.interaction && cfg2?.motion && cfg2?.hotkeys);
+  ok('其他段没被整段覆盖', cfg2?.interaction && cfg2?.motion && cfg2?.asr);
   await pet.setConfig({ appearance: { opacity: 1 } });
   const cfg3 = await pet.getConfig();
   ok('appearance.opacity 已还原', cfg3?.appearance?.opacity === 1, J(cfg3?.appearance));

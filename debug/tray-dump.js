@@ -127,8 +127,6 @@ const sandbox = {
   stopPomodoro: rec('stopPomodoro'),
   addReminder: rec('addReminder'),
   clearReminders: rec('clearReminders'),
-  /* 勾选「全局快捷键」时会当场重注册（见 flag()）。这里只记一笔，不真的注册。 */
-  registerHotkeys: rec('registerHotkeys'),
   toast: rec('toast'),
   promptRename: rec('promptRename'),
   promptPersona: rec('promptPersona'),

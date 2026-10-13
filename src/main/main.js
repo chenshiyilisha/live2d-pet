@@ -2,12 +2,12 @@
 
 const {
   app, BrowserWindow, ipcMain, Tray, Menu,
-  globalShortcut, screen, nativeImage, shell
+  screen, nativeImage, shell
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
-/* 这一层只做「编排」：起服务、建窗口、装托盘、挂 IPC、注册快捷键、开机自启。
+/* 这一层只做「编排」：起服务、建窗口、装托盘、挂 IPC、开机自启。
  * 具体能力全在 src/main/ 下的独立模块里：
  *   win-size   窗口尺寸（按屏幕现算，换显示器自动适配）
  *   util       clamp / 右下角坐标
@@ -151,7 +151,7 @@ setReminderSink((payload) => {
   if (mainWindow.isVisible && !mainWindow.isVisible()) mainWindow.show();
 });
 
-/* 单点改配置并广播。托盘菜单、快捷键、渲染层都用它，
+/* 单点改配置并广播。托盘菜单、渲染层都用它，
  * 保证「配置落盘 + 通知渲染层 + 重画菜单」三件事永远一起发生。
  * 读写本身在 config.js，这里只做编排 —— 它要碰窗口和托盘，
  * 放到 config.js 里会让那个模块反过来 require 主文件。 */
@@ -355,7 +355,7 @@ function startCursorPolling() {
  * ========================================================== */
 
 /* 把 appearance 配置同步到窗口与渲染层。
- * 托盘、快捷键、渲染层右键菜单、手改 config.json 后的重载 —— 全部收敛到这里，
+ * 托盘、渲染层右键菜单、手改 config.json 后的重载 —— 全部收敛到这里，
  * 保证「配置 / 窗口实际状态 / 渲染层看到的」三处永远一致。 */
 function syncAppearance() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -500,7 +500,7 @@ function refreshQuietWatcher() {
  * ========================================================== */
 
 /* 菜单随时可能重建 —— 勾选状态不会自己刷新，而配置改动来自很多入口
- * （托盘、快捷键、渲染层右键菜单、手改 config.json）。所以把模板函数存起来，
+ * （托盘、渲染层右键菜单、手改 config.json）。所以把模板函数存起来，
  * patchConfig() 改完配置后统一调 refreshTrayMenu()。 */
 let buildTrayMenu = null;
 
@@ -1096,7 +1096,7 @@ function toggleTTS() {
  *   显示/隐藏 · 回到右下角
  *   ├─ 外观与形象（大小 / 不透明度 / 人物模型 / 置顶）
  *   ├─ 互动与行为（总开关 + 6 项）
- *   ├─ 功能开关  （朗读 / 搭话 / 悬浮 / 提醒 / 语音 / 快捷键）
+ *   ├─ 功能开关  （朗读 / 搭话 / 悬浮 / 提醒 / 语音）
  *   └─ 小工具    （番茄钟 / 定时提醒）
  *   设置 · 退出
  * 各组把**当前值写在组标题里**（缩放%、模型名），不展开也能一眼看到状态。
@@ -1106,22 +1106,21 @@ function toggleTTS() {
  * 托盘和「点角色」的右键菜单各要一份，之前是**复制粘贴**出来的两份 ——
  * 改了一处忘另一处就会出现「托盘里能调、右键里调不了」这种不一致，
  * 而且两边的标题写法都漂了（`大小（100%）` vs `大小 100%`）。
- * 现在共用一份，只有「要不要显示快捷键提示」按场景开关。 */
-function appearanceSubmenu(cfg, { accelerators = false } = {}) {
+ * 现在共用一份，托盘与右键菜单的内容完全一致。 */
+function appearanceSubmenu(cfg) {
   const scale = Math.round(clampScale(cfg.appearance?.scale) * 100);
   const opacity = clampOpacity(cfg.appearance?.opacity);
   const model = cfg.appearance?.model === 'haru' ? 'haru' : 'hiyori';
   const label = model === 'haru' ? '春' : '日和';
-  const acc = (a) => (accelerators ? { accelerator: a } : {});
 
   return [
     {
       label: `大小（${scale}%）`,
       submenu: [
-        { label: '放大', click: () => bumpScale(SCALE_STEP), ...acc('Ctrl+Shift+Up') },
-        { label: '缩小', click: () => bumpScale(-SCALE_STEP), ...acc('Ctrl+Shift+Down') },
+        { label: '放大', click: () => bumpScale(SCALE_STEP) },
+        { label: '缩小', click: () => bumpScale(-SCALE_STEP) },
         { type: 'separator' },
-        { label: '重置 100%', click: resetScale, ...acc('Ctrl+Shift+0') }
+        { label: '重置 100%', click: resetScale }
       ]
     },
     {
@@ -1160,23 +1159,12 @@ function buildMenuTemplate() {
       if (section === 'appearance') syncAppearance();
       // 关掉"全屏静默"要立刻退出静默状态，不能等她再切一次窗口
       if (section === 'quiet') refreshQuietWatcher();
-      /* ⚠️ 快捷键必须**当场重注册**：globalShortcut 只在启动时注册过一次，
-       *    不重跑就得到重启才生效（默认关之后这条尤其要紧 —— 用户刚打开
-       *    开关、按下去没反应，看着就像坏了）。registerHotkeys 自己会先
-       *    unregisterAll，关闭时它只打一行日志直接返回。 */
-      if (section === 'hotkeys') registerHotkeys();
     }
   });
 
-  /* 托盘里的快捷键提示必须**跟着 hotkeys 开关走**：全局快捷键默认关着
-   * （见 config.js 的默认值取舍），此时菜单里还写「{ Ctrl+Shift+A }」就是
-   * 骗人 —— 用户按下去毫无反应，只会以为是 bug。关掉时整条提示不显示。 */
-  const hotkeysOn = isOn('hotkeys', 'enabled', false);
-  const hk = (accel) => (hotkeysOn ? { accelerator: accel } : {});
-
   /* ---------- 外观与形象 ---------- */
   const appearanceMenu = [
-    ...appearanceSubmenu(cfg, { accelerators: hotkeysOn }),
+    ...appearanceSubmenu(cfg),
     { type: 'separator' },
     flag('appearance', 'alwaysOnTop', '窗口置顶')
   ];
@@ -1205,9 +1193,7 @@ function buildMenuTemplate() {
     quietItem,
     flag('monitor', 'floating', '系统状态悬浮显示', false),
     flag('reminder', 'enabled', '定时提醒'),
-    flag('asr', 'enabled', '语音输入（离线识别）', false),
-    { type: 'separator' },
-    flag('hotkeys', 'enabled', '全局快捷键')
+    flag('asr', 'enabled', '语音输入（离线识别）', false)
   ];
 
   /* ---------- 小工具 ---------- */
@@ -1318,8 +1304,8 @@ function buildMenuTemplate() {
 
   // 顶层只保留这些 —— 平铺项一律进上面的组
   return Menu.buildFromTemplate([
-    { label: '显示 / 隐藏', ...hk('Ctrl+Shift+A'), click: toggleVisible },
-    { label: '回到右下角', ...hk('Ctrl+Shift+C'), click: moveToCorner },
+    { label: '显示 / 隐藏', click: toggleVisible },
+    { label: '回到右下角', click: moveToCorner },
 
     { type: 'separator' },
     { label: '外观与形象', submenu: appearanceMenu },
@@ -1562,7 +1548,7 @@ function registerIpc() {
     };
 
     /* 外观三项收进一个子菜单，免得「点一下角色」弹出来的面板跟托盘一样长。
-     * 内容与托盘**共用** appearanceSubmenu()，这里只是不显示快捷键提示。 */
+     * 内容与托盘**共用** appearanceSubmenu()，两边完全一致。 */
     const appearanceSub = appearanceSubmenu(cfg);
 
     // 顶层控制在 7 行内 —— 这是「点角色」的快捷面板，别照抄托盘那份长菜单
@@ -1793,37 +1779,6 @@ function registerIpc() {
 }
 
 /* ============================================================
- *  全局快捷键
- * ========================================================== */
-
-/* 快捷键可能被别的软件占用，注册失败不该影响启动 —— 逐个注册、逐个报错。 */
-function registerHotkeys() {
-  try { globalShortcut.unregisterAll(); } catch { /* ignore */ }
-
-  if (!isOn('hotkeys', 'enabled')) {
-    console.log('[hotkeys] 已在配置中关闭，不注册');
-    return;
-  }
-
-  const bind = (accel, fn) => {
-    try {
-      const ok = globalShortcut.register(accel, fn);
-      if (!ok) console.warn('[hotkeys] 注册失败（多半被其它软件占用）:', accel);
-    } catch (err) {
-      console.warn('[hotkeys] 注册异常:', accel, String(err?.message || err));
-    }
-  };
-
-  bind('CommandOrControl+Shift+A', toggleVisible);          // 显示 / 隐藏
-  bind('CommandOrControl+Shift+M', toggleTTS);              // 静音切换
-  bind('CommandOrControl+Shift+Up', () => bumpScale(SCALE_STEP));   // 放大
-  bind('CommandOrControl+Shift+Down', () => bumpScale(-SCALE_STEP)); // 缩小
-  bind('CommandOrControl+Shift+0', resetScale);             // 重置大小
-  bind('CommandOrControl+Shift+C', moveToCorner);           // 回到右下角
-  console.log('[hotkeys] 注册完成');
-}
-
-/* ============================================================
  *  启动
  * ========================================================== */
 
@@ -1947,7 +1902,6 @@ if (!gotLock) {
     screen.on('display-removed', onDisplayChanged);
     screen.on('display-metrics-changed', onDisplayChanged);
 
-    registerHotkeys();
     refreshStatsTimer();
     resetWanderTimer();
     refreshQuietWatcher();
@@ -2012,7 +1966,6 @@ if (!gotLock) {
   app.on('window-all-closed', () => {});
 
   app.on('will-quit', () => {
-    globalShortcut.unregisterAll();
     if (cursorTimer) clearInterval(cursorTimer);
     if (statsTimer) clearTimeout(statsTimer);
     disposeMotion();

@@ -3,10 +3,11 @@
  *
  * 背景：新装即勾选的只能是不勾就不好用的基础行为 —— 窗口置顶、互动、贴边、
  * 摸头、右键菜单、全屏静默、自动更新。**会主动打扰用户**（出声 / 自己说话 /
- * 弹提醒）或**要抢系统资源**（注册全局热键）的一律默认不勾选：
- *   tts.enabled · proactive.enabled · motion.wander · reminder.enabled · hotkeys.enabled
+ * 弹提醒）或**要常驻占资源**（多一个采样进程）的一律默认不勾选：
+ *   tts.enabled · proactive.enabled · motion.wander · reminder.enabled
+ *   （monitor.floating / asr / update.autoDownload 本来就没默认开，见 STILL_OFF）
  *
- * 这条规则**从界面上看不出来**（装好了才发现她在自言自语 / 快捷键被抢），
+ * 这条规则**从界面上看不出来**（装好了才发现她在自言自语），
  * 而且很容易被后来加功能的人顺手改回去，所以在这里锁死。
  *
  * 两块内容：
@@ -54,8 +55,7 @@ const OFF_BY_DEFAULT = [
   ['tts', 'enabled', '语音朗读'],
   ['proactive', 'enabled', '主动搭话'],
   ['motion', 'wander', '闲置时自己溜达'],
-  ['reminder', 'enabled', '定时提醒'],
-  ['hotkeys', 'enabled', '全局快捷键']
+  ['reminder', 'enabled', '定时提醒']
 ];
 const ON_BY_DEFAULT = [
   ['appearance', 'alwaysOnTop', '窗口置顶'],
@@ -95,12 +95,20 @@ console.log('\n══════ 2. 老配置里已经写过的选择不被顶�
   /* 关键语义：改默认值**只影响没写过这个键的配置**。逐段合并是「默认 ← 配置」，
    * 用户自己点开的开关必须原样保留，否则等于每次升级都重置用户设置。 */
   writeCfg({ tts: { enabled: true }, proactive: { enabled: true }, reminder: { enabled: true },
-             hotkeys: { enabled: true }, motion: { wander: true } });
+             motion: { wander: true } });
   const cfg = config.loadConfig();
   check(cfg.tts.enabled === true && cfg.proactive.enabled === true &&
-        cfg.reminder.enabled === true && cfg.hotkeys.enabled === true &&
-        cfg.motion.wander === true,
+        cfg.reminder.enabled === true && cfg.motion.wander === true,
     '老配置里的 true 保持 true（升级不重置用户选择）');
+}
+
+/* 快捷键功能 2026-10-13 整体移除（用户："去掉快捷键"），默认值里已经没有
+ * hotkeys 段。老配置里可能留有它 —— 必须**无害**：不报错、不影响别的段。 */
+{
+  writeCfg({ hotkeys: { enabled: true }, llm: { apiKey: 'keep-me' } });
+  const cfg = config.loadConfig();
+  check(cfg.llm.apiKey === 'keep-me', '老配置残留的 hotkeys 段不影响其余配置读取');
+  check(cfg.appearance.scale === 1, '残留段不影响默认值补齐');
 }
 
 console.log('\n══════ 3. 老配置缺键时按新默认值补齐 ══════\n');
@@ -108,7 +116,7 @@ console.log('\n══════ 3. 老配置缺键时按新默认值补齐 ═
   writeCfg({ llm: { apiKey: 'keep-me' } });
   const cfg = config.loadConfig();
   check(cfg.llm.apiKey === 'keep-me', '用户数据仍在（llm.apiKey 未被默认值覆盖）');
-  check(cfg.tts.enabled === false && cfg.hotkeys.enabled === false,
+  check(cfg.tts.enabled === false && cfg.proactive.enabled === false,
     '配置里没写的键落到新默认值（false）');
   check(cfg.appearance.scale === 1, '数值型默认值不受影响（appearance.scale = 1）');
 }

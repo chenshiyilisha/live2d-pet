@@ -206,7 +206,7 @@ window.addEventListener('mouseup', () => {
   if (recState !== RecState.IDLE) stopRecording();
 });
 
-/* 窗口一被藏起来（托盘「隐藏」/ 快捷键 Ctrl+Shift+A），mouseup 就送不到了，
+/* 窗口一被藏起来（托盘「隐藏」），mouseup 就送不到了，
  * 录音会永远挂着。这里主动收尾。
  *
  * 只监听 visibilitychange、不监听 blur：桌宠是无边框 alwaysOnTop 悬浮窗，

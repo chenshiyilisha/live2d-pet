@@ -1,5 +1,5 @@
 import { State } from './params.js';
-import { resampleTo, encodeWav } from './audio.js';
+import { resampleTo, encodeWav, detectVoice } from './audio.js';
 
 /* ============================================================
  *  语音输入（按住说话）
@@ -13,6 +13,8 @@ import { resampleTo, encodeWav } from './audio.js';
  *
  * 这一层只管「按住 → 录 → 松开 → 交给主进程识别 → 把文本交回去」，
  * 气泡怎么写、要不要自动发出去由 pet.js 决定（onRecognized 回调）。
+ * 松手时先过一道**静音检测**（audio.js 的 VAD）：按住了但没开口就
+ * 直接提示，不白走一次几百毫秒的离线识别。
  * ========================================================== */
 
 const micBtn = document.getElementById('mic');
@@ -146,6 +148,24 @@ async function stopRecording() {
   let off = 0;
   for (const c of recChunks) { all.set(c, off); off += c.length; }
   recChunks = [];
+
+  /* 录到的全是底噪 → 直接收手，不做 WAV、不走识别（判据见 audio.js 的 VAD 段）。
+   * 省下的不只是一次 IPC：Windows 离线识别要起 PowerShell 子进程、加载语法，
+   * 几百毫秒就没了，而这段等待对"本来就没开口"的用户是完全白费的。
+   * 开关 asr.silenceSkip 默认开；关掉就退回老行为（照常送去识别）。 */
+  if (deps.getCfg()?.asr?.silenceSkip !== false) {
+    const voice = detectVoice(all, rate);
+    if (!voice.voiced) {
+      deps.setEmotion('think');
+      deps.showStatus('没听到声音，再说一遍？');
+      console.log('[pet] asr skip (silence)', JSON.stringify({
+        peak: Number(voice.peak.toFixed(4)),
+        ratio: Number(voice.ratio.toFixed(3)),
+        frames: voice.frames
+      }));
+      return;
+    }
+  }
 
   const wav = encodeWav(resampleTo(all, rate, 16000), 16000);
 

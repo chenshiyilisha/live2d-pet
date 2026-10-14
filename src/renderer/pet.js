@@ -7,7 +7,7 @@ import {
   MODELS, MODEL_NAME, INK_TOP_C_RATIO, P, State, EMOTION,
   EMO_SPEED, EMO_SPEED_DEFAULT, PAT, buildEmoTarget
 } from './params.js';
-import { configureTTS, initTTS, speak, enqueueSpeech, takeSentences, stopSpeak, ttsVoiceInfo, ttsQueueState, setSpeechObserver } from './tts.js';
+import { configureTTS, initTTS, speak, enqueueSpeech, takeSentences, stopSpeak, ttsVoiceInfo, ttsQueueState, setSpeechObserver, lipEnv } from './tts.js';
 import { abortRecording, configureRecorder } from './recorder.js';
 import { rollFactors } from './jitter.js';
 
@@ -1128,7 +1128,17 @@ async function boot() {
     }
     applyEmotion();
 
-    if (state === State.SPEAKING) {
+    /* 口型。两条路：
+     *   · 有真实包络（`tts.engine='winrt'`，声音由我们自己用 WebAudio 播，
+     *     见 tts.js 的 lipEnv）→ 嘴直接跟随真实音量；
+     *   · 没有（系统音色，或这一句刚回退过）→ 退回原来的正弦波。
+     * ⚠️ lipEnv 必须**每帧都调**：它内部带快攻慢放的平滑，调用频率变了
+     *    平滑就变；而且队列空了（state 已回 IDLE）时还要靠它把嘴收回去。 */
+    const env = lipEnv(dt);
+    if (env !== null) {
+      mouthLevel = env;
+      setParam(P.MOUTH_OPEN, mouthLevel);
+    } else if (state === State.SPEAKING) {
       mouthPhase += dt * 10;
       mouthLevel = (Math.sin(mouthPhase) * 0.5 + 0.5) * 0.7 + 0.15;
       setParam(P.MOUTH_OPEN, mouthLevel);
@@ -1147,7 +1157,11 @@ async function boot() {
     getState: () => state,
     isBusy: () => busy,
     setState,
-    isQuiet: () => quiet
+    isQuiet: () => quiet,
+    /* 主进程的 Windows 合成通道（见 src/main/tts.js）。
+     * ⚠️ 调顶层桥必须 `window.pet?.xxx?.(` —— `.?.` 只护对象不护方法，
+     *    写成 `window.pet.synthSpeech?.()` 在旧版本 preload 下会直接崩。 */
+    synth: (text, opts) => window.pet?.synthSpeech?.(text, opts)
   });
   configureRecorder({
     getCfg: () => cfg,

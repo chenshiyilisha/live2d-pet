@@ -4,10 +4,20 @@ import { State } from './params.js';
  *  语音朗读
  * ==========================================================
  *
- * 用 Chromium 内置的 speechSynthesis —— Windows 上就是系统 SAPI，
- * 零依赖、纯离线，不用装任何东西。音色取决于系统装了哪些语音包，
- * 中文 Windows 一般有 Microsoft Huihui / Yaoyao。
- * 想要更好听的音色（晓晓这类神经语音）再换 edge-tts，接口是同一个。
+ *  **两种引擎**（`tts.engine`，见 src/main/tts.js）：
+ *
+ *  · `'system'` —— Chromium 内置的 speechSynthesis，Windows 上就是系统 SAPI。
+ *    零依赖、启动最快，但它的声音**不进 WebAudio 的图**：拿不到波形，
+ *    说话时嘴巴只能跑一条与音量无关的正弦波（"机器人张嘴"）。
+ *
+ *  · `'winrt'`（默认）—— 主进程用 Windows 语音合成吐一段 wav 回来，
+ *    这里用 AudioContext 播。声音走 WebAudio，于是能挂 AnalyserNode
+ *    取真实音量包络 → **真口型**（见文件末尾的 lipEnv）。
+ *    代价：多一个常驻合成进程（只在 tts 开着时起）。
+ *
+ *  ⚠️ winrt 那条路**任何一步失败都退回 system**（合成不出来 / 解码失败 /
+ *     播不了）。退回是静默的、逐句生效的 —— 宁可这一句换回机械口型，
+ *     也不能让朗读哑掉：用户不知道发生了什么，只会以为"朗读坏了"。
  *
  * 🔴 两种念法，别混（混了的后果是"念一半被掐掉"或"整段念两遍"）：
  *   · `speak(text)`     —— **打断式**：清空队列、掐掉正在念的，立刻念这一条。
@@ -29,7 +39,11 @@ let deps = {
    *    逐个判断：念白有好几个来源（对话回复、主动搭话、定时提醒、摸头吐槽…），
    *    靠每一处自己记得判断，早晚会漏一个 —— 而"漏一个"的表现就是
    *    打游戏时角色突然开口说话，正是这个功能要消灭的东西。 */
-  isQuiet: () => false
+  isQuiet: () => false,
+  /* 让主进程用 Windows 语音合成吐一段 wav（见 src/main/tts.js）。
+   * 默认 null —— 没有它（旧版 preload、或被裁掉的构建）就整个功能退回
+   * 系统内置音色，一行都不能炸。 */
+  synth: null
 };
 export function configureTTS(d) { Object.assign(deps, d); }
 
@@ -61,6 +75,103 @@ export function initTTS() {
 function canSpeak() {
   const cfg = deps.getCfg();
   return !!cfg?.tts?.enabled && typeof speechSynthesis !== 'undefined' && ttsReady;
+}
+
+/* 这一句用哪个引擎。
+ * ⚠️ 只有"配置选了 winrt" **且** "合成通道真的注入了"才算 winrt。
+ *    少判后半个条件，旧 preload（没有 synthSpeech）就会让每一句都
+ *    先等一次必然失败的合成 —— 观感是"朗读要停两秒才开口"。 */
+const ENGINE_SYSTEM = 'system';
+const ENGINE_WINRT = 'winrt';
+
+function engineOf() {
+  const e = deps.getCfg()?.tts?.engine;
+  return e === ENGINE_WINRT && typeof deps.synth === 'function' ? ENGINE_WINRT : ENGINE_SYSTEM;
+}
+
+/* 合成参数。两个引擎的语速/音调语义一致（都是 1 = 正常），所以同一份
+ * 配置直传，只做钳制 —— winrt 那边超出范围会抛。 */
+function synthOpts() {
+  const t = deps.getCfg()?.tts || {};
+  const r = Number(t.rate);
+  const p = Number(t.pitch);
+  return {
+    rate: Number.isFinite(r) ? Math.min(3, Math.max(0.5, r)) : 1.05,
+    pitch: Number.isFinite(p) ? Math.min(2, Math.max(0, p)) : 1,
+    voice: String(t.voice || '')
+  };
+}
+
+/* ============================================================
+ *  真实口型包络（WebAudio）
+ * ==========================================================
+ *
+ *  winrt 引擎的声音是我们自己播的，所以能挂分析器取波形；
+ *  取出来的 RMS 经「快攻慢放」平滑后就是嘴巴的开合度。
+ *
+ *  ⚠️ fftSize 512：@16kHz 是 32ms 窗口，约一个音节的粒度。
+ *     用默认的 2048（128ms）会把音节之间的差别糊平，嘴巴变成"一直半张"。
+ *  ⚠️ 快攻慢放（40 / 12）不是装饰：真人说「爸爸」时嘴是"啪"地闭上、
+ *     嘴唇再慢慢归位；两个方向用同一个速度会让嘴巴像节拍器。
+ * ========================================================== */
+
+const FFT_SIZE = 512;
+const LIP_GAIN = 9;        // RMS → 0..1（16k 语音的 RMS 大致 0.02~0.15）
+const LIP_ATTACK = 40;
+const LIP_RELEASE = 12;
+
+let ac = null;             // AudioContext（懒建：没有朗读就一个都不建）
+let analyser = null;
+let envBuf = null;
+let currentSrc = null;     // 正在播的那一段
+let lipActive = false;     // 这一轮朗读是有真实波形的（false → pet.js 回正弦波）
+let lipLevel = 0;
+
+function getAC() {
+  if (ac) return ac;
+  /* `typeof window` 这一层是给单测留的：verify-tts 在 Node 里直接 import
+   * 这个文件，那里没有 window —— 直接取会抛 ReferenceError，
+   * 而它冒出去就是一条 unhandled rejection（调用点没 await）。 */
+  const Ctx = typeof window !== 'undefined' ? (window.AudioContext || window.webkitAudioContext) : null;
+  if (!Ctx) return null;
+  try {
+    ac = new Ctx();
+    analyser = ac.createAnalyser();
+    analyser.fftSize = FFT_SIZE;
+    envBuf = new Float32Array(analyser.fftSize);
+    analyser.connect(ac.destination);
+  } catch (err) {
+    console.warn('[pet] AudioContext 建不起来，口型退回正弦:', err?.message || err);
+    ac = null;
+    analyser = null;
+    return null;
+  }
+  return ac;
+}
+
+/**
+ * 当前的口型强度。**每帧调用一次**（内部带平滑，调用频率变了平滑就变）。
+ *
+ * @param {number} dt 距上一帧的秒数
+ * @returns {number|null} 0..1 的真实包络；**null = 这一段没有波形**，
+ *                        调用方（pet.js）应退回它自己的正弦波动画。
+ */
+export function lipEnv(dt) {
+  if (!lipActive) return null;
+
+  let target = 0;
+  if (currentSrc && analyser && envBuf) {
+    analyser.getFloatTimeDomainData(envBuf);
+    let sum = 0;
+    for (let i = 0; i < envBuf.length; i++) sum += envBuf[i] * envBuf[i];
+    const rms = Math.sqrt(sum / envBuf.length);
+    target = Math.min(1, rms * LIP_GAIN);
+  }
+
+  const k = target > lipLevel ? LIP_ATTACK : LIP_RELEASE;
+  lipLevel += (target - lipLevel) * (1 - Math.exp(-(dt || 0) * k));
+  if (target === 0 && lipLevel < 0.002) lipLevel = 0;
+  return lipLevel;
 }
 
 /* ============================================================
@@ -144,7 +255,7 @@ export function takeSentences(buf, final = false) {
  * 新的一句压掉旧的。流式分句之后这就不行了：第二句一进来就把第一句掐掉，
  * 结果只能听见最后一句。所以分句走队列，**只有 speak() 保持"打断"语义**。
  */
-let ttsQueue = [];      // 待念的句子
+let ttsQueue = [];      // 待念的条目 { text, pcm }（pcm = 在途的预合成结果，可能 null）
 let ttsActive = false;  // 队列里有一条正在念
 let ttsGuard = null;    // 当前这条的兜底定时器（onend 偶尔不触发，见下）
 /* 代际令牌（同 motion.js 的规矩）：stopSpeak / speak 打断时 +1，
@@ -163,21 +274,16 @@ const MAX_QUEUE = 8;
 let speechObserver = null;
 export function setSpeechObserver(fn) { speechObserver = fn; }
 
-/* 念掉一条，完了回调 onDone（onend / onerror / 兜底定时器三者竞速，
- * 只回调一次）。 */
-function playOne(text, onDone) {
-  const gen = ttsGen;
-  let done = false;
-  const finish = () => {
-    if (done) return;
-    done = true;
-    if (ttsGuard) { clearTimeout(ttsGuard); ttsGuard = null; }
-    if (gen !== ttsGen) return;      // 已被打断：不推进队列、不动状态
-    try { onDone(); } catch { /* 队列推进不许被回调里的异常打断 */ }
-  };
+/* 用**系统内置音色**念一条（Chromium speechSynthesis）。
+ * 它也是 winrt 那条路的兜底 —— 所以这里必须一条路都能走通、不依赖
+ * 任何 winrt 侧的状态。 */
+function playSystem(text, finish) {
+  /* 回到机械口型：这一段没有波形可分析，嘴巴交回 pet.js 的正弦波。
+   * （winrt 和 system 在同一轮里混着出现是可能的 —— 中间某句合成失败。） */
+  lipActive = false;
+  lipLevel = 0;
 
   try {
-    try { speechObserver?.(text, Date.now()); } catch { /* 诊断钩子不许影响朗读 */ }
     const u = new SpeechSynthesisUtterance(text);
     if (ttsVoice) u.voice = ttsVoice;
     u.lang = ttsVoice?.lang || 'zh-CN';
@@ -200,19 +306,123 @@ function playOne(text, onDone) {
   }
 }
 
+/* 用 **Windows 合成 + WebAudio 播放**念一条 —— 顺带产出真实口型包络。
+ *
+ * ⚠️ 这里有一条**逐句回退**：合成不出来 / 解码失败 / 播不了，都退回
+ *    playSystem 念同一句。绝不"这一句算了" —— 用户只会觉得朗读坏了。 */
+async function playWinrt(text, gen, finish, pcm) {
+  let buf = null;
+  try {
+    buf = pcm ? await pcm : await deps.synth(text, synthOpts());
+  } catch (err) {
+    console.warn('[pet] 语音合成失败，本句回退系统音色:', err?.message || err);
+    buf = null;
+  }
+  /* 合成要等在途的进程，这期间可能已经被打断（用户发了新消息、
+   * 按了停止、全屏静默）—— 那就什么都不做。 */
+  if (gen !== ttsGen) { finish(); return; }
+
+  const ctx = buf ? getAC() : null;
+  if (!buf || !ctx) { playSystem(text, finish); return; }
+
+  let audio = null;
+  try {
+    /* 音频自动播放策略：Electron 默认放行，但被系统休眠/静默策略挂起过
+     * 就再也起不来 —— 每次播前确认一下，成本近零。 */
+    if (ctx.state === 'suspended') ctx.resume();
+    /* ⚠️ decodeAudioData 会**接管**传进去的 ArrayBuffer（detach），
+     *    所以必须是这一句独占的一份，不能缓存复用。 */
+    audio = await ctx.decodeAudioData(buf);
+  } catch (err) {
+    console.warn('[pet] 音频解码失败，本句回退系统音色:', err?.message || err);
+  }
+  if (gen !== ttsGen) { finish(); return; }
+  if (!audio || !audio.duration) { playSystem(text, finish); return; }
+
+  try {
+    const src = ctx.createBufferSource();
+    src.buffer = audio;
+    src.connect(analyser);
+    const end = () => {
+      if (currentSrc === src) currentSrc = null;
+      finish();
+    };
+    src.onended = end;
+    currentSrc = src;
+    lipActive = true;
+    lipLevel = 0;
+    src.start();
+    deps.setState(State.SPEAKING);
+    /* 兜底：onended 偶尔不触发（音频设备被拔、被系统掐），到点强制推进。
+     * 用音频真实时长而不是字数估计 —— 这个数是准的。 */
+    ttsGuard = setTimeout(end, audio.duration * 1000 + 2000);
+  } catch (err) {
+    console.warn('[pet] 播放失败，本句回退系统音色:', err?.message || err);
+    currentSrc = null;
+    lipActive = false;
+    playSystem(text, finish);
+  }
+}
+
+/* 念掉一条，完了回调 onDone（onend / onerror / 兜底定时器三者竞速，
+ * 只回调一次）。
+ * @param {Promise<ArrayBuffer|null>|null} pcm 预合成结果（见 enqueueSpeech 的流水线） */
+function playOne(text, onDone, pcm = null) {
+  const gen = ttsGen;
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    if (ttsGuard) { clearTimeout(ttsGuard); ttsGuard = null; }
+    if (gen !== ttsGen) return;      // 已被打断：不推进队列、不动状态
+    try { onDone(); } catch { /* 队列推进不许被回调里的异常打断 */ }
+  };
+
+  try { speechObserver?.(text, Date.now()); } catch { /* 诊断钩子不许影响朗读 */ }
+
+  if (engineOf() === ENGINE_WINRT) {
+    playWinrt(text, gen, finish, pcm);
+    return;
+  }
+  playSystem(text, finish);
+}
+
+/* 预合成：把"合成"这一步提前到**入队时**，这样播上一句的时候下一句
+ * 已经合成好了，句子之间没有等待。
+ * ⚠️ 失败一律收敛成 null，绝不 reject —— 它挂在队列项上，
+ *    没人接的 rejection 会变成 unhandled。 */
+function prefetch(text) {
+  if (engineOf() !== ENGINE_WINRT) return null;
+  try {
+    return Promise.resolve(deps.synth(text, synthOpts())).then((b) => b || null, () => null);
+  } catch {
+    return null;
+  }
+}
+
 /* 队列泵：空闲且有货就播下一条。 */
 function pump() {
   if (ttsActive || !ttsQueue.length) return;
   if (!canSpeak() || deps.isQuiet()) { ttsQueue.length = 0; return; }
   ttsActive = true;
-  const text = ttsQueue.shift();
-  playOne(text, () => {
+  const item = ttsQueue.shift();
+  playOne(item.text, () => {
     ttsActive = false;
     if (ttsQueue.length) { pump(); return; }
     /* 只有队列彻底空了才可能回空闲。⚠️ busy 时不能回 ——
      * 对话流程自己会在回复收尾后把状态收回 IDLE（sendMessage 里那 1400ms）。 */
     if (deps.getState() === State.SPEAKING && !deps.isBusy()) deps.setState(State.IDLE);
-  });
+  }, item.pcm);
+}
+
+/* 停掉正在播的那一段（如果有）。打断时必须调 ——
+ * 只 `speechSynthesis.cancel()` 拦不住自己播的那条，它会继续念完。 */
+function stopAudio() {
+  const src = currentSrc;
+  currentSrc = null;
+  if (src) { try { src.stop(); } catch { /* ignore */ } }
+  lipActive = false;
+  lipLevel = 0;
 }
 
 /* 清场：掐掉在念的、清空队列、作废在途回调。 */
@@ -221,6 +431,7 @@ function interrupt() {
   ttsQueue.length = 0;
   ttsActive = false;
   if (ttsGuard) { clearTimeout(ttsGuard); ttsGuard = null; }
+  stopAudio();
   try { speechSynthesis?.cancel(); } catch { /* ignore */ }
 }
 
@@ -238,12 +449,14 @@ export function speak(text) {
   });
 }
 
-/** 排队式：追加到队尾，一条念完接着下一条。流式回复用（见 takeSentences）。 */
+/** 排队式：追加到队尾，一条念完接着下一条。流式回复用（见 takeSentences）。
+ *  ⚠️ **入队即发起合成**（winrt 引擎）：播上一句的时候下一句已经在合成了，
+ *     句子之间没有等待。代价是打断时那几次在途合成白做 —— 几十毫秒的事。 */
 export function enqueueSpeech(text) {
   const t = String(text || '').trim();
   if (!t || !canSpeak() || deps.isQuiet()) return;
-  if (ttsQueue.length >= MAX_QUEUE) ttsQueue.shift();
-  ttsQueue.push(t);
+  if (ttsQueue.length >= MAX_QUEUE) ttsQueue.shift();   // 丢最旧的，连它的在途合成一起放弃
+  ttsQueue.push({ text: t, pcm: prefetch(t) });
   pump();
 }
 
@@ -251,12 +464,19 @@ export function stopSpeak() {
   interrupt();
 }
 
-/* 诊断用：当前选中的音色名（"Microsoft Huihui / zh-CN" 这样）。 */
+/* 诊断用：当前生效的引擎与音色（"Microsoft Huihui / zh-CN" 这样）。
+ * winrt 引擎下实际音色由主进程的合成进程挑（OneCore 语音），渲染层不知道，
+ * 这里只标注引擎 —— 免得诊断页把"回退用的系统音色"当成正在用的音色。 */
 export function ttsVoiceInfo() {
-  return ttsVoice ? `${ttsVoice.name} / ${ttsVoice.lang}` : null;
+  const v = ttsVoice ? `${ttsVoice.name} / ${ttsVoice.lang}` : null;
+  if (engineOf() === ENGINE_WINRT) return `Windows 合成${v ? `（回退备用：${v}）` : ''}`;
+  return v;
 }
 
 /* 诊断用：队列快照（?snap=tts 探针读它）。 */
 export function ttsQueueState() {
-  return { queued: ttsQueue.length, active: ttsActive, gen: ttsGen };
+  return {
+    queued: ttsQueue.length, active: ttsActive, gen: ttsGen,
+    engine: engineOf(), lip: lipActive, lipLevel
+  };
 }

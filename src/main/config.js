@@ -76,13 +76,21 @@ const DEFAULT_CONFIG = {
   chat: {
     floatBubble: true
   },
-  // 语音朗读：走 Chromium 内置的 speechSynthesis（Windows 上即系统 SAPI），
-  // 零依赖、纯离线。音色取决于系统装了哪些语音包。
-  // 默认关（会出声，见上面的默认值取舍）：想听再在托盘「功能开关」里开。
+  // 语音朗读。默认关（会出声，见上面的默认值取舍）：想听再在托盘「功能开关」里开。
   tts: {
     enabled: false,
     rate: 1.05,
-    pitch: 1.0
+    pitch: 1.0,
+    /* 合成引擎（两种的差别见 src/main/tts.js 的文件头）：
+     *   'winrt'  = Windows 语音合成。声音由我们自己用 WebAudio 播，
+     *              于是能取到波形 → **真口型**（嘴跟着音量动，不是正弦波）。
+     *              代价：朗读开着时多一个常驻合成进程。
+     *   'system' = 浏览器内置 speechSynthesis（Windows 上即系统 SAPI），
+     *              零依赖、启动最快，但声音不进 WebAudio 图 → 只有机械口型。
+     * ⚠️ winrt 任何一步失败都会**逐句自动回退** system，不会把朗读弄哑；
+     *    整个 tts.enabled 是关的，所以默认状态下不会有常驻进程。 */
+    engine: 'winrt',
+    voice: ''             // winrt 用的音色名；空 = 自动挑中文语音（见主进程 tts.js）
   },
   // 主动搭话：闲置这么久之后主动说一句。默认关（会打断思路，见上）。
   proactive: {

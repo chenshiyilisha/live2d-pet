@@ -789,6 +789,18 @@ export function attachSnapProbes(live) {
           const t0 = Date.now();
           const wait = (ms) => new Promise((r) => setTimeout(r, ms));
           live.forceTTS();                    // 默认 tts 是关的，只改本进程内存里的 cfg
+          /* ⚠️ 这个探针**强制用系统音色**跑。它验的是队列语义（边收边念 +
+           *    串行推进），而 winrt 引擎在这一条上会给出**假失败**：
+           *    常驻合成进程首次起来要 ~700ms，首句的"开口时间"会被这段
+           *    进程启动开销推到"喂完"之后 —— 看起来像边收边念坏了，其实没有。
+           *    引擎本身由 ?snap=lip 验（那里会等预热）。
+           *    ⚠️ 只改这份内存里的 cfg；真实开关仍然只走主进程 patchConfig。 */
+          {
+            const c = live.cfg() || {};
+            live.setCfg(Object.assign({}, c, {
+              tts: Object.assign({}, c.tts, { enabled: true, engine: 'system' })
+            }));
+          }
           const spoken = [];
           live.setSpeechObserver((text, t) => spoken.push([Math.round(t - t0), text]));
 
@@ -824,6 +836,89 @@ export function attachSnapProbes(live) {
           live.setSpeechObserver(null);
           live.stopSpeak();
           await sweep('shot-tts');
+        }
+
+        /* ?snap=lip：真口型（说话时嘴跟着真实音量动）
+         *
+         *  mock 验不了这一段 —— 它跨了三层：主进程 WinRT 合成 → IPC 送 wav
+         *  → 渲染层 WebAudio 解码播放 → AnalyserNode 取包络 → 参数写进模型。
+         *  所以这里读的是**模型参数本身**（ParamMouthOpenY），不是内部变量：
+         *  参数动了才叫口型真的接上了。
+         *
+         *  判据（全数值，不靠看图）：
+         *    ① engine 报 winrt —— 说明走的确实是新链路
+         *    ② 采样期间 mouth 有**明显的起伏**（方差/峰谷差），不是恒值
+         *    ③ 同一时刻 mouth ≈ ttsState().lipLevel —— 证明参数确实由包络驱动
+         *    ④ 队列念完之后 mouth 收回到 0（闭嘴，不留僵嘴）
+         *
+         *  ⚠️ 这一项**会真的出声**。
+         *  跑法：PET_ENTRY=debug/pet-driver.html PET_SNAPSHOT=lip <electron> .
+         */
+        if (new URLSearchParams(location.search).get('snap') === 'lip') {
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          const rdMouth = () => Number(live.readParam(live.P().MOUTH_OPEN) ?? 0);
+
+          live.forceTTS();
+          await wait(1500);                 // 让主进程把合成进程起好（起进程 ~700ms）
+
+          const samples = [];
+          const t0 = Date.now();
+          const timer = setInterval(() => {
+            const st = live.ttsState();
+            samples.push({
+              t: Date.now() - t0,
+              mouth: Number(rdMouth().toFixed(4)),
+              lip: Number((st.lipLevel ?? 0).toFixed(4)),
+              active: st.active, q: st.queued
+            });
+          }, 50);
+
+          for (const s of ['你好呀，', '我现在能对上口型了。', '你看，嘴巴是跟着声音动的。']) {
+            live.enqueueSpeech(s);
+          }
+
+          let waited = 0;
+          while (waited < 20000 && live.ttsState().active) { await wait(200); waited += 200; }
+          /* 队列空之后再采 1.2 秒：看它有没有把嘴收干净（这一段最容易留僵嘴） */
+          await wait(1200);
+          clearInterval(timer);
+
+          const tts = live.ttsState();
+          const mouth = samples.map((s) => s.mouth);
+          const maxM = Math.max(...mouth, 0);
+          const minAfter = Math.min(...mouth, 0);
+          const moving = mouth.filter((v) => v > 0.05).length;
+          const diff = samples.map((s) => Math.abs(s.mouth - s.lip));
+          const maxDiff = Math.max(...diff, 0);
+          /* 峰谷差：真口型一定在"张开/闭合"之间大幅摆动；恒值（正弦波也一样）
+           * 会给出一个很小的数 —— 所以它比"最大值"更能说明问题。 */
+          const swing = maxM - minAfter;
+          const tail = mouth.slice(-6);
+          const closed = tail.every((v) => v <= 0.02);
+
+          const checks = {
+            engineWinrt: tts.engine === 'winrt',
+            mouthMoving: moving >= 8,
+            followsEnv: maxDiff <= 0.03,
+            bigSwing: swing >= 0.15,
+            closedAtEnd: closed
+          };
+          console.log('[pet] lip result', JSON.stringify({
+            voice: live.ttsVoice(),
+            engine: tts.engine,
+            frames: samples.length,
+            movingFrames: moving,
+            max: Number(maxM.toFixed(3)),
+            maxDiff: Number(maxDiff.toFixed(3)),
+            swing: Number(swing.toFixed(3)),
+            tail: tail.map((v) => Number(v.toFixed(3))),
+            checks,
+            /* 采样压成 [t, mouth*100] 方便直接看波形（整数好看） */
+            wave: samples.map((s) => [s.t, Math.round(s.mouth * 100)])
+          }));
+          const pass = Object.values(checks).every(Boolean);
+          console.log('[pet] lip', pass ? 'PASS' : 'FAIL');
+          live.stopSpeak();
         }
 
         // ?snap=chat：走一遍完整对话链路（流式 + 情绪标签剥离 + 气泡 + 朗读）

@@ -95,6 +95,11 @@ contextBridge.exposeInMainWorld('pet', {
   /* ---- 语音输入：把录好的 WAV（Uint8Array）交给主进程做离线识别 ---- */
   recognize: (wavBytes) => ipcRenderer.invoke('asr:recognize', wavBytes),
 
+  /* ---- 语音朗读：让主进程用 Windows 语音合成吐一段 wav 回来。
+   * 渲染层拿它做真口型（声音走 WebAudio 才有波形可分析）。
+   * 合成不出来时 resolve null —— 调用方会退回系统内置音色。 ---- */
+  synthSpeech: (text, opts) => ipcRenderer.invoke('tts:synth', { text, opts }),
+
   // 自检通道：把渲染画面（dataURL）交给主进程落盘
   saveShot: (dataUrl) => ipcRenderer.invoke('pet:save-shot', dataUrl)
 });

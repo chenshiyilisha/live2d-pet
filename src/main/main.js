@@ -58,6 +58,7 @@ const {
 const {
   startFullscreenWatch, stopFullscreenWatch
 } = require('./fullscreen');
+const { startSynth, stopSynth, synthWav } = require('./tts');
 const { configureUpdater, checkForUpdates, updaterStatus } = require('./updater');
 const bubble = require('./bubble');
 
@@ -132,6 +133,12 @@ if (softwareMode) {
   app.commandLine.appendSwitch('no-sandbox');
   app.commandLine.appendSwitch('disable-gpu-sandbox');
 }
+
+/* 朗读用的是 WebAudio（见 src/renderer/tts.js）—— 音频要能在**没有任何
+ * 用户手势**的情况下播放（她主动搭话时你根本没碰过这个窗口）。
+ * Chromium 的默认策略是 document-user-activation-required，Electron 通常
+ * 会放行，但这是**自动播放能不能出声**的开关，写在明处比赌默认值好。 */
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 let mainWindow = null;
 let tray = null;
@@ -543,6 +550,21 @@ function refreshQuietWatcher() {
     stopFullscreenWatch();
     setQuiet(false, 'disabled');
   }
+}
+
+/* 语音朗读的合成进程，按配置起停。
+ *
+ * `tts.engine='winrt'` 时才需要它 —— 渲染层要一段 wav 才能做真口型
+ * （见 src/main/tts.js 的文件头）。提前起好，第一句才不用白等 700ms
+ * 的进程启动 + WinRT 绑定。
+ *
+ * ⚠️ 幂等：startSynth 里"已在跑就直接返回"，所以 config:set 那种
+ *    每次改配置都会走到这里的路径不会把进程反复重启。 */
+function refreshTTS() {
+  const t = loadConfig().tts || {};
+  const want = t.enabled === true && (t.engine ?? 'winrt') === 'winrt';
+  if (want) startSynth();
+  else stopSynth();
 }
 
 /* ============================================================
@@ -1223,6 +1245,8 @@ function buildMenuTemplate() {
       if (section === 'appearance') syncAppearance();
       // 关掉"全屏静默"要立刻退出静默状态，不能等她再切一次窗口
       if (section === 'quiet') refreshQuietWatcher();
+      // 语音朗读：winrt 引擎要按需起停合成进程
+      if (section === 'tts') refreshTTS();
     }
   });
 
@@ -1255,8 +1279,41 @@ function buildMenuTemplate() {
   const quietItem = flag('quiet', 'enabled', '全屏时自动静默');
   if (quiet) quietItem.label += '（静默中）';
 
+  /* 语音朗读：开关和引擎两件事收进一个子菜单，当前值写进标题 ——
+   * 引擎切换只影响"说话时嘴怎么动"，单独平铺一行会让功能组变长
+   * （规矩：两个菜单都要短），但埋在设置里又找不到。 */
+  const ttsEngine = (cfg?.tts?.engine ?? 'winrt') === 'system' ? 'system' : 'winrt';
+  const ttsOn = isOn('tts', 'enabled', false);
+  const ttsItem = {
+    label: `语音朗读${ttsOn ? `（${ttsEngine === 'winrt' ? '真口型' : '系统音色'}）` : '（已关闭）'}`,
+    submenu: [
+      flag('tts', 'enabled', '启用语音朗读'),
+      { type: 'separator' },
+      {
+        label: 'Windows 合成（嘴跟着声音动）',
+        type: 'radio',
+        checked: ttsEngine === 'winrt',
+        click: () => {
+          patchConfig('tts', { engine: 'winrt' });
+          refreshTTS();
+          toast('已切到 Windows 合成：说话时嘴跟着声音动');
+        }
+      },
+      {
+        label: '系统内置音色（开口最快）',
+        type: 'radio',
+        checked: ttsEngine === 'system',
+        click: () => {
+          patchConfig('tts', { engine: 'system' });
+          refreshTTS();
+          toast('已切到系统内置音色');
+        }
+      }
+    ]
+  };
+
   const featureMenu = [
-    flag('tts', 'enabled', '语音朗读'),
+    ttsItem,
     flag('proactive', 'enabled', '主动搭话'),
     quietItem,
     flag('monitor', 'floating', '系统状态悬浮显示', false),
@@ -1740,6 +1797,20 @@ function registerIpc() {
     return recognizeWav(buf);
   });
 
+  /* ---- 语音朗读：合成一段 wav 交给渲染层播（声音走 WebAudio 才有真口型） ----
+   * ⚠️ 返回 **ArrayBuffer** 而不是 Buffer：渲染层的 decodeAudioData 只吃
+   *    ArrayBuffer，而 Buffer 经结构化克隆过去是 Uint8Array（且可能是
+   *    共享池里的一个视图），直接拿去解码会抛。
+   * ⚠️ 合成不出来一律 resolve null —— 调用方据此退回系统内置音色，
+   *    绝不能让它变成一次 rejected 的 invoke（那会把朗读队列卡住）。 */
+  ipcMain.handle('tts:synth', async (_e, payload) => {
+    if (!isOn('tts', 'enabled', false)) return null;
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const r = await synthWav(p.text, p.opts || {});
+    if (!r.ok) return null;
+    return r.wav.buffer.slice(r.wav.byteOffset, r.wav.byteOffset + r.wav.byteLength);
+  });
+
   ipcMain.handle('chat:send', async (_e, messages) => {
     // 悬浮气泡：这一轮对话从现在开始显示（浮窗关着时是 no-op）
     bubble.beginStream();
@@ -1846,6 +1917,7 @@ function registerIpc() {
     refreshStatsTimer();
     refreshWanderConfig();
     refreshQuietWatcher();
+    refreshTTS();
     refreshTrayMenu();
     try { mainWindow?.webContents.send('config:changed'); } catch { /* ignore */ }
     return ok;
@@ -2051,6 +2123,7 @@ if (!gotLock) {
     refreshStatsTimer();
     startIdleWatcher();
     refreshQuietWatcher();
+    refreshTTS();
     warnIfModelsMissing();
     initUpdater();
 
@@ -2153,6 +2226,7 @@ if (!gotLock) {
      * 留着它就是一个永远在跑的 powershell.exe。 */
     stopFullscreenWatch();
     stopSensorWatch();
+    stopSynth();
     try { httpServer?.close(); } catch { /* ignore */ }
   });
 }

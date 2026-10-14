@@ -47,6 +47,11 @@ build/
 .env.*
 !.env.example
 
+# 竞品调研临时目录：clone / tarball 下来的同类项目，体积大、非本仓代码。
+# ⚠️ 2026-10-14 发现它此前**没有被忽略**（git status 里是 `?? .research-tmp/`），
+#    一旦 `git add -A` 就会把几十 MB 别人的代码提进库。
+.research-tmp/
+
 # 编辑器与系统杂物
 .vscode/
 .idea/

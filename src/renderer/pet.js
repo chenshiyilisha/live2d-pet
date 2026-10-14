@@ -5,7 +5,8 @@ import { Live2DModel, MotionPriority } from '@naari3/pixi-live2d-display/cubism5
  * ⚠️ P 是 ESM 的 live binding：这里只能**读** P.XXX，不能赋值。 */
 import {
   MODELS, MODEL_NAME, INK_TOP_C_RATIO, P, State, EMOTION,
-  EMO_SPEED, EMO_SPEED_DEFAULT, PAT, buildEmoTarget
+  EMO_SPEED, EMO_SPEED_DEFAULT, PAT, buildEmoTarget,
+  EMO_SETTLE_EPS, EMO_SETTLE_HOLD_MS, emotionDeviation
 } from './params.js';
 import { configureTTS, initTTS, speak, enqueueSpeech, takeSentences, stopSpeak, ttsVoiceInfo, ttsQueueState, setSpeechObserver, lipEnv } from './tts.js';
 import { abortRecording, configureRecorder } from './recorder.js';
@@ -142,6 +143,10 @@ let hasApiKey = false;
 // 主动搭话计时器
 let idleTimer = null;
 let lastActivityPoke = 0;
+/* 「情绪安定」已经持续了多少毫秒（口径见 params.js 的 EMO_SETTLE_EPS 段）。
+ * 由主循环每帧推进：偏差一超阈值就归零，落到阈值内才累加。
+ * ⚠️ 不另起一个时钟去算 —— 规矩 16：能自调度/由主循环推进就别开第二个定时器。 */
+let emoSteadyMs = 0;
 
 /* ============================================================
  *  工具
@@ -1128,6 +1133,13 @@ async function boot() {
     }
     applyEmotion();
 
+    /* 「情绪安定」计时（主动搭话的判据之一，口径见 params.js 的 EMO_SETTLE_EPS）。
+     * ⚠️ 量的是 emoEff 不是 emoTarget：摸头的调制也在 emoEff 里，
+     *    正在被摸的时候当然不算安定 —— 那正是"还没缓过来"的典型场景。 */
+    emoSteadyMs = emotionDeviation(emoCur, emoEff) < EMO_SETTLE_EPS
+      ? emoSteadyMs + dt * 1000
+      : 0;
+
     /* 口型。两条路：
      *   · 有真实包络（`tts.engine='winrt'`，声音由我们自己用 WebAudio 播，
      *     见 tts.js 的 lipEnv）→ 嘴直接跟随真实音量；
@@ -2067,12 +2079,28 @@ function saveHistory() {
 
 // 没配 Key 时主动搭话走本地短句池 —— 否则每次都只会弹出那句
 // "还没配 API Key"，反而更烦人。
-const PROACTIVE_LINES = [
-  '你盯着屏幕好久了，起来动动。',
-  '安静这么半天，需要我搭把手吗。',
-  '我还在，没跑。',
-  '刚想到个事——算了，你先忙。'
-];
+// 🔴 **按当前情绪分池**（8 个情绪一个都不能少，verify-proactive 会核）。
+//    出处是竞品调研里 soullink 的 `messageByEmotion`：开话头要顺着她现在的
+//    神态走 —— 睡眼惺忪时冒出一句"起来动动"就是穿帮。没配 Key 的用户
+//    也能看出"她记得自己刚才是什么心情"。
+const PROACTIVE_LINES = {
+  calm: ['安静这么半天，需要我搭把手吗。', '我还在，没跑。'],
+  happy: ['心情不错，你那边呢。', '刚自己乐了一会儿，也不知道在乐什么。', '要一起做点什么吗。'],
+  smile: ['你忙你的，我在这儿看着就行。', '歇口气吧，不急这一会儿。'],
+  think: ['刚想到个事——算了，你先忙。', '有个事没想明白，等你闲了问你。'],
+  shy: ['……刚才那个，别放在心上。', '我不是在看你，我在看窗外。'],
+  serious: ['你盯屏幕好久了，起来动动。', '先把手头这段收了，再歇。'],
+  surprised: ['哎，你还在啊。', '刚吓了一跳，还以为你走了。'],
+  sleepy: ['你也没睡啊……那我再撑一会儿。', '有点困了，你也早点睡。']
+};
+
+/* 由情绪取一句话。情绪表里没有的（理论上不会）退回 calm，池子空也退回 calm ——
+ * 这个函数**不许抛**，它跑在定时器回调里，抛出去就是一条没人接的异常。 */
+function proactiveLine(emo) {
+  const pool = PROACTIVE_LINES[emo] || PROACTIVE_LINES.calm;
+  const use = pool.length ? pool : PROACTIVE_LINES.calm;
+  return use[Math.floor(Math.random() * use.length)];
+}
 
 function pokeIdleTimer() {
   clearTimeout(idleTimer);
@@ -2088,18 +2116,47 @@ function pokeIdleTimer() {
   idleTimer = setTimeout(proactiveSpeak, safe * 60 * 1000);
 }
 
+/* 到点了但此刻不方便开口 —— **短周期重试**，而不是重排一整个闲置周期。
+ *
+ * 🔴 这是这次改判据真正修掉的东西：老代码在"撞上坏时机"时走的是
+ *    `pokeIdleTimer()`，也就是**再等一个完整的 idleMinutes（默认 8 分钟）**。
+ *    而主动搭话本来就全靠撞时机（她可能正被摸着、输入框还开着、情绪没平息），
+ *    罚一个整周期的结果是：这次闲置里她基本不会再开口了 —— 功能看着像坏的。
+ *    改成 2 秒后再看一眼，代价只是每秒半次布尔判断。 */
+const PROACTIVE_RETRY_MS = 2000;
+
+function retryIdleTimer() {
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(proactiveSpeak, PROACTIVE_RETRY_MS);
+}
+
+/* 此刻能不能开口。返回 '' 表示可以，否则返回不能的原因（进日志）。
+ * ⚠️ 三个条件都只是"延后"，不是"取消" —— 全都交给 retry 去重看。 */
+function proactiveBlockedBy() {
+  if (busy) return 'busy';
+  if (state !== State.IDLE) return 'state:' + state;
+  /* 「情绪安定」判据 —— 见 params.js 的 EMO_SETTLE_EPS 段。
+   * 她刚被打断一次、刚溜达回来、或手还在头上时，情绪参数都还在往目标走；
+   * 这时候插话读起来是"抢拍"。 */
+  if (emoSteadyMs < EMO_SETTLE_HOLD_MS) return 'unsettled';
+  return '';
+}
+
 async function proactiveSpeak() {
   // 排好的定时器可能刚好落在"进入静默"那一刻之后，再挡一道
   if (quiet) return;
-  // 正忙或不在空闲态就别打扰
-  if (busy || state !== State.IDLE) {
-    console.log('[pet] proactive skipped', JSON.stringify({ busy, state }));
-    pokeIdleTimer();
+  const why = proactiveBlockedBy();
+  if (why) {
+    console.log('[pet] proactive 延后', JSON.stringify({ why, steadyMs: Math.round(emoSteadyMs) }));
+    retryIdleTimer();
     return;
   }
 
   if (!hasApiKey) {
-    const line = PROACTIVE_LINES[Math.floor(Math.random() * PROACTIVE_LINES.length)];
+    const line = proactiveLine(emotion);
+    /* 留一条日志：这张表是"按情绪挑话头"，出问题（比如情绪名对不上、
+     * 池子配错）时只有这里是唯一线索。 */
+    console.log('[pet] proactive 出声', JSON.stringify({ emotion, line }));
     setEmotion('smile');
     replyBuffer = line;
     if (floatBubble()) window.pet?.floatSay?.(line);
@@ -2108,6 +2165,14 @@ async function proactiveSpeak() {
       bubble.classList.remove('hidden');
     }
     speak(line);
+    /* 说完回中性。不回的后果不止是"她一直挂着笑"——**话术池会退化**：
+     * 她停在 smile，下一轮 proactiveLine(emotion) 就永远从 smile 池里挑，
+     * 按情绪分池这件事等于没做（实测日志里连着几条都是 smile 池）。
+     * ⚠️ 守卫必须含 `emotion === 'smile'`：这 2.6 秒里用户可能又摸了她、
+     *    又聊了一轮，那时候情绪早不是我们设的这个了，不该被我们按回 calm。 */
+    setTimeout(() => {
+      if (!busy && state === State.IDLE && patState === 'idle' && emotion === 'smile') setEmotion('calm');
+    }, 2600);
     pokeIdleTimer();
     return;
   }
@@ -2115,6 +2180,7 @@ async function proactiveSpeak() {
   busy = true;
   replyBuffer = '';
   gotFirstChunk = false;
+  console.log('[pet] proactive 开话头', JSON.stringify({ emotion, history: history.length }));
   /* 浮窗模式下的等待态由主进程 chat:proactive 里的 beginStream() 负责，
    * 这里只管主窗 #bubble（回退模式）。 */
   if (!floatBubble()) {
@@ -2125,7 +2191,14 @@ async function proactiveSpeak() {
   }
 
   let res;
-  try { res = await window.pet.proactive(); } catch { res = { ok: false }; }
+  /* 带上当前情绪和最近几轮对话。两件事缺了哪件她都不接上文：
+   *   · 情绪 —— 主进程按它挑话头（PROACTIVE_LINES 那张表的口径）；
+   *   · 历史 —— **老代码这里只发一句写死的 prompt，等于失忆**：
+   *     她可能刚聊过这个话题又从头问一遍。只取最近 6 条，
+   *     主动搭话不需要长记忆，多了反而把"现在是什么时候"淹掉。 */
+  try {
+    res = await window.pet.proactive({ emotion, history: history.slice(-6) });
+  } catch { res = { ok: false }; }
   if (!floatBubble()) bubble.classList.remove('waiting');
   busy = false;
 

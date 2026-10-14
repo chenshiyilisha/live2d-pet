@@ -58,6 +58,9 @@ const {
 const {
   startFullscreenWatch, stopFullscreenWatch
 } = require('./fullscreen');
+const {
+  startMediaWatch, stopMediaWatch, getMedia, mediaKey, describeMedia
+} = require('./media');
 const { startSynth, stopSynth, synthWav } = require('./tts');
 const { configureUpdater, checkForUpdates, updaterStatus } = require('./updater');
 const bubble = require('./bubble');
@@ -565,6 +568,23 @@ function refreshTTS() {
   const want = t.enabled === true && (t.engine ?? 'winrt') === 'winrt';
   if (want) startSynth();
   else stopSynth();
+}
+
+/* 媒体采样进程，按配置起停（同 refreshTTS 的形态）。
+ * ⚠️ 幂等：startMediaWatch 里"已在跑就直接返回"。
+ *
+ * `PET_MEDIA=1` 时把每次采样打进日志 —— 这是唯一能回答"真实播放器到底
+ * 会不会上报歌名"的办法（自造的媒体会话不上报，未打包进程没有应用标识）。
+ * 想验证就：开开关、放一首歌、看日志里 title 有没有值。 */
+function refreshMediaWatcher() {
+  if (!isOn('media', 'enabled')) { stopMediaWatch(); return; }
+  /* ⚠️ onSample 这个键要**每次都显式给**（哪怕是 null）—— 它是"要不要换钩子"
+   * 的开关，不给就保持原样（见 media.js 里的说明）。 */
+  startMediaWatch({
+    onSample: process.env.PET_MEDIA
+      ? (m) => console.log('[media] 采样', JSON.stringify(m))
+      : null
+  });
 }
 
 /* ============================================================
@@ -1247,6 +1267,8 @@ function buildMenuTemplate() {
       if (section === 'quiet') refreshQuietWatcher();
       // 语音朗读：winrt 引擎要按需起停合成进程
       if (section === 'tts') refreshTTS();
+      // 媒体感知：常驻采样进程同样要按需起停
+      if (section === 'media') refreshMediaWatcher();
     }
   });
 
@@ -1318,7 +1340,8 @@ function buildMenuTemplate() {
     quietItem,
     flag('monitor', 'floating', '系统状态悬浮显示', false),
     flag('reminder', 'enabled', '定时提醒'),
-    flag('asr', 'enabled', '语音输入（离线识别）', false)
+    flag('asr', 'enabled', '语音输入（离线识别）', false),
+    flag('media', 'enabled', '媒体感知（知道你在听什么）', false)
   ];
 
   /* ---------- 小工具 ---------- */
@@ -1574,12 +1597,81 @@ async function tryLocalIntent(text) {
   return null;
 }
 
+/* ============================================================
+ *  媒体感知 → 对话语境
+ *
+ *  知道歌名本身不算"陪伴"，**能顺口接一句**才算 —— 所以这里只做一件事：
+ *  把"主人此刻在听什么"拼成一条背景信息塞进 prompt。
+ *
+ *  ⚠️ 特别强调"别提建议"：模型看到歌名最容易的输出是"这首歌不错，你可以
+ *    试试 XX 的"——那是音乐推荐机器人，不是桌宠。信息只给她当谈资。
+ * ========================================================== */
+
+/* 同一首歌只提一次的记忆（key + 时间）。
+ * 去重的意义：她连着跟你聊五轮，五个 prompt 里都有同一首歌，
+ * 很可能每轮都来一句"你也在听这首啊" —— 那比不知道还烦人。 */
+let mediaSaid = { key: '', at: 0 };
+const MEDIA_REPEAT_MS = 30 * 60 * 1000;
+
+/* 组装那条背景信息。返回 null = 不该塞（开关关着 / 没在放 / 状态不值得说）。 */
+function mediaContextLine() {
+  if (!isOn('media', 'enabled')) return null;
+  const m = getMedia();
+  const said = describeMedia(m);
+  if (!said) return null;
+
+  const key = mediaKey(m);
+  const repeat = key && key === mediaSaid.key && (Date.now() - mediaSaid.at) < MEDIA_REPEAT_MS;
+  mediaSaid = { key, at: Date.now() };
+  if (repeat) {
+    return '【背景（你已知）：主人这会儿还在听刚才那首，你已经提过了 —— 别再提它。】';
+  }
+  return `【背景：主人此刻${said}。知道就好，想提可以顺口带一句，别推荐别的歌、别说教。】`;
+}
+
+/**
+ * 把媒体背景插进 messages 的**第二位**（紧跟人设那条 system）。
+ * 纯函数（line 从外面给），verify-media.js 直接测。
+ *
+ * ⚠️ 不能往末尾追加：末尾是用户刚说的话，在它后面再插一条 system
+ *    有的后端会报错、有的会把指令权重搞乱。
+ */
+function injectMediaContext(messages, line) {
+  const arr = Array.isArray(messages) ? messages.slice() : [];
+  if (!line) return arr;
+  arr.splice(Math.min(1, arr.length), 0, { role: 'system', content: line });
+  return arr;
+}
+
+/* 主动搭话的"话头"按她此刻的表情给一点方向。
+ *
+ * 出处是竞品调研里 soullink 的 `messageByEmotion`（主动话术按当前情绪分 14 类，
+ * 而不是一句通用 prompt）。我们只有 8 个情绪，所以是 8 条。
+ * 🔴 键集必须和渲染层 params.js 的 EMOTION **完全一致**（verify-proactive 互验）；
+ *    缺的那个会静默退回 default，那就又变回"一句通用 prompt"了。
+ * ⚠️ 只是**方向**，不是台词 —— 具体说什么仍由人设 + 模型决定，
+ *    这里写死台词就成了模板朗读。 */
+const PROACTIVE_MOOD_HINT = {
+  calm: '你现在心里挺静的。',
+  happy: '你现在心情不错，语气可以轻快一点。',
+  smile: '你现在带着点笑意，说话软和些。',
+  think: '你心里正惦记着件事，可以顺口提一句。',
+  shy: '你还有点不好意思，别太直接。',
+  serious: '你有点认真，可以说句正经的（作息 / 歇会儿这类）。',
+  surprised: '你刚被什么动静弄得一愣，语气里带点意外。',
+  sleepy: '你有点困了，懒散一点，别太有精神。'
+};
+
+function proactiveMoodHint(emotion) {
+  return PROACTIVE_MOOD_HINT[emotion] || PROACTIVE_MOOD_HINT.calm;
+}
+
 /* 把 llm.js 的 streamLLM 接到窗口上。
  * 依赖注入的代价就是这里多一层胶水 —— 但换来 llm.js 完全不碰窗口，
  * 可以脱离 Electron 单独 require 与测试。 */
 function chatStream(messages) {
   const cfg = loadConfig();
-  return streamLLM(messages, {
+  return streamLLM(injectMediaContext(messages, mediaContextLine()), {
     ...cfg.llm,
     send: emitChatChunk,
     sendEmotion: emitChatEmotion,
@@ -1838,6 +1930,10 @@ function registerIpc() {
     return { ...cfg, llm: { ...cfg.llm, apiKey: cfg.llm.apiKey ? '***' : '' } };
   });
 
+  /* 主人此刻在听什么。开关关着时恒为 null —— 渲染层不用自己判开关。
+   * 目前只有诊断探针（?snap=media）在读它。 */
+  ipcMain.handle('media:get', () => (isOn('media', 'enabled') ? getMedia() : null));
+
   /* ---- 聊天记录持久化 ----
    * 存成 userData/chat-history.json，退出重开还能接着上次聊。 */
   const historyFile = () => path.join(app.getPath('userData'), 'chat-history.json');
@@ -1863,18 +1959,35 @@ function registerIpc() {
   });
 
   /* ---- 主动搭话 ----
-   * 主人闲置久了由主进程挑话头，走同一条流式通道，渲染层不用区分。 */
-  ipcMain.handle('chat:proactive', async () => {
+   * 主人闲置久了由主进程挑话头，走同一条流式通道，渲染层不用区分。
+   *
+   * 渲染层会带两个东西过来（见 pet.js 的 proactiveSpeak）：
+   *   · emotion —— 她此刻的表情。话头要顺着神态走（下表）；
+   *   · history —— 最近几轮对话。老代码这里**一句历史都不带**，等于失忆：
+   *     刚聊过的事会被重新问一遍。
+   */
+  ipcMain.handle('chat:proactive', async (_e, ctx) => {
     const cfg = loadConfig();
     if (cfg.proactive?.enabled === false) return { ok: false, error: 'disabled' };
+
+    const c = (ctx && typeof ctx === 'object') ? ctx : {};
+    /* 只收形状对的历史条目，并且截断 —— 这段是渲染层传来的，
+     * 不校验的话一条畸形消息就能让后端 400。（条数渲染层已经截到 6。） */
+    const past = (Array.isArray(c.history) ? c.history : [])
+      .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+      .slice(-6)
+      .map((m) => ({ role: m.role, content: m.content.slice(0, 500) }));
+
     bubble.beginStream();
     try {
       const res = await chatStream([
         { role: 'system', content: resolvePersona(cfg) },
+        ...past,
         {
           role: 'user',
           content: '（主人已经有一阵子没搭理你了。主动开个话头，一句话就够，' +
-                   '别问"在忙吗"这种客套，按你的性子随口说点什么。）'
+                   '别问"在忙吗"这种客套，按你的性子随口说点什么。' +
+                   proactiveMoodHint(c.emotion) + '）'
         }
       ]);
       if (res?.ok) bubble.endStream(); else bubble.abortStream();
@@ -1918,6 +2031,7 @@ function registerIpc() {
     refreshWanderConfig();
     refreshQuietWatcher();
     refreshTTS();
+    refreshMediaWatcher();
     refreshTrayMenu();
     try { mainWindow?.webContents.send('config:changed'); } catch { /* ignore */ }
     return ok;
@@ -2124,6 +2238,7 @@ if (!gotLock) {
     startIdleWatcher();
     refreshQuietWatcher();
     refreshTTS();
+    refreshMediaWatcher();
     warnIfModelsMissing();
     initUpdater();
 
@@ -2226,6 +2341,7 @@ if (!gotLock) {
      * 留着它就是一个永远在跑的 powershell.exe。 */
     stopFullscreenWatch();
     stopSensorWatch();
+    stopMediaWatch();
     stopSynth();
     try { httpServer?.close(); } catch { /* ignore */ }
   });

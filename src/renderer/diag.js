@@ -921,6 +921,36 @@ export function attachSnapProbes(live) {
           live.stopSpeak();
         }
 
+        /* ?snap=media：看媒体感知此刻读到什么。
+         *
+         * 这个探针的意义只有一个 —— 回答「**真实播放器到底会不会上报歌名**」。
+         * 自造的媒体会话不上报（未打包进程没有应用标识，属性写进
+         * DisplayUpdater 也不进 GSMTC 视图，实测过），所以只能拿真的播放器验。
+         *  ① 托盘勾上「媒体感知」，② 放一首歌，③ PET_SNAPSHOT=media 跑起来，
+         *  ④ 看这里 title/artist 有没有值。
+         * 采样是每 2 秒一拍，探针连采 5 拍（10 秒）足够等到一次采样。 */
+        if (new URLSearchParams(location.search).get('snap') === 'media') {
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          const seen = [];
+          for (let i = 0; i < 5; i++) {
+            let m = null;
+            try { m = await window.pet?.media?.(); } catch { m = null; }
+            seen.push(m);
+            await wait(2200);
+          }
+          const last = seen[seen.length - 1] || null;
+          console.log('[pet] media result', JSON.stringify({
+            /* 开关关着时恒 null —— 所以"全 null"要么是没开开关，要么是没在放 */
+            samples: seen.length,
+            nonNull: seen.filter(Boolean).length,
+            last,
+            hasTitle: !!(last && last.title),
+            desc: (last && last.active && last.title)
+              ? `${last.title}${last.artist ? ' - ' + last.artist : ''} [${last.status}]`
+              : '(无歌名)'
+          }));
+        }
+
         // ?snap=chat：走一遍完整对话链路（流式 + 情绪标签剥离 + 气泡 + 朗读）
         if (new URLSearchParams(location.search).get('snap') === 'chat') {
           live.input.value = '在吗';

@@ -58,8 +58,13 @@ contextBridge.exposeInMainWorld('pet', {
   loadHistory: () => ipcRenderer.invoke('history:load'),
   saveHistory: (arr) => ipcRenderer.invoke('history:save', arr),
 
-  // 主动搭话：闲置久了由主进程挑个话头
-  proactive: () => ipcRenderer.invoke('chat:proactive'),
+  /* 主动搭话：闲置久了由主进程挑个话头。
+   * 带上她此刻的情绪和最近几轮对话 —— 主进程按情绪挑话头，也让她接得上上文。 */
+  proactive: (ctx) => ipcRenderer.invoke('chat:proactive', ctx),
+
+  /* ---- 媒体感知：主人此刻在听什么（歌名 / 歌手 / 播放状态） ----
+   * 只在 media.enabled 开着时才有内容，否则恒为 null。 */
+  media: () => ipcRenderer.invoke('media:get'),
 
   /* say() 类整段播报走悬浮气泡窗（chat.floatBubble 开启时）。
    * 主进程在浮窗关闭时会安全忽略这两条 —— 主窗内的 #bubble 照旧画。 */

@@ -2,7 +2,11 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>阿岩</title>
+<!-- ⚠️ 这个 <title> **不会**决定窗口标题：主进程拦掉了 page-title-updated
+     （见 main.js 的 createWindow），真正的标题由 setTitle(resolveName(cfg)) 给。
+     留着它只是「页面自己得有个标题」+ 静态兜底，值必须与 config.js 的
+     DEFAULT_NAME 一致 —— verify-rename.js 的 [G] 段会比对。 -->
+<title>日和</title>
 <link rel="stylesheet" href="./style.css">
 
 <!--

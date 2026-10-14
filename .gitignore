@@ -24,7 +24,9 @@ debug/*.png
 debug/pet-driver.html
 # 实跑诊断用的临时 user-data 目录（--user-data-dir 指过去，Electron 会往里
 # 写一堆缓存 / leveldb，全是可再生成的二进制，绝不能进库 —— 2026-10-13 误提交过一次）
-debug/.tmp-userdata/
+# ⚠️ 用通配而不是写死 .tmp-userdata：每个探针各用各的目录（.tmp-name-e2e …），
+#    共用一份会互相踩配置（2026-10-14 加）。
+debug/.tmp-*/
 # 这几类是探针跑出来的**数据快照**，含本机绝对路径（C:\Users\...），
 # 既不可复用也没必要公开。
 debug/*.txt

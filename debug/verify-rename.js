@@ -155,5 +155,63 @@ eq(`NAME_LIMITS.max = ${NAME_LIMITS.max}`, NAME_LIMITS.max, 12);
 ok('槽位数量 ≥ 4（够细分）', PERSONA_PARTS.length >= 4);
 ok('表情槽位被标为 tech（界面会警告）', PERSONA_PARTS.some((p) => p.key === 'emotion' && p.tech));
 
+console.log('\n=== 默认名 = 模型自己的名称（三处副本必须一致）===');
+/* 为什么这里要查三份源码：主进程是 CJS、params.js 是浏览器 ESM（由 index.html
+ * 以 <script type="module"> 加载），require 不进来 —— 所以「模型自己的名称」
+ * 在三个地方各存了一份字面量。手抄的副本一脱节，症状就是"没设过名字时，
+ * 自称叫 A、窗口标题叫 B"，从界面上很难看出是哪一份错了。这里一次性钉死。
+ * （与硬规矩 30 的 LLM_TIMEOUT「config.js 那份是副本，verify 互验」同一套路。） */
+const paramsSrc = fs
+  .readFileSync(path.join(ROOT, 'src/renderer/params.js'), 'utf8')
+  .replace(/\r\n/g, '\n');
+const htmlSrc = fs
+  .readFileSync(path.join(ROOT, 'src/renderer/index.html'), 'utf8')
+  .replace(/\r\n/g, '\n');
+const mainSrc = fs
+  .readFileSync(path.join(ROOT, 'src/main/main.js'), 'utf8')
+  .replace(/\r\n/g, '\n');
+
+const mName = paramsSrc.match(/^export const MODEL_NAME = '([^']+)';$/m);
+ok('params.js 里能找到 MODEL_NAME', !!mName);
+const modelKey = mName ? mName[1] : '';
+
+const modelsHead = paramsSrc.indexOf('export const MODELS = {');
+const modelsTail = paramsSrc.indexOf('\n};', modelsHead);
+const modelsBlock = modelsHead >= 0 && modelsTail > modelsHead ? paramsSrc.slice(modelsHead, modelsTail) : '';
+const mEntry = modelsBlock.match(new RegExp(`\\n  ${modelKey}: \\{([\\s\\S]*?)\\n  \\}`));
+ok(`MODELS 表里有 ${modelKey || '(?)'} 这一项`, !!mEntry);
+const mLabel = mEntry && mEntry[1].match(/label: '([^']+)'/);
+ok(`${modelKey || '(?)'} 有 label（= 模型自己的名称）`, !!mLabel);
+const modelLabel = mLabel ? mLabel[1] : '';
+
+const mTitle = htmlSrc.match(/<title>([^<]*)<\/title>/);
+
+eq('DEFAULT_NAME（config.js）= 模型自己的名称', DEFAULT_NAME, modelLabel);
+eq('index.html 的 <title> = 模型自己的名称', mTitle && mTitle[1], modelLabel);
+ok('模型名非空（否则托盘提示会变空白）', modelLabel.length >= 1);
+ok(`默认名长度落在 NAME_LIMITS 内（${NAME_LIMITS.min}~${NAME_LIMITS.max}）`,
+  modelLabel.length >= NAME_LIMITS.min && modelLabel.length <= NAME_LIMITS.max);
+
+console.log('\n=== 窗口标题不被页面 <title> 顶掉（硬规矩 10 的第三处）===');
+/* 血案（2026-10-14 实测）：main.js 里 setTitle(resolveName(cfg)) 跑在 loadURL
+ * 之前，页面一加载，index.html 的 <title> 就按 Electron 默认行为把窗口标题
+ * 顶掉了 —— 配置里叫「小绿」时，tasklist 读出来的窗口标题仍是「阿岩」。
+ * 修法是拦掉 page-title-updated 的默认动作，这里守住它别被删掉。 */
+const mGuard = mainSrc.match(/mainWindow\.on\('page-title-updated',\s*\(e\)\s*=>\s*([^\n]*)/);
+ok('main.js 拦了 page-title-updated', !!mGuard);
+ok('拦法是 preventDefault（不是空实现）', !!mGuard && mGuard[1].includes('preventDefault'));
+
+console.log('\n=== 改名对话框：「用默认名」这条路要通 ===');
+/* 空名字被 NAME_LIMITS.min 挡着，所以"回到默认名"必须有**显式入口**，
+ * 否则默认名从界面上根本够不着（只能手改 config.json）。 */
+includes('对话框有「用默认名」按钮', mainSrc, '>用默认名</button>');
+includes('按钮回传空串（空串 = 回到默认名）', mainSrc, "getElementById('d').onclick = () => send('')");
+ok('promptRename 用「生效名」比较（空串也走 resolveName 兜底）',
+  /const shown = resolveName\(\{ name: next \}\)/.test(mainSrc));
+includes('生效名同时刷托盘提示与窗口标题',
+  mainSrc, 'tray?.setToolTip(shown)');
+includes('生效名同时刷托盘提示与窗口标题（setTitle）',
+  mainSrc, 'mainWindow?.setTitle(shown)');
+
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 process.exit(fail ? 1 : 0);

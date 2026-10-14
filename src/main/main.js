@@ -246,6 +246,15 @@ function createWindow() {
    * 真正生效的是这一行。 */
   mainWindow.setTitle(resolveName(loadConfig()));
 
+  /* 🔴 页面里的 <title> 会把上面这行**覆盖掉** —— Electron 默认行为是
+   * 「文档标题一变就同步窗口标题」，而 loadURL 发生在 setTitle 之后。
+   * 血案（2026-10-14 实测）：index.html 写死 <title>阿岩</title>，于是不管配置里
+   * 叫什么，任务管理器 / Alt+Tab / 窗口管理工具里永远显示「阿岩」——
+   * 主进程日志打的是 `[name] 当前角色名: "小绿"`，tasklist 读出来的窗口标题却是
+   * "阿岩"，两者对不上。这正是硬规矩 10「名字三处一起刷」漏掉的第三处。
+   * 拦掉默认动作后，窗口标题只由 setTitle 决定，改名的三处才真的同步。 */
+  mainWindow.on('page-title-updated', (e) => e.preventDefault());
+
   /* 可见性一变就通知渲染层。挂在窗口事件上、而不是在每个 hide/show 的调用点
    * 各写一次：显示/隐藏分散在托盘、渲染层「隐藏」、第二实例、静默等好几处，
    * 漏一处就有一处偷偷跑到满帧（用户还以为藏起来就省了）。 */
@@ -714,12 +723,16 @@ function renameDialog() {
              background:#2a2a30;color:#e8e8ea;font-size:13px;cursor:pointer}
       button.primary{background:#4a6cf7;border-color:#4a6cf7;color:#fff}
       button:hover{filter:brightness(1.15)}
+      .row .left{margin-right:auto}
       .err{color:#ff7b7b;font-size:12px;height:15px;margin-top:6px}
     </style>
     <h2>给角色起个名字</h2>
     <input id="n" maxlength="${NAME_LIMITS.max}" value="" autofocus>
     <div class="err" id="e"></div>
-    <div class="row"><button id="c">取消</button><button class="primary" id="k">确定</button></div>
+    <div class="row">
+      <button id="d" class="left">用默认名</button>
+      <button id="c">取消</button><button class="primary" id="k">确定</button>
+    </div>
     <script>
       const inp = document.getElementById('n'), err = document.getElementById('e');
       inp.value = ${JSON.stringify(current)};
@@ -727,11 +740,14 @@ function renameDialog() {
       const send = (v) => { window.__renameResult = v; };
       const commit = () => {
         const v = inp.value.trim();
-        if (v.length < ${NAME_LIMITS.min}) { err.textContent = '名字不能为空'; return; }
+        if (v.length < ${NAME_LIMITS.min}) { err.textContent = '名字不能为空，要用默认名请点左边'; return; }
         if (v.length > ${NAME_LIMITS.max}) { err.textContent = '最多 ${NAME_LIMITS.max} 个字'; return; }
         send(v);
       };
       document.getElementById('k').onclick = commit;
+      /* 空串 = 「清掉自定义名，回到默认名」——与配置里 name:'' 的语义一致，
+       * 不是"取消"（取消回的是 null）。 */
+      document.getElementById('d').onclick = () => send('');
       document.getElementById('c').onclick = () => send(null);
       inp.addEventListener('keydown', (ev) => {
         if (ev.key === 'Enter') commit();
@@ -781,13 +797,17 @@ async function promptRename() {
   const next = await renameDialog();
   if (next === undefined) return false;         // 取消：保持原名
   const cur = resolveName(loadConfig());
-  if (next === cur) return false;               // 没改：不写盘
+  /* 空串是「用默认名」，不是"名字叫空" —— 最终生效的那个名字一律走
+   * resolveName 算，不在这里另判一次（判两遍就会有一天两边不一致）。
+   * 「填了默认名本身」和「留空」效果相同，所以用生效名比较就够，不必比原始值。 */
+  const shown = resolveName({ name: next });
+  if (shown === cur) return false;              // 生效名没变：不写盘
 
   patchConfig(null, { name: next });
   // 名字同时出现在三处，都要立刻刷 —— 少刷一处就是「改了一半」
-  try { tray?.setToolTip(next); } catch { /* ignore */ }
-  try { mainWindow?.setTitle(next); } catch { /* ignore */ }
-  toast(`已重命名为「${next}」`);
+  try { tray?.setToolTip(shown); } catch { /* ignore */ }
+  try { mainWindow?.setTitle(shown); } catch { /* ignore */ }
+  toast(next ? `已重命名为「${shown}」` : `已恢复默认名「${shown}」`);
   return true;
 }
 

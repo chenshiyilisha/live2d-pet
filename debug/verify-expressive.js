@@ -163,8 +163,10 @@ const stripComments = (s) =>
     ok(gi >= 0 && ei >= 0, `两处调用都在主循环里（updateGaze@${gi}, applyEmotion@${ei}）`);
     ok(gi >= 0 && ei > gi, 'updateGaze() 在 applyEmotion() 之前 —— 反过来情绪的歪头点头会被 focus 覆盖掉');
     // 分档插值：每个字段现查速度
-    ok(/const sp = EMO_SPEED\[key\] \?\? EMO_SPEED_DEFAULT;/.test(loop),
+    ok(/EMO_SPEED\[key\] \?\? EMO_SPEED_DEFAULT/.test(loop),
       '逐字段查速度表（漏项退回默认）');
+    // 再乘这一趟的抖动因子（jitter.js）—— 关掉开关时因子为 1，与旧版逐位一致
+    ok(/emoJitter/.test(loop), '插值速度乘了本趟抖动因子（关掉时乘 1，见 verify-jitter）');
     ok(/1 - Math\.exp\(-dt \* sp\)/.test(loop), '仍是与帧率无关的指数逼近');
     ok(!/exp\(-dt \* 5\.5\)/.test(loop), '旧的单速插值已移除');
   }

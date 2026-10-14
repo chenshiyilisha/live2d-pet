@@ -117,7 +117,11 @@ const DEFAULT_CONFIG = {
   appearance: {
     scale: 1.0,           // 人物缩放倍率，建议 0.6 ~ 1.3
     opacity: 1.0,         // 整窗不透明度，0.3 ~ 1.0
-    alwaysOnTop: true     // 窗口置顶
+    alwaysOnTop: true,    // 窗口置顶
+    /* 表情节奏抖动 —— 每次切情绪给各字段的插值速度抽一套 ±15%（见渲染层
+     * jitter.js）。默认开：不占资源也不打扰，关掉只会让表情变回"每次都一样"。
+     * 关掉时主循环乘 1，行为与加这个功能之前逐位一致。 */
+    jitter: true
     /* 这里原本有 model: 一个可选的模型名。春移除后模型固定成日和，
      * 不再是可配置项 —— 名字只在 params.js 的 MODEL_NAME 写一次。 */
   },

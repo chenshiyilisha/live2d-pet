@@ -9,6 +9,7 @@ import {
 } from './params.js';
 import { configureTTS, initTTS, speak, enqueueSpeech, takeSentences, stopSpeak, ttsVoiceInfo, ttsQueueState, setSpeechObserver } from './tts.js';
 import { abortRecording, configureRecorder } from './recorder.js';
+import { rollFactors } from './jitter.js';
 
 // 渲染进程崩溃时默认什么线索都拿不到，先把未捕获异常转发出来
 window.addEventListener('error', (e) => {
@@ -107,6 +108,13 @@ let emoCur = { ...EMOTION.calm };
  * 没摸头（patAmt === 0）时是逐字段等值拷贝 —— 与改动前逐位一致。 */
 const emoEff = { ...EMOTION.calm };
 
+/* 本套情绪过渡的**速度抖动因子**（键同 EMO_SPEED，值 ≈1±JITTER_RATIO）。
+ *
+ * 每次 setEmotion 重抽一整套（见 jitter.js 的说明：过渡期间必须固定，
+ * 每帧重抽就是噪声）。开关 `appearance.jitter` 关掉时置 null ——
+ * 主循环读到 null 就乘 1，行为与加这个功能之前**逐位一致**。 */
+let emoJitter = rollFactors(Object.keys(EMOTION.calm));
+
 /* ── 摸头（按住 = 一直蹭）的状态机。见 params.js 的 PAT 段说明。
  * 规矩 7：异步等待的状态一律用状态机，不用一堆 bool。
  *   idle ──按下(在头顶)──▶ rising ──amt到1──▶ holding ──松手──▶ falling ──amt到0──▶ idle
@@ -194,6 +202,12 @@ function setEmotion(name) {
   if (!EMOTION[name] || name === emotion) return;
   emotion = name;
   emoTarget = EMOTION[name];
+  /* 重抽这一趟的节奏抖动（就为这一件事：同一句情绪两次进入别长得一模一样）。
+   * ⚠️ 必须先判开关再抽 —— 关掉时也要走"不抽"的分支，否则**随机数序列
+   *    会被白白推进**，开关来回切一次就换了一套抖动（不可复现）。 */
+  emoJitter = cfg?.appearance?.jitter === false
+    ? null
+    : rollFactors(Object.keys(emoTarget));
 }
 
 /* ============================================================
@@ -1044,9 +1058,10 @@ async function boot() {
 
     /* 情绪插值：指数逼近（与帧率无关），但**每个字段一个速度** ——
      * 一张脸同时到位是木偶，错峰到位才像活人。速度表见 params.js 的 EMO_SPEED。
-     * 用 1 − e^(−dt·s) 而不是乘一个固定 k，是为了不同帧率下轨迹一致。 */
+     * 用 1 − e^(−dt·s) 而不是乘一个固定 k，是为了不同帧率下轨迹一致。
+     * 速度再乘这一趟的抖动因子（jitter.js）—— 开关关掉时是 1（逐位同旧版）。 */
     for (const key in emoEff) {
-      const sp = EMO_SPEED[key] ?? EMO_SPEED_DEFAULT;
+      const sp = (EMO_SPEED[key] ?? EMO_SPEED_DEFAULT) * (emoJitter ? emoJitter[key] ?? 1 : 1);
       emoCur[key] += (emoEff[key] - emoCur[key]) * (1 - Math.exp(-dt * sp));
     }
     applyEmotion();

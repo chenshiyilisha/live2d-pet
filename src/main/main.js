@@ -1230,6 +1230,7 @@ function buildMenuTemplate() {
   const appearanceMenu = [
     ...appearanceSubmenu(cfg),
     { type: 'separator' },
+    flag('appearance', 'jitter', '表情节奏抖动'),
     flag('appearance', 'alwaysOnTop', '窗口置顶')
   ];
 

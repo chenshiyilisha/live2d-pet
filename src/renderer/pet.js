@@ -5,7 +5,7 @@ import { Live2DModel, MotionPriority } from '@naari3/pixi-live2d-display/cubism5
  * ⚠️ P 是 ESM 的 live binding：这里只能**读** P.XXX，不能赋值。 */
 import {
   MODELS, MODEL_NAME, INK_TOP_C_RATIO, P, State, EMOTION,
-  EMO_SPEED, EMO_SPEED_DEFAULT
+  EMO_SPEED, EMO_SPEED_DEFAULT, PAT, buildEmoTarget
 } from './params.js';
 import { configureTTS, initTTS, speak, stopSpeak, ttsVoiceInfo } from './tts.js';
 import { abortRecording, configureRecorder } from './recorder.js';
@@ -96,6 +96,24 @@ let speakPhase = 0;
 let emotion = 'calm';
 let emoTarget = { ...EMOTION.calm };
 let emoCur = { ...EMOTION.calm };
+/* 本帧的**有效目标** = emoTarget + 摸头调制。每帧由 buildEmoTarget()
+ * 重填（复用同一个对象，不分配），插值循环逼近的是它而不是 emoTarget。
+ * 没摸头（patAmt === 0）时是逐字段等值拷贝 —— 与改动前逐位一致。 */
+const emoEff = { ...EMOTION.calm };
+
+/* ── 摸头（按住 = 一直蹭）的状态机。见 params.js 的 PAT 段说明。
+ * 规矩 7：异步等待的状态一律用状态机，不用一堆 bool。
+ *   idle ──按下(在头顶)──▶ rising ──amt到1──▶ holding ──松手──▶ falling ──amt到0──▶ idle
+ *                                     └───── 松手（rising 期间）──────┘
+ * 规矩 6/26：被拖拽、被静默抢占时走 patAbort()（立刻归零，不走回落）——
+ * 因为紧接着就有别的动作接管，慢慢回落会和它叠在一起。 */
+let patState = 'idle';    // idle | rising | holding | falling
+let patAmt = 0;           // 调制强度 0~1
+let patPhase = 0;         // B 段摆动相位（弧度，按 PAT.wiggleHz 累积）
+let patMs = 0;            // 本次摸头已持续毫秒（只在 rising/holding 里累加）
+let patReleased = false;  // rising 期间就松手了 —— 等它升完再回落，别半途砍断
+let patNagged = false;    // 这次已经抗议过了（只抗议一次）
+let patShy = false;       // 这次已经转过 shy（只转一次）
 // 上一帧往各参数里叠加的增量。每帧先把上一帧的增量减掉再写新的，
 // 否则叠加会一层层累积下去（尤其是被 focus()/motion 也在写的头部角度）。
 const emoApplied = {};
@@ -167,6 +185,190 @@ function setEmotion(name) {
   if (!EMOTION[name] || name === emotion) return;
   emotion = name;
   emoTarget = EMOTION[name];
+}
+
+/* ============================================================
+ *  摸头（按住 = 一直蹭）—— A-B-C 三段式
+ *
+ *  设计说明在 params.js 的 PAT 段（为什么不是播三段动画、为什么做在
+ *  情绪目标上）。这里只有状态机和接线。
+ *
+ *  原来的行为是：`mousedown` 什么都不播，`mouseup` 才播一次 TapBody
+ *  ——手感是"点一下弹一下"，**按住期间完全没反应**。现在：在头顶按下
+ *  就起手，按住多久就蹭多久，松手才收尾。
+ * ========================================================== */
+
+/* ── 实量头顶 y ──────────────────────────────────────────────
+ * 「头顶在哪」不能用 petRect.y：那是解析推算的**松边界**（穿透预筛、
+ * 宽度估算用），而取景特意在头顶上方留了一大段呼吸空间放气泡 ——
+ * 实测窗口 342 高时真头顶在 y≈137，petRect.y 按公式算出来只有 14
+ * （bubble.js 的 measureHead 量到过同一个数）。拿它当「上 30%」的锚，
+ * 整条带都落在她头顶上方的空地里，永远起不了手（2026-10-14 实测踩过）。
+ *
+ * 量法：模型画完之后沿**身体中心那一竖条** readPixels，从上往下找
+ * 第一行「不透明像素够数」的行 —— 与 bubble.js 的 measureHead 同一思想，
+ * 但必须在这里做：mousedown 起手要**同步**判，走不了 IPC 往返。
+ * 只扫一竖条还有个好处：底座牌（DOM，画不进 canvas）不干扰（规矩 23），
+ * 而且一次 readPixels 就够，不用逐行读。
+ *
+ * 时机：layout() 之后隔几帧再量（那时新几何才真的画出来）。
+ * 呼吸 / 眨眼只让头顶上下浮动几 px，条带本身有几十 px 容差，不必追帧；
+ * 量不到（模型还没画出第一帧 / 上下文丢了）就保留旧值，不往 0 写。 */
+let headTopY = 0;              // 实量头顶（窗口 CSS px）。0 = 还没量到
+let headMeasureTimer = 0;
+let headMeasureTries = 0;
+let headColBuf = null;
+
+function scheduleHeadMeasure() {
+  if (headMeasureTimer) return;
+  headMeasureTimer = setTimeout(() => {
+    headMeasureTimer = 0;
+    measureHeadTop();
+  }, 150);                      // ≈9 帧：等 layout() 的新几何真的渲染出来
+}
+
+/* 布局变化时调：重试计数清零，重新排一次量。 */
+function queueHeadMeasure() {
+  headMeasureTries = 0;
+  scheduleHeadMeasure();
+}
+
+function measureHeadTop() {
+  if (!hitGl || hitGl.isContextLost?.() || !model || !petRect.w) return;
+  const res = app.renderer.resolution || 1;
+  const bh = hitGl.drawingBufferHeight;
+  const bw = hitGl.drawingBufferWidth;
+  if (!bh || !bw) return;
+  /* 条带：身体中心左右各 20 CSS px（呆毛偏细，太窄容易从它和头之间漏过去） */
+  const cx = Math.round((petRect.x + petRect.w / 2 - CANVAS_OFF.x) * res);
+  const hw = Math.round(20 * res);
+  const x0 = Math.max(0, cx - hw);
+  const w = Math.min(bw, cx + hw) - x0;
+  if (w <= 0) return;
+  const need = w * bh * 4;
+  if (!headColBuf || headColBuf.length < need) headColBuf = new Uint8Array(need);
+
+  let prev = null;
+  try {
+    prev = hitGl.getParameter(hitGl.FRAMEBUFFER_BINDING);
+    if (prev) hitGl.bindFramebuffer(hitGl.FRAMEBUFFER, null);
+    hitGl.readPixels(x0, 0, w, bh, hitGl.RGBA, hitGl.UNSIGNED_BYTE, headColBuf);
+  } catch { return; }
+  finally {
+    try { if (prev) hitGl.bindFramebuffer(hitGl.FRAMEBUFFER, prev); } catch { /* ignore */ }
+  }
+
+  /* 从上往下（缓冲区行号 = bh-1-r）找第一行不透明像素够数的。
+   * 阈值与抽样步长跟 bubble.js 的 measureHead 一致（>40、隔 2px、≥4 个）。 */
+  for (let r = 0; r < bh; r++) {
+    const row = (bh - 1 - r) * w * 4;
+    let cnt = 0;
+    for (let i = 3; i < w * 4; i += 8) {       // 隔 2 像素取一个 alpha
+      if (headColBuf[row + i] > 40 && ++cnt >= 4) {
+        headTopY = CANVAS_OFF.y + r / res;     // 缓冲行号 → 窗口 CSS y
+        return;
+      }
+    }
+  }
+  /* 没量到：多半是模型还没画出第一帧。自动重试几次，超过就放弃
+   * （等下一次布局变化再量），别无限空转。 */
+  if (headTopY <= 0 && ++headMeasureTries < 20) scheduleHeadMeasure();
+}
+
+/* 头顶那片 = 落在她身上、且在**实量头顶**之下的那一段。
+ * ⚠️ 必须能在**按下时**就判出来 —— 这段判定原来写在 onPetClicked() 里，
+ *    而那是松手才跑的，按住期间根本无从判断。
+ *    isOverPet() 是同步的（读 GL 帧缓冲、带缓存），按下时调一次可以接受。 */
+function isHeadPatTarget(x, y) {
+  if (cfg?.interaction?.headPat === false) return false;
+  if (headTopY <= 0) return false;   // 还没量到：宁可不认，别在空气里起手
+  if (!isOverPet(x, y)) return false;
+  return y <= headTopY + headBandH();
+}
+
+/* 条带高度 =（窗口底 − 实量头顶）的三成。日和半身像的头+发约占可见
+ * 高度的四分之一，三成略宽松、好摸；锚在实量值上，窗口/缩放变了自己跟着走。 */
+function headBandH() {
+  const H = stageEl?.clientHeight || 0;
+  return Math.max(0, (H - headTopY) * 0.30);
+}
+
+/* A 段 · 起手：patAmt 0→1（快），再叠上错峰插值本身的爬升。 */
+function patStart() {
+  patState = 'rising';
+  patAmt = 0;
+  patPhase = 0;
+  patMs = 0;
+  patReleased = false;
+  patNagged = false;
+  patShy = false;
+  window.pet?.activity?.();   // 手放上来了就算"有活动"：别在这时候溜达走
+  setEmotion('happy');
+}
+
+/* C 段 · 收尾：patAmt 1→0（慢）。
+ * ⚠️ rising 期间松手**不打断起手** —— 等它升到 1 再回落。在半途砍断，
+ *    观感是"手刚放上去她就弹回来"，很假。 */
+function patRelease() {
+  if (patState === 'idle') return;
+  patReleased = true;
+  if (patState === 'holding') patState = 'falling';
+  /* 没闹脾气的当场回落；闹了脾气的保持 shy 把气生完（falling 结束才 calm） */
+  if (!patNagged) setEmotion('calm');
+}
+
+/* 抢占（被拖拽 / 进水静默）：立刻归零，**不走回落** ——
+ * 紧接着就有别的动作接管，慢慢回落会和它叠在一起。 */
+function patAbort() {
+  patState = 'idle';
+  patAmt = 0;
+  patPhase = 0;
+  patMs = 0;
+  patReleased = false;
+  patNagged = false;
+  patShy = false;
+}
+
+/* 每帧推进。⚠️ 必须在 buildEmoTarget() 之前调（它要用 patAmt/patPhase）。 */
+function updatePat(dt) {
+  if (patState === 'idle') return;
+  patPhase += dt * 2 * Math.PI * PAT.wiggleHz;
+
+  if (patState === 'rising') {
+    patMs += dt * 1000;
+    patAmt = Math.min(1, patAmt + dt * PAT.rise);
+    if (patAmt >= 1) patState = patReleased ? 'falling' : 'holding';
+    return;
+  }
+
+  if (patState === 'holding') {
+    patMs += dt * 1000;
+    /* 害羞和抗议都发生在**按住的过程中**，不是等松手才反应 ——
+     * 你一直按着不放，她中途就开始不自在。 */
+    if (!patShy && patMs >= PAT.shyMs) { patShy = true; setEmotion('shy'); }
+    if (!patNagged && patMs >= PAT.nagMs) {
+      patNagged = true;
+      say('别摸啦，头发要乱了。');
+    }
+    return;
+  }
+
+  // falling
+  patAmt -= dt * PAT.fall;
+  if (patAmt <= 0) {
+    patAmt = 0;
+    patState = 'idle';
+    setEmotion('calm');        // 闹脾气的到这儿也把气生完了
+  }
+}
+
+/* 连点计数（900ms 之内的算"连着点"）。摸头那一类和"戳"那一类都要用，
+ * 所以收成一个函数 —— 免得两条路各写一份、日后只改一边。 */
+function bumpClickStreak() {
+  const now = Date.now();
+  clickStreak = (now - lastClickAt < 900) ? clickStreak + 1 : 1;
+  lastClickAt = now;
+  return clickStreak;
 }
 
 /* 把当前情绪姿态写进模型。
@@ -675,6 +877,8 @@ async function mountModel(name) {
   }));
   /* 人物刚画出来 → 重量一次头顶 y（悬浮气泡锚点）。慢一点等首帧画稳。 */
   setTimeout(() => window.pet?.requestHeadMeasure?.(), 1500);
+  /* 摸头条带的锚（渲染层自己的实量头顶）也要量一次 —— 量不到会自动重试。 */
+  queueHeadMeasure();
   return true;
 }
 
@@ -814,12 +1018,17 @@ async function boot() {
      * 两件事合起来只有一个正确顺序：focus 在前，applyEmotion 在后。 */
     updateGaze(dt);
 
+    /* 摸头（按住）：先推进状态机（patAmt / patPhase），再由它算出本帧的
+     * **有效目标**。⚠️ 必须在插值循环之前 —— 插值逼近的是 emoEff。 */
+    updatePat(dt);
+    buildEmoTarget(emoEff, emoTarget, patAmt, patPhase);
+
     /* 情绪插值：指数逼近（与帧率无关），但**每个字段一个速度** ——
      * 一张脸同时到位是木偶，错峰到位才像活人。速度表见 params.js 的 EMO_SPEED。
      * 用 1 − e^(−dt·s) 而不是乘一个固定 k，是为了不同帧率下轨迹一致。 */
-    for (const key in emoTarget) {
+    for (const key in emoEff) {
       const sp = EMO_SPEED[key] ?? EMO_SPEED_DEFAULT;
-      emoCur[key] += (emoTarget[key] - emoCur[key]) * (1 - Math.exp(-dt * sp));
+      emoCur[key] += (emoEff[key] - emoCur[key]) * (1 - Math.exp(-dt * sp));
     }
     applyEmotion();
 
@@ -887,8 +1096,15 @@ async function boot() {
       model: () => model,
       holder: () => holder,
       petRect: () => petRect,
+      headTop: () => headTopY,   // 实量头顶（诊断探针用；0 = 还没量到）
       pointer: () => pointer,
       emotion: () => emotion,
+      /* 摸头（A-B-C）的状态机快照。露出来是为了让诊断脚本能**读真实状态**
+       * 判断"按下到底有没有起手、按住期间在不在摆"，而不是靠盯截图猜。 */
+      pat: () => ({
+        state: patState, amt: patAmt, phase: patPhase, ms: patMs,
+        released: patReleased, nagged: patNagged, shy: patShy
+      }),
       cfg: () => cfg,
       setCfg: (v) => { cfg = v; },
       replyBuffer: () => replyBuffer,
@@ -1183,6 +1399,8 @@ function layout() {
 
   /* 人物落点变了 → 让主进程重量头顶 y（悬浮气泡的锚点。节流在主进程侧）。 */
   window.pet?.requestHeadMeasure?.();
+  /* 几何变了 → 摸头条带的锚（实量头顶）也要跟着重新量。 */
+  queueHeadMeasure();
 
   if (new URLSearchParams(location.search).has('snap')) {
     const r = (n) => Math.round(n);
@@ -1191,7 +1409,7 @@ function layout() {
       cubism: [CANVAS_W, CANVAS_H], zoom: ZOOM, off: [CANVAS_OFF.x, CANVAS_OFF.y],
       bodyCx: r(bodyCx),                                                 // 身体中心落点
       inkTopC: Number(INK_TOP_C.toFixed(2)),                             // = vh×0.2
-      headY: HEAD_PAD,                                                  // 墨水顶部落点
+      inkTopEst: r(petRect.y),                                           // 推算的墨水顶（**不是实量**，真头顶见 measureHeadTop）
       waistY: Math.round(HEAD_PAD + SHOW_FRACTION * INK_H * s),          // 腰际落点
       petRect: [r(petRect.x), r(petRect.y), r(petRect.w), r(petRect.h)]
     }));
@@ -1396,6 +1614,9 @@ window.addEventListener('mousemove', (e) => {
       lastScreenX = e.screenX;
       lastScreenY = e.screenY;
       dragMoved = true;
+      /* 已经变成拖拽了 → 摸头这一路作废（规矩 6：用户操作优先于自动动作，
+       * 这里反过来是"拖拽优先于摸头"，两者抢的是同一段按下-抬起）。 */
+      if (patState !== 'idle') patAbort();
       window.pet?.dragMove(dx, dy);
 
       // 拖着走：拖出一段距离后挣扎一下（一次拖动只反馈一次，别一直嚎）
@@ -1427,6 +1648,9 @@ canvas.addEventListener('mousedown', (e) => {
   downY = e.clientY;
   lastScreenX = e.screenX;
   lastScreenY = e.screenY;
+  /* 摸头起手：**按下就反应**（原来要等松手才播一次 TapBody）。
+   * 只有"在头顶按下"才算 —— 身上其他地方仍然是原来的"点一下"。 */
+  if (isHeadPatTarget(e.clientX, e.clientY)) patStart();
   e.preventDefault();
 });
 
@@ -1444,51 +1668,60 @@ window.addEventListener('mouseup', () => {
   dragging = false;
   window.pet?.dragEnd?.();          // 让主进程判断要不要贴屏幕边缘
   if (dragMoved) {
+    patAbort();                     // 拖走了：摸头这一路不算数
     if (dragReacted) {
       setEmotion('calm');          // 松手了，气消了
       stopEventMotions();          // 停掉 Drag，交还给插件的 idle 调度
     }
     return;
   }
-  onPetClicked(downX, downY);
+
+  /* 摸头这一路：走 A-B-C 的收尾，**不再**进 onPetClicked() ——
+   * 否则会再播一次 TapBody（那是"被戳一下"，跟摸头是两回事），
+   * 而且还会重复 setEmotion('happy')，把起手的势冲掉。 */
+  if (patState !== 'idle') {
+    bumpClickStreak();
+    /* 两种"摸够了"：按住太久（patNagged，过程中已经喊过一嗓子），
+     * 或者连着摸了三下（原来的规则，保留没删）。 */
+    const annoyed = patNagged || clickStreak >= 3;
+    patRelease();
+    if (annoyed) {
+      setEmotion('shy');
+      if (!patNagged) say('别摸啦，头发要乱了。');
+      return;                       // 闹脾气了，不甩输入框过来
+    }
+    setState(State.LISTENING);
+    showComposer();
+    pokeIdleTimer();
+    return;
+  }
+
+  onPetClicked();
 });
 
 /* 点她一下。
  *
- * 三种反应，都可以在托盘「互动行为」里单独关掉：
- *   - 摸头：点在窗口上方 30%（头顶那片）→ 开心；连摸三下会害羞地抗议
+ * ⚠️ **摸头不在这个函数里了**（2026-10-14）—— 它挪到了 mousedown 上的
+ *    patStart()，走 A-B-C 三段式（按住就一直蹭）。这里只剩"身上点一下"。
+ *
+ * 两种反应，都可以在托盘「互动行为」里单独关掉：
  *   - 连戳：在身上一串快点 → 惊讶反问
  *   - 普通：乐一下 + 打开输入框
- * 只有"普通"会弹输入框 —— 摸烦了 / 戳烦了她会闹脾气，不该还甩个输入框过来。 */
-function onPetClicked(x, y) {
+ * 只有"普通"会弹输入框 —— 戳烦了她会闹脾气，不该还甩个输入框过来。 */
+function onPetClicked() {
   if (!model) return;
   window.pet?.activity?.();
-
-  const now = Date.now();
-  clickStreak = (now - lastClickAt < 900) ? clickStreak + 1 : 1;
-  lastClickAt = now;
+  bumpClickStreak();
 
   try { model.motion('TapBody'); } catch { /* 模型没这个组就算了 */ }
 
-  const headPat = cfg?.interaction?.headPat !== false;
-  const poke = cfg?.interaction?.pokeReact !== false;
-  const onHead = petRect.h > 0 && y <= petRect.y + petRect.h * 0.30;
-
-  if (headPat && onHead) {
-    if (clickStreak >= 3) {
-      setEmotion('shy');
-      say('别摸啦，头发要乱了。');
-      return;
-    }
-    setEmotion('happy');
-  } else if (poke && clickStreak >= 4) {
+  if (cfg?.interaction?.pokeReact !== false && clickStreak >= 4) {
     setEmotion('surprised');
     say('戳够了没有。');
     return;
-  } else {
-    setEmotion('happy');
   }
 
+  setEmotion('happy');
   setState(State.LISTENING);
   showComposer();
   pokeIdleTimer();
@@ -1587,7 +1820,18 @@ const floatBubble = () => cfg?.chat?.floatBubble !== false;
  *  对话
  * ========================================================== */
 
-window.pet?.onChunk((text) => {
+/* 🔴 桥的调用一律写成 `window.pet?.fn?.(...)` —— **两个 `?.`，缺一不可**。
+ *
+ * `?.` 护的是**对象**，不是**方法**：`window.pet?.onThink(...)` 在
+ * window.pet 存在、但 onThink 不存在时，会照旧去 call undefined，
+ * 抛 TypeError。而下面这三条是**顶层**注册 —— 一条抛出去，整个模块体
+ * 就断在这儿，后面所有 `let` 全部停在 TDZ，然后到处报
+ * "Cannot access 'x' before initialization"（2026-10-14 实跑撞见：
+ * 包里的 preload 还是旧版、渲染层是新的，日志里那串 TDZ 全是这一条的连锁）。
+ *
+ * 版本错配（预加载脚本比渲染层旧）的正确行为是**降级**：少一个监听就少
+ * 一个功能，整页不该崩。onConfigChanged 那处本来就是这个写法。 */
+window.pet?.onChunk?.((text) => {
   if (!gotFirstChunk) {
     gotFirstChunk = true;
     setState(State.SPEAKING);
@@ -1603,13 +1847,13 @@ window.pet?.onChunk((text) => {
 
 // 情绪由主进程从回复的 [emo:xxx] 标签里解析出来后单独发过来，
 // 气泡文本里那一段已经被剥干净了，不用在渲染层再过滤一次。
-window.pet?.onEmotion((name) => setEmotion(name));
+window.pet?.onEmotion?.((name) => setEmotion(name));
 
 /* 「心里想的」([think:…]) —— 主进程剥出来后单独发来，整段到达。
  * ⚠️ 刻意**不进 replyBuffer**：那个变量驱动 TTS 朗读和聊天历史，
  *    想法是没打算说出口的东西，混进去就等于当众念心声了。
  *    这里只把它塞进气泡顶部那一行。 */
-window.pet?.onThink((text) => {
+window.pet?.onThink?.((text) => {
   if (floatBubble()) return;          // 浮窗模式由气泡窗自己画那一行
   bubbleThink.textContent = text;
 });
@@ -1913,6 +2157,7 @@ window.pet?.on?.('pet:quiet', (d) => {
   if (changed && quiet) {
     stopSpeak();              // 正在念的那句立刻掐掉 —— 打游戏时突然出声最讨厌
     stopEventMotions();       // 拖拽 / 溜达的动作也一起收（规矩 19：静默七处一起收手）
+    patAbort();               // 摸头也收（她进静默了，别再蹭）
     clearTimeout(idleTimer);  // 撤掉已经排好的主动搭话（醒来会重排）
     /* 静默期间主进程**不再推数据**（refreshStatsTimer 开头就 return），
      * 所以"还在等第一条数据"的那段时间会一直转下去 —— 直接收掉。

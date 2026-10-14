@@ -106,13 +106,18 @@ const stripComments = (s) =>
 
   console.log('[D] params.js —— 数值范围（超范围会被 Cubism 静默 clamp，白写）');
   {
-    const LIM = {
-      browLY: [-1, 1], browRY: [-1, 1], browLX: [-1, 1], browRX: [-1, 1],
-      browAngle: [-1, 1], browForm: [-1, 1], mouthForm: [-1, 1],
-      eyeSmile: [0, 1], eyeOpen: [0, 1.1], cheek: [0, 1], shoulder: [-1, 1],
-      ahoge: [-1, 1], headZ: [-30, 30], headY: [-30, 30],
-      bodyY: [-10, 10], bodyZ: [-10, 10]
-    };
+    /* 范围表已经从本脚本**收进 params.js**（EMO_RANGE）—— 因为运行时
+     * 的 buildEmoTarget() 也要用它夹取，两处各写一份必然漂移。
+     * 这里直接拿真表回查情绪表。 */
+    const LIM = M.EMO_RANGE;
+    {
+      const fields = Object.keys(EMOTION.calm).sort();
+      const ranges = Object.keys(LIM).sort();
+      const miss = fields.filter((f) => !ranges.includes(f));
+      const extra = ranges.filter((f) => !fields.includes(f));
+      ok(miss.length === 0, `EMO_RANGE 覆盖每一个情绪字段${miss.length ? '（漏:' + miss + '）' : ''}`);
+      ok(extra.length === 0, `EMO_RANGE 没有指向不存在字段的项${extra.length ? '（多余:' + extra + '）' : ''}`);
+    }
     for (const [n, e] of Object.entries(EMOTION)) {
       const bad = Object.entries(e).filter(([f, v]) => {
         const r = LIM[f];
@@ -175,6 +180,147 @@ const stripComments = (s) =>
     const sines = (gaze.match(/Math\.sin\(/g) || []).length;
     ok(sines >= 3, `游移用多条正弦叠加（${sines} 处 Math.sin）—— 单条正弦的周期感很重`);
     ok(/if \(!pointer\) return;/.test(gaze), '没有光标时整段跳过（让情绪的头部姿态独自生效）');
+  }
+
+  console.log('[H] params.js —— 摸头 A-B-C 的调制（真调 buildEmoTarget，不是正则）');
+  {
+    const { PAT, PAT_DELTA, buildEmoTarget } = M;
+    const FIELDS = Object.keys(EMOTION.calm);
+    const out = {};   // 调用方复用的对象，和主循环里一样
+
+    /* ① PAT_DELTA 的键必须在情绪字段集里。
+     *    写错一个名字 = 那个通道永远不动，而且**完全静默**。 */
+    {
+      const bad = Object.keys(PAT_DELTA).filter((k) => !FIELDS.includes(k));
+      ok(bad.length === 0, `PAT_DELTA 的键都在 EMOTION 字段集里${bad.length ? '（多:' + bad + '）' : ''}`);
+      ok(Object.keys(PAT_DELTA).length >= 8,
+        `摸头调的通道够用（${Object.keys(PAT_DELTA).length} 个）—— 只动头不动脸，读出来是"点头"不是"被摸"`);
+      const core = ['headY', 'headZ', 'ahoge', 'eyeOpen', 'cheek'];
+      ok(core.every((k) => PAT_DELTA[k]), `该动的那几个都在（${core.join(' / ')}）`);
+    }
+
+    /* ② 摆动必须真的错峰 —— 全同相位 = 整张脸一起晃 = 木偶
+     *    （同 [B] 段那条"共用一个速度等于木偶"的道理）。 */
+    {
+      const offs = Object.values(PAT_DELTA).map((d) => d.s);
+      ok(new Set(offs).size >= 3, `相位偏移有 ${new Set(offs).size} 档（全同相会整张脸一起晃）`);
+      const wig = Object.values(PAT_DELTA).filter((d) => d.w > 0);
+      ok(wig.length >= 3, `${wig.length} 个通道带摆动（B 段才有戏，否则按住等于定住）`);
+      ok(PAT.wiggleHz > 0.2 && PAT.wiggleHz < 2,
+        `摆动 ${PAT.wiggleHz}Hz 在合理区间（太快是抖，不是顺毛）`);
+      ok(PAT.rise > PAT.fall,
+        `起手(${PAT.rise}) 比收尾(${PAT.fall}) 快 —— 手放上去要跟手，拿开要愣一下`);
+      ok(PAT.shyMs < PAT.nagMs,
+        `先害羞(${PAT.shyMs}ms) 再抗议(${PAT.nagMs}ms) —— 顺序反了她会先骂人再脸红`);
+    }
+
+    /* ③ patAmt === 0 时**零侵入**：逐字段必须与基础情绪全等。
+     *    这条是"没摸头时行为与改动前完全一致"的机器保证。 */
+    {
+      let bad = 0;
+      for (const base of Object.values(EMOTION)) {
+        buildEmoTarget(out, base, 0, 0);
+        for (const f of FIELDS) if (out[f] !== base[f]) bad++;
+        if (Object.keys(out).length !== FIELDS.length) bad++;
+      }
+      ok(bad === 0, `patAmt=0 与基础情绪逐字段全等（${bad} 处不符）`);
+    }
+
+    /* ④ amt === 1 走三个完整摆动周期，任何一帧都不许越界。
+     *    越界不会报错，只会静默停在边界（表现是"摸了半天脸红没变"）。 */
+    {
+      let bad = 0, first = '';
+      for (const [n, base] of Object.entries(EMOTION)) {
+        for (let i = 0; i < 96; i++) {
+          buildEmoTarget(out, base, 1, (i / 96) * Math.PI * 6);
+          for (const f of FIELDS) {
+            const r = M.EMO_RANGE[f];
+            if (!(out[f] >= r[0] && out[f] <= r[1])) {
+              bad++;
+              if (!first) first = `${n}.${f}=${out[f].toFixed(2)} 越 [${r[0]},${r[1]}]`;
+            }
+          }
+        }
+      }
+      ok(bad === 0, `8 个情绪 × 3 个摆动周期全程不越界${bad ? `（${bad} 处，首例 ${first}）` : ''}`);
+    }
+
+    /* ⑤ 调制真的改了目标（不然这一整套是死代码） */
+    {
+      buildEmoTarget(out, EMOTION.happy, 1, 0.3);
+      const moved = FIELDS.filter((f) => Math.abs(out[f] - EMOTION.happy[f]) > 1e-6);
+      ok(moved.length >= 8, `摸头改了 ${moved.length} 个通道（${moved.join(',')}）`);
+    }
+
+    /* ⑥ 摆动是真的在动：同一通道在不同相位值不同 */
+    {
+      buildEmoTarget(out, EMOTION.happy, 1, 0);
+      const z0 = out.headZ;
+      buildEmoTarget(out, EMOTION.happy, 1, 1.9);
+      ok(Math.abs(out.headZ - z0) > 0.3,
+        `headZ 随相位变化（${z0.toFixed(2)} → ${out.headZ.toFixed(2)}）`);
+    }
+  }
+
+  console.log('[I] pet.js —— 摸头的接线（按下起手 / 松手收尾 / 抢占 / 主循环顺序）');
+  {
+    const r = stripComments(read('renderer/pet.js'));
+
+    /* 必须在**按下**时就判头顶 —— 原来判在松手才跑的 onPetClicked 里 */
+    const down = (r.match(/canvas\.addEventListener\('mousedown',\s*\(e\)\s*=>\s*\{([\s\S]*?)\n\}\);/) || ['', ''])[1];
+    ok(down !== '', 'mousedown 段落切得出来');
+    ok(/isHeadPatTarget\(e\.clientX,\s*e\.clientY\)/.test(down), '按下时判头顶（不是等松手才判）');
+    ok(/patStart\(\)/.test(down), '按下即起手 patStart()（A 段）');
+
+    /* 摸头条带必须锚在**实量头顶**上：petRect.y 是解析推算的松边界，
+     * 取景给头顶上方留了一整段放气泡（实测窗口 342 高时真头顶 y≈137，
+     * petRect.y=14）—— 按它算「上 30%」整条带都在空气里，永远起不了手
+     * （2026-10-14 ?snap=pat 实测踩过）。 */
+    ok(!/petRect\.y \+ petRect\.h \* 0\.30/.test(r), '摸头条带不再锚在 petRect.y（那是推算值，不是真头顶）');
+    ok(/headTopY \+ headBandH\(\)/.test(r), '条带锚在实量头顶 headTopY 上');
+    ok(/headTopY <= 0\) return false/.test(r), '头顶还没量到时不起手（宁可不认，别在空气里起手）');
+    ok(/queueHeadMeasure\(\)/.test(r), '布局变化后重新量头顶（queueHeadMeasure）');
+    ok(/measureHeadTop\(\)/.test(r), '有实量头顶的实现（measureHeadTop）');
+    ok(/readPixels\(/.test(r), '实量走 readPixels（mousedown 要同步判，走不了 IPC 往返）');
+
+    /* 松手：先分流摸头，再走 onPetClicked */
+    const up = (r.match(/window\.addEventListener\('mouseup',\s*\(\)\s*=>\s*\{([\s\S]*?)\n\}\);/) || ['', ''])[1];
+    ok(up !== '', 'mouseup 段落切得出来');
+    ok(/if \(patState !== 'idle'\)/.test(up), 'mouseup 先分流摸头');
+    ok(/patRelease\(\)/.test(up), '松手调 patRelease()（C 段）');
+    {
+      const pi = up.indexOf('patRelease()');
+      const ci = up.indexOf('onPetClicked()');
+      ok(pi >= 0 && ci > pi, '收尾在 onPetClicked() 之前 —— 摸头不会再走一遍"戳一下"');
+    }
+
+    /* onPetClicked 里不该再有摸头分支（否则摸头被算两次） */
+    const click = (r.match(/function onPetClicked\(\)\s*\{([\s\S]*?)\n\}/) || ['', ''])[1];
+    ok(click !== '', 'onPetClicked 切得出来且签名已无参');
+    ok(!/headPat/.test(click), 'onPetClicked 里不再有摸头分支（已归 A-B-C）');
+    ok(!/onHead/.test(click), 'onPetClicked 里不再有 onHead 判定');
+
+    /* 抢占：拖拽优先 / 静默一起收手 */
+    ok(/if \(patState !== 'idle'\) patAbort\(\);/.test(r), '变拖拽时 patAbort()（拖拽优先于摸头）');
+    {
+      const qi = r.indexOf('pet:quiet');
+      ok(qi >= 0 && /patAbort\(\)/.test(r.slice(qi, qi + 900)), '静默收手里有 patAbort()（规矩 19）');
+    }
+
+    /* 主循环顺序：updatePat → buildEmoTarget → 插值(emoEff) → applyEmotion */
+    const loop = (r.match(/app\.ticker\.add\(\(ticker\)\s*=>\s*\{([\s\S]*?)\},\s*null,\s*PIXI\.UPDATE_PRIORITY\.LOW\)/) || ['', ''])[1];
+    ok(loop !== '', '主循环段落切得出来');
+    {
+      const a = loop.indexOf('updatePat(');
+      const b = loop.indexOf('buildEmoTarget(');
+      const c = loop.indexOf('for (const key in emoEff)');
+      const d = loop.indexOf('applyEmotion()');
+      ok(a >= 0 && b > a, 'updatePat 在 buildEmoTarget 之前（后者要用 patAmt/patPhase）');
+      ok(b >= 0 && c > b, 'buildEmoTarget 在插值之前（插值逼近的是有效目标）');
+      ok(c >= 0 && d > c, '插值在 applyEmotion 之前');
+    }
+    ok(/for \(const key in emoEff\)/.test(loop), '插值遍历 emoEff（有效目标）而不是 emoTarget');
+    ok(!/for \(const key in emoTarget\)/.test(loop), '旧的 emoTarget 插值循环已移除');
   }
 
   console.log(fails === 0 ? '\n全部通过' : `\n${fails} 项失败`);

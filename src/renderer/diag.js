@@ -674,6 +674,106 @@ export function attachSnapProbes(live) {
           console.log('[pet] mood done');
         }
 
+        /* ?snap=pat：摸头 A-B-C 全流程（真实鼠标序列 + 分阶段采样）
+         *
+         *  为什么必须走**真实鼠标事件**而不是直接调 patStart()：这段功能的
+         *  返回值就是"手感"，而 patStart 挂在 isHeadPatTarget() 后面（要过
+         *  像素命中判定）。绕开事件就等于把最容易坏的那一环跳过去了。
+         *
+         *  判据全不靠肉眼：
+         *    ① live.pat() 的状态机真的走 rising → holding → falling
+         *    ② B 段期间 headZ / bodyZ 在**摆动**（同一通道不同时刻值不同）
+         *    ③ 按住到 shyMs 转 shy、到 nagMs 喊一句
+         *    ④ 每阶段落一张图 —— 幅度和正负号只能看图校准
+         *
+         *  跑法：PET_ENTRY=debug/pet-driver.html PET_SNAPSHOT=pat <electron> .
+         */
+        if (new URLSearchParams(location.search).get('snap') === 'pat') {
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          const rd = (id) => Number((live.readParam(id) ?? 0).toFixed(3));
+          const st = () => live.pat();
+          const fire = (type, target, x, y) => target.dispatchEvent(new MouseEvent(type, {
+            bubbles: true, cancelable: true, view: window,
+            button: 0, buttons: type === 'mouseup' ? 0 : 1,
+            clientX: x, clientY: y, screenX: x + 600, screenY: y + 400
+          }));
+
+          await wait(1200);
+          /* 头顶实量可能还没跑到（冷启动模型加载慢）—— 最多等 3 秒 */
+          for (let i = 0; i < 20 && !(live.headTop?.() > 0); i++) await wait(150);
+          const pr = live.petRect();
+          const top = live.headTop?.() ?? 0;
+          const span = Math.max(1, live.stageEl.clientHeight - top);
+          /* 候选点：**实量头顶**之下的那条带（isHeadPatTarget 的口径）。
+           * 由浅到深试 —— 最浅处只有呆毛那几根细线，像素命中可能过不去。
+           * 这个自寻址是有必要的：头顶位置依赖布局，写死坐标换个窗口尺寸就失效。 */
+          const cands = [0.08, 0.16, 0.24, 0.32].map((f) => [
+            Math.round(pr.x + pr.w * 0.5), Math.round(top + span * f)
+          ]);
+          let hit = null;
+          for (const [x, y] of cands) {
+            fire('mousedown', live.canvas, x, y);
+            if (st().state !== 'idle') { hit = { x, y }; break; }
+            fire('mouseup', window, x, y);
+            await wait(120);
+          }
+          console.log('[pet] pat probe', JSON.stringify({
+            headTop: Math.round(top),
+            petRect: [Math.round(pr.x), Math.round(pr.y), Math.round(pr.w), Math.round(pr.h)],
+            cands, hit
+          }));
+
+          if (!(top > 0)) {
+            console.log('[pet] pat FAIL 头顶还没量到 —— measureHeadTop 没跑成');
+          } else if (!hit) {
+            console.log('[pet] pat FAIL 四个候选点都起不了手 —— 命中判定或 isHeadPatTarget 有问题');
+          } else {
+            /* ---- A 段：amt 爬升 + 何时进 holding（rise=6/s → 应 ~167ms）---- */
+            const trace = [];
+            for (let i = 0; i < 10; i++) {
+              await wait(60);
+              const s = st();
+              trace.push([Math.round((i + 1) * 60), s.state, Number(s.amt.toFixed(3))]);
+            }
+            const A = await window.pet?.saveShot?.('pat-a');
+
+            /* ---- B 段：摆动 + 害羞 + 抗议（对齐到 3.3s，越过 shyMs/nagMs）---- */
+            const sway = [];
+            for (let i = 0; i < 11; i++) {
+              await wait(300);
+              const s = st();
+              sway.push([Math.round((i + 1) * 300), s.state, Number(s.amt.toFixed(3)),
+                         rd(live.P().ANGLE_Z), rd(live.P().BODY_Z), rd(live.P().CHEEK),
+                         s.shy, s.nagged]);
+            }
+            const B = await window.pet?.saveShot?.('pat-b');
+
+            /* ---- C 段：松手 → amt 回落（fall=1.4/s → 应 ~0.7s 归零）---- */
+            fire('mouseup', window, hit.x, hit.y);
+            const atUp = st();
+            await wait(250);
+            const C1 = await window.pet?.saveShot?.('pat-c-250');
+            await wait(900);
+            const after = st();
+            const C2 = await window.pet?.saveShot?.('pat-c-1150');
+
+            console.log('[pet] pat result', JSON.stringify({
+              at: [hit.x, hit.y],
+              trace: { fields: ['t_ms', 'state', 'amt'], rows: trace },
+              sway: {
+                fields: ['t_ms', 'state', 'amt', 'headZ', 'bodyZ', 'cheek', 'shy', 'nagged'],
+                rows: sway
+              },
+              release: {
+                atUpState: atUp.state, amtAtUp: Number(atUp.amt.toFixed(3)),
+                afterState: after.state, amtAfter: Number(after.amt.toFixed(3))
+              },
+              ink: { a: A?.ink, b: B?.ink, c250: C1?.ink, c1150: C2?.ink }
+            }));
+          }
+          console.log('[pet] pat done');
+        }
+
         // ?snap=chat：走一遍完整对话链路（流式 + 情绪标签剥离 + 气泡 + 朗读）
         if (new URLSearchParams(location.search).get('snap') === 'chat') {
           live.input.value = '在吗';

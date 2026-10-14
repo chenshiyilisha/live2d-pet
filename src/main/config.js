@@ -145,7 +145,7 @@ const DEFAULT_CONFIG = {
   /* 角色交互反馈 */
   interaction: {
     rightMenu: true,      // 在角色身上右键弹出快捷菜单
-    headPat: true,        // 点头部有专属反应
+    headPat: true,        // 在头顶按住 = 一直蹭（A-B-C 三段，松手才收尾）
     dragReact: true,      // 拖着走的时候挣扎 / 不满
     pokeReact: true       // 连戳给出递进反应
   },

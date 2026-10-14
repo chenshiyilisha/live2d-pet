@@ -1222,7 +1222,7 @@ function buildMenuTemplate() {
     flag('motion', 'returnOnActivity', '有人操作时回到原位'),
     flag('chat', 'floatBubble', '对话气泡悬浮在头顶'),
     flag('interaction', 'rightMenu', '在角色身上右键出菜单'),
-    flag('interaction', 'headPat', '摸头有专属反应'),
+    flag('interaction', 'headPat', '按住头顶会一直蹭'),
     flag('interaction', 'dragReact', '拖着走会挣扎'),
     flag('interaction', 'pokeReact', '连戳有递进反应')
   ];

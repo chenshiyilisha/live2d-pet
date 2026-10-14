@@ -538,6 +538,66 @@ function setState(next) {
  *    真换一套素材时必须重新核对，不能照抄。
  */
 
+/* ---- 纹理 LOD：屏幕用不完的分辨率就别占显存 ----
+ *
+ * 实测（2026-10-14，窗口 308×342 / DPR 1.5）：人物墨迹在屏幕上只有约
+ * 120 CSS px 宽（180 物理px，见 debug/pet-window.png 的像素包围盒），而
+ * hiyori 的两张纹理都是 2048×2048 RGBA —— 一张 16MB，两张 32MB 显存。
+ * 折算 1 个纹素只落到约 0.06 屏幕像素，**过采样 17 倍**：这些显存买的
+ * 是屏幕根本显示不出来的细节。
+ *
+ * 做法：模型挂载后把每张纹理按 2^level 缩小，换掉 TextureSource 的
+ * resource。UV 是模型定义的，纹素变疏只影响清晰度、不会让画面错位。
+ * level 由「人物屏幕宽 × DPR × margin」反推，封顶 maxLevel：
+ *   · 1024 档在本机 DPR 1.5 下仍剩约 1.9 倍过采样，肉眼不可辨；
+ *   · 再往下（512）开始临界，不值得为 8MB 冒变糊的险 —— 所以 maxLevel=1。
+ *
+ * ⚠️ 介入点必须在**首次渲染之前**（mountModel 里 layout() 刚跑完）：
+ *    pixi 的纹素到首次 draw 才上传 GPU，之前换 resource 一分钱不花；
+ *    渲染过再换就要先传大的再换小的，白烧一轮带宽。
+ * ⚠️ 只换 resource + update()（resize 会刷新 _resourceId 触发重传），
+ *    采样样式（scaleMode / addressMode / alphaMode）都在原 source 上，
+ *    一个都不用手抄 —— 另建 TextureSource 漏抄一个就是渲染异常。
+ * ⚠️ 屏幕宽用放宽的 INK_W（比真实墨迹大四成，穿透判定故意取的松值）——
+ *    在这里方向正好是"少降"，偏保守。
+ * ⚠️ 只在挂载时算一次：用户后来放大（≤1.4×）由 margin=2 覆盖；真要
+ *    跟随缩放动态升降就得在 layout 里反复重采样，复杂度不值当。
+ */
+const TEX_LOD = { maxLevel: 1, margin: 2 };
+
+function applyTextureLod(m) {
+  if (cfg?.appearance?.textureLod === false) return;
+  const textures = m?.textures;
+  if (!Array.isArray(textures) || !textures.length) return;
+  const s = holder?.scale?.x || 0;
+  if (!s) return;
+  const onScreenPx = INK_W * s * (window.devicePixelRatio || 1) * TEX_LOD.margin;
+  for (let i = 0; i < textures.length; i++) {
+    const tex = textures[i];
+    const src = tex?.source;
+    const w = src?.resourceWidth || 0;
+    const h = src?.resourceHeight || 0;
+    if (!w || !h || !src.resource) continue;
+    const level = Math.max(0, Math.min(
+      TEX_LOD.maxLevel,
+      Math.floor(Math.log2(w / Math.max(1, onScreenPx)))
+    ));
+    if (level <= 0) continue;
+    const nw = w >> level;
+    const nh = h >> level;
+    /* ImageBitmap / Image 都能 drawImage；canvas 2d 存非预乘像素，
+     * 上传时仍按 source.alphaMode 走 —— 与原来的 ImageBitmap 一致。
+     * （webgl 的 texImage2D 本来就同时吃 canvas / ImageBitmap。） */
+    const cv = document.createElement('canvas');
+    cv.width = nw;
+    cv.height = nh;
+    cv.getContext('2d').drawImage(src.resource, 0, 0, nw, nh);
+    src.resource = cv;
+    src.update();
+    console.log('[pet] textureLod', JSON.stringify({ i, from: [w, h], to: [nw, nh], level }));
+  }
+}
+
 async function mountModel(name) {
   const def = MODELS[name] || MODELS.hiyori;
 
@@ -600,6 +660,8 @@ async function mountModel(name) {
   app.stage.addChild(holder);
 
   layout();
+
+  applyTextureLod(next);
 
   /* 运行时规整动作播放参数（**卡顿的真正修复在这里**）
    *

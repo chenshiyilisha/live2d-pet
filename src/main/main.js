@@ -1417,9 +1417,12 @@ function fmtMinutes(mins) {
   return `${Math.round(mins * 60)} 秒`;
 }
 
-/* 聊天分片 / 情绪的**唯一出口**：主窗渲染层拿它累积 replyBuffer
+/* 聊天分片 / 情绪 / 想法的**唯一出口**：主窗渲染层拿它累积 replyBuffer
  * （驱动 TTS 朗读与历史保存），悬浮气泡窗拿它做流式显示。
- * 别绕开这两个函数直接 webContents.send —— 气泡窗会漏字。 */
+ * 别绕开这几个函数直接 webContents.send —— 气泡窗会漏字。
+ *
+ * ⚠️ 想法（think）走**独立一条**：它不进 replyBuffer、不进历史、不被 TTS 念。
+ *    所以这个函数只发给气泡窗和主窗的显示元素，不碰任何"说出口"的累积。 */
 function emitChatChunk(t) {
   try { mainWindow?.webContents.send('chat:chunk', t); } catch { /* 窗口在销毁 */ }
   bubble.appendChunk(t);
@@ -1429,9 +1432,14 @@ function emitChatEmotion(e) {
   try { mainWindow?.webContents.send('chat:emotion', e); } catch { /* ignore */ }
 }
 
+function emitChatThink(t) {
+  try { mainWindow?.webContents.send('chat:think', t); } catch { /* ignore */ }
+  bubble.appendThink(t);
+}
+
 /* 逐字发出去，和真实的流式回复走同一条通道，渲染层不用区分。 */
 async function emitLocal(text, emotion = 'calm') {
-  const filter = createStreamFilter(emitChatChunk, emitChatEmotion);
+  const filter = createStreamFilter(emitChatChunk, emitChatEmotion, emitChatThink);
   const full = `${text}\n[emo:${emotion}]`;
   for (const ch of full) {
     filter.push(ch);
@@ -1495,7 +1503,16 @@ function chatStream(messages) {
   return streamLLM(messages, {
     ...cfg.llm,
     send: emitChatChunk,
-    sendEmotion: emitChatEmotion
+    sendEmotion: emitChatEmotion,
+    sendThink: emitChatThink
+  }).then((res) => {
+    /* 助手腔短语**拦不住** —— 流式的字已经进气泡了，事后删不掉。
+     * 这里只统计，用来判断提示词（config.js 的 style / format）到底管不管得住：
+     * 日志里频繁出现就说明该把禁用语写得更狠，或者升级成"边收边扣"的硬拦。 */
+    if (res && Array.isArray(res.tone) && res.tone.length) {
+      console.warn('[chat] 助手腔命中（提示词没管住）:', res.tone.join(' / '));
+    }
+    return res;
   });
 }
 

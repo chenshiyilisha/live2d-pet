@@ -7,6 +7,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('bubbleHost', {
   onBegin: (cb) => ipcRenderer.on('bubble:begin', () => cb()),
   onChunk: (cb) => ipcRenderer.on('bubble:chunk', (_e, t) => cb(t)),
+  /* 「心里想的」那一段 —— 和正文分开走，样式也不同（灰色小字，见 bubble.html） */
+  onThink: (cb) => ipcRenderer.on('bubble:think', (_e, t) => cb(t)),
   onEnd: (cb) => ipcRenderer.on('bubble:end', () => cb()),
   onAbort: (cb) => ipcRenderer.on('bubble:abort', () => cb()),
   onFull: (cb) => ipcRenderer.on('bubble:full', (_e, t) => cb(t)),

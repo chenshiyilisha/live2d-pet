@@ -43,6 +43,9 @@ contextBridge.exposeInMainWorld('pet', {
 
   chat: (messages) => ipcRenderer.invoke('chat:send', messages),
   onChunk: (cb) => ipcRenderer.on('chat:chunk', (_e, text) => cb(text)),
+  /* 「心里想的」那一段。和 onChunk 分开 —— 它不进 replyBuffer、不朗读、不进历史，
+   * 只显示成气泡顶部的一行灰色小字（见 pet.js 的 onThink）。 */
+  onThink: (cb) => ipcRenderer.on('chat:think', (_e, text) => cb(text)),
 
   /* 气泡 / 输入条显示时窗口要撑宽。宽度**由渲染层算好**（人物墨水宽 =
    * f(窗口高, 缩放, 模型)，几何在参数表里），主进程只负责落成 setBounds。 */

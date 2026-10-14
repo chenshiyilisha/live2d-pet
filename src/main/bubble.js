@@ -24,6 +24,7 @@
  * 生命周期（由 main.js 驱动，本模块不解析聊天内容）：
  *   beginStream()  清空 + 定位 + 显示"…"等待态
  *   appendChunk()  流式逐字追加（高度自适应，底边锚定、往上长）
+ *   appendThink()  一整段"心里想的"，显示在正文上方的小字行
  *   endStream()    摘掉等待态，AUTO_HIDE_MS 后自动淡出
  *   abortStream()  这轮失败，立刻藏
  *   showFull()     整段显示（say() 类临时播报：提醒 / 番茄钟播报）
@@ -253,6 +254,19 @@ function appendChunk(text) {
   } catch { /* 气泡窗刚关：主窗照常收 chunk，气泡这一轮缺席 */ }
 }
 
+/* 「心里想的」那一行（[think:…] 的内容）。
+ * 整段到达、不进正文 —— 但**不能进 appendChunk**：那段文本会进 TTS 和聊天历史，
+ * 想法是没打算说出口的，混进去就等于当众念出心声了。
+ * 与前缀无关的另一个通道，故单独一个函数。 */
+function appendThink(text) {
+  if (!enabled()) return;
+  try {
+    if (!win || win.isDestroyed()) return;
+    if (!win.isVisible()) { curH = MIN_H; place(); win.showInactive(); }
+    win.webContents.send('bubble:think', String(text));
+  } catch { /* ignore */ }
+}
+
 function endStream() {
   try {
     if (win && !win.isDestroyed()) win.webContents.send('bubble:end');
@@ -343,6 +357,7 @@ module.exports = {
   requestMeasure,
   beginStream,
   appendChunk,
+  appendThink,
   endStream,
   abortStream,
   showFull,

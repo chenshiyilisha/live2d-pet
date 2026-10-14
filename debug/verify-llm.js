@@ -22,7 +22,10 @@
 
 const assert = require('assert');
 
-const { createStreamFilter, streamLLM } = require('../src/main/llm');
+const {
+  createStreamFilter, streamLLM, LLM_TIMEOUT, hitAssistantTone,
+  THINK_MAX, THINK_HOLD
+} = require('../src/main/llm');
 
 let pass = 0;
 const failures = [];
@@ -49,12 +52,17 @@ async function checkAsync(name, fn) {
   }
 }
 
-/* 建一个过滤器，收集「发给界面的文本」和「收到的情绪」。 */
+/* 建一个过滤器，收集「发给界面的文本」和「收到的情绪 / 想法」。 */
 function makeFilter() {
   const chunks = [];
   const emotions = [];
-  const f = createStreamFilter((t) => chunks.push(t), (e) => emotions.push(e));
-  return { f, chunks, emotions, text: () => chunks.join('') };
+  const thinks = [];
+  const f = createStreamFilter(
+    (t) => chunks.push(t),
+    (e) => emotions.push(e),
+    (t) => thinks.push(t)
+  );
+  return { f, chunks, emotions, thinks, text: () => chunks.join('') };
 }
 
 /* 假 SSE 响应：把若干段 SSE 文本拼成一个 ReadableStream 交给 streamLLM。 */
@@ -175,6 +183,227 @@ check('end() 吐出残留的 pending', () => {
   assert.strictEqual(s.text(), '尾巴[未闭合');
 });
 
+/* 整段喂 / 逐字喂，两种都必须得到同一个结果 —— 清洗器是有状态的，
+ * "分片边界"是它最容易出问题的地方（和情绪标签那条一样）。 */
+function run(text, { byChar = true } = {}) {
+  const s = makeFilter();
+  if (byChar) for (const ch of text) s.f.push(ch);
+  else s.f.push(text);
+  s.f.end();
+  return s.text();
+}
+
+/* ══════════════ ①b 反助手腔后处理（2026-10-13 加） ══════════════ */
+
+console.log('\n①b createStreamFilter —— markdown / emoji / 开头填充词');
+
+check('markdown 行内记号被丢掉（星号加粗、反引号）', () => {
+  assert.strictEqual(run('**很**重要`代码`'), '很重要代码');
+});
+
+check('markdown 行首记号被丢掉，且分片切在记号中间也认得出', () => {
+  assert.strictEqual(run('- 第一点\n- 第二点'), '第一点\n第二点');
+  assert.strictEqual(run('1. 甲\n2. 乙'), '甲\n乙');
+  assert.strictEqual(run('### 标题\n正文'), '标题\n正文');
+});
+
+check('分隔线整行消失，不留空行', () => {
+  assert.strictEqual(run('上\n---\n下'), '上\n下');
+});
+
+check('行内的 - 和 # 是正常内容，不能动（C# / 3-2 / -5 度）', () => {
+  assert.strictEqual(run('C# 和 3-2 还有 -5 度'), 'C# 和 3-2 还有 -5 度');
+});
+
+check('emoji 被丢掉，且不留下双空格', () => {
+  assert.strictEqual(run('今天不错 ☀️ 出门吧'), '今天不错 出门吧');
+  assert.strictEqual(run('👍好'), '好');
+});
+
+check('开头的纯应答被剥掉（删掉不丢信息）', () => {
+  assert.strictEqual(run('好的，我在呢。'), '我在呢。');
+  assert.strictEqual(run('好嘞～这就去'), '这就去');
+});
+
+check('助手式开场句删到句末标点', () => {
+  assert.strictEqual(run('作为一个AI语言模型，我不能这样。'), '我不能这样。');
+  assert.strictEqual(run('很高兴为您解答！这个我知道'), '这个我知道');
+});
+
+check('整条回复就是一个填充词时**原样保留**（绝不能删成空字符串）', () => {
+  assert.strictEqual(run('好的'), '好的');
+  assert.strictEqual(run('很高兴为您服务。'), '很高兴为您服务。');
+});
+
+check('「没问题」「当然」这类是回答本身，不能进剥离表', () => {
+  assert.strictEqual(run('没问题，我来'), '没问题，我来');
+  assert.strictEqual(run('当然可以！'), '当然可以！');
+});
+
+check('普通开头不被误伤（不吞字）', () => {
+  for (const t of ['我在呢。', '前半后半', '你好呀', '嗯，听着呢。', '前一个是错的']) {
+    assert.strictEqual(run(t), t, `被改动了：${t}`);
+  }
+  assert.strictEqual(run('前半[未闭合'), '前半[未闭合');
+});
+
+check('填充词剥离 + 情绪标签 + 整段/逐字两种喂法结果一致', () => {
+  const src = '好的，我在呢。\n[emo:smile]';
+  assert.strictEqual(run(src, { byChar: true }), '我在呢。\n');
+  assert.strictEqual(run(src, { byChar: false }), '我在呢。\n');
+});
+
+check('tone() 统计助手腔但不改文本', () => {
+  const s = makeFilter();
+  s.f.push('总的来说，这个方案需要注意的是一定要留缓冲。');
+  s.f.end();
+  assert.strictEqual(s.text(), '总的来说，这个方案需要注意的是一定要留缓冲。', 'tone 不该改文本');
+  const hits = s.f.tone();
+  assert.ok(hits.includes('总的来说'), `没抓到最后统计：${JSON.stringify(hits)}`);
+  assert.ok(hits.includes('需要注意的是'));
+});
+
+check('hitAssistantTone 对干净的口语不报命中', () => {
+  assert.deepStrictEqual(hitAssistantTone('我在呢，今天累不累？'), []);
+  assert.deepStrictEqual(hitAssistantTone(''), []);
+});
+
+/* ══════════════ ①c 内心想法双通道（2026-10-14 加） ══════════════
+ *
+ * [think:…] 和 [emo:xxx] 共用同一套方括号扣留机制，但有三处不同，
+ * 每处都要单独锁住：
+ *   · 内容是一整段话，未闭合时的上限宽得多（不然正文里会闪出半截标签）
+ *   · 它会显示出来，所以要洗脏字符、压成一行、超长截断
+ *   · 它走独立通道，**一个字符都不许留在正文里**（留在正文 = 当众念心声） */
+
+console.log('\n①c createStreamFilter —— [think:…] 内心想法');
+
+check('想法从正文里剥干净，走独立通道', () => {
+  const s = makeFilter();
+  s.f.push('[think:这人怎么又来了]\n我在呢。\n[emo:smile]');
+  const emo = s.f.end();
+  assert.strictEqual(s.text(), '\n我在呢。\n');
+  assert.ok(!/think/i.test(s.text()), '正文里残留了想法标签');
+  assert.deepStrictEqual(s.thinks, ['这人怎么又来了']);
+  assert.deepStrictEqual(s.emotions, ['smile']);
+  assert.strictEqual(emo, 'smile');
+  assert.strictEqual(s.f.think(), '这人怎么又来了');
+});
+
+check('想法被分片切开也能拼回来（SSE 分片边界）', () => {
+  const s = makeFilter();
+  for (const p of ['[thi', 'nk:在想', '事情]', '嗯。']) s.f.push(p);
+  s.f.end();
+  assert.strictEqual(s.text(), '嗯。');
+  assert.deepStrictEqual(s.thinks, ['在想事情']);
+});
+
+check('逐字符喂得到同一个结果', () => {
+  const s = makeFilter();
+  for (const ch of '[think:有点困]\n早点睡。') s.f.push(ch);
+  s.f.end();
+  assert.strictEqual(s.text(), '\n早点睡。');
+  assert.deepStrictEqual(s.thinks, ['有点困']);
+});
+
+check('没写想法时通道是空的（think() 返回 null，不是空串）', () => {
+  const s = makeFilter();
+  s.f.push('就这样吧。\n[emo:calm]');
+  s.f.end();
+  assert.deepStrictEqual(s.thinks, []);
+  assert.strictEqual(s.f.think(), null);
+});
+
+check('大小写与空格容错： [ Think : 在想事情 ]', () => {
+  const s = makeFilter();
+  s.f.push('[ Think : 在想事情 ]嗯。');
+  s.f.end();
+  assert.deepStrictEqual(s.thinks, ['在想事情']);
+  assert.strictEqual(s.text(), '嗯。');
+});
+
+check('想法里的 markdown / emoji 也会被洗掉', () => {
+  const s = makeFilter();
+  s.f.push('[think:**真的**吗 😅]嗯。');
+  s.f.end();
+  assert.deepStrictEqual(s.thinks, ['真的吗']);
+});
+
+check('想法压成一行（它在气泡里只占一行，换行会撑高）', () => {
+  const s = makeFilter();
+  s.f.push('[think:第一句\n第二句]好。');
+  s.f.end();
+  assert.deepStrictEqual(s.thinks, ['第一句 第二句']);
+});
+
+check('超长想法被截断（它长在正文上方，不能把正文挤没）', () => {
+  const s = makeFilter();
+  const long = '啊'.repeat(THINK_MAX + 30);
+  s.f.push(`[think:${long}]嗯。`);
+  s.f.end();
+  const got = s.f.think();
+  assert.strictEqual(got.length, THINK_MAX + 1, '应该是 THINK_MAX 个字 + 一个省略号');
+  assert.ok(got.endsWith('…'));
+});
+
+check('整条想法洗成空（全是 emoji）就当作没写', () => {
+  const s = makeFilter();
+  s.f.push('[think:🎉🎉]嗯。');
+  s.f.end();
+  assert.deepStrictEqual(s.thinks, []);
+  assert.strictEqual(s.f.think(), null);
+  assert.strictEqual(s.text(), '嗯。');
+});
+
+check('未闭合的 [think: 扣得比普通方括号久（emo 的 64 上限对它太短）', () => {
+  const s = makeFilter();
+  const near = '想'.repeat(60);          // '[think:' + 60 字 = 67 字符，已越过 64
+  s.f.push(`[think:${near}`);
+  assert.strictEqual(s.text(), '', '想法被提前放行了 —— 正文里会闪出半截标签');
+  s.f.push('了]嗯。');
+  s.f.end();
+  assert.strictEqual(s.text(), '嗯。');
+  assert.strictEqual(s.f.think(), near + '了');
+});
+
+check('未闭合且超过想法上限时仍然放行（绝不吞字）', () => {
+  const s = makeFilter();
+  const body = '想'.repeat(THINK_HOLD + 10);
+  s.f.push(`[think:${body}`);
+  assert.ok(s.text().includes(body), '超长的未闭合内容被吞掉了');
+});
+
+check('[thinking] 这种没有冒号的方括号不算想法标签，原样保留', () => {
+  const s = makeFilter();
+  s.f.push('我在[thinking]这个词。');
+  s.f.end();
+  assert.strictEqual(s.text(), '我在[thinking]这个词。');
+  assert.deepStrictEqual(s.thinks, []);
+});
+
+/* 想法里混进方括号：和 [emo:xxx] 同款语义 —— 以**第一个** ] 收尾，
+ * 剩下的原样进正文。会切得难看，但不吞字，这是两者共用的边界。 */
+check('想法里混进方括号：第一个 ] 收尾，其余原样进正文（不吞字）', () => {
+  const s = makeFilter();
+  s.f.push('[think:他说[好]吧]嗯。');
+  s.f.end();
+  assert.strictEqual(s.f.think(), '他说[好');
+  assert.strictEqual(s.text(), '吧]嗯。');
+});
+
+check('想法 + 填充词 + 情绪三件套同时出现（整段/逐字一致）', () => {
+  const src = '[think:又来活了]\n好的，这就去。\n[emo:happy]';
+  for (const byChar of [true, false]) {
+    const s = makeFilter();
+    if (byChar) for (const ch of src) s.f.push(ch);
+    else s.f.push(src);
+    s.f.end();
+    assert.strictEqual(s.text(), '\n这就去。\n', `byChar=${byChar}`);
+    assert.deepStrictEqual(s.thinks, ['又来活了']);
+    assert.deepStrictEqual(s.emotions, ['happy']);
+  }
+});
+
 /* ══════════════ ② extraBody 合并边界 ══════════════ */
 
 console.log('\n② streamLLM —— extraBody 合并与契约保护');
@@ -271,6 +500,94 @@ const BASE = { baseUrl: 'https://example.invalid/v1', apiKey: 'k', model: 'm', s
     assert.strictEqual(got.join(''), '我在呢。\n');
     assert.deepStrictEqual(emos, ['surprised']);
     assert.strictEqual(r.emotion, 'surprised');
+  });
+
+  /* ══════════════ ③ 请求超时（2026-10-13 加） ══════════════
+   *
+   * 在这之前 fetch 完全没有超时 —— 服务端连上后不再吐数据，请求就永远不返回，
+   * 气泡永远停在"打字中"，只能杀进程。这两条测的就是"不再挂住"。
+   * 用真实的 AbortController 走到 abort，不是模拟。 */
+
+  console.log('\n③ streamLLM —— 请求超时');
+
+  /* 连上了、但一个字节都不吐的响应，并且**真的**响应 abort 信号。 */
+  function stallingResponse(signal) {
+    return {
+      ok: true,
+      status: 200,
+      body: new ReadableStream({
+        start(controller) {
+          signal.addEventListener('abort', () => {
+            controller.error(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          });
+        }
+      }),
+      text: async () => ''
+    };
+  }
+
+  await checkAsync('连上了但不吐数据 → stallMs 后中断，并给出可读原因', async () => {
+    global.fetch = async (_u, opts) => stallingResponse(opts.signal);
+    const t0 = Date.now();
+    const r = await streamLLM([{ role: 'user', content: 'x' }], { ...BASE, stallMs: 600, totalMs: 4000 });
+    const dt = Date.now() - t0;
+    assert.strictEqual(r.ok, false, '应该失败');
+    assert.ok(/没有收到新数据|超时/.test(r.error), `错误信息不可读：${r.error}`);
+    assert.ok(dt >= 500 && dt < 3000, `中断时机不对：${dt}ms`);
+  });
+
+  await checkAsync('整轮超过 totalMs 也会中断', async () => {
+    global.fetch = async (_u, opts) => stallingResponse(opts.signal);
+    const t0 = Date.now();
+    const r = await streamLLM([{ role: 'user', content: 'x' }], { ...BASE, stallMs: 30000, totalMs: 1200 });
+    const dt = Date.now() - t0;
+    assert.strictEqual(r.ok, false);
+    assert.ok(/整轮超过/.test(r.error), `应该报"整轮超时"：${r.error}`);
+    assert.ok(dt < 4000, `中断太慢：${dt}ms`);
+  });
+
+  await checkAsync('正常回复完全不受影响，超时定时器不残留', async () => {
+    stubFetch(sse('我在呢。\n[emo:calm]'));
+    const got = [];
+    const r = await streamLLM([{ role: 'user', content: 'x' }], {
+      ...BASE, stallMs: 600, totalMs: 1200, send: (t) => got.push(t)
+    });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(got.join(''), '我在呢。\n');
+  });
+
+  await checkAsync('手改配置写成 0 / 负数时被钳住，不会每轮立刻中断', async () => {
+    for (const bad of [0, -1, 'x', null, NaN]) {
+      stubFetch(sse('在的'));
+      const r = await streamLLM([{ role: 'user', content: 'x' }], { ...BASE, stallMs: bad, totalMs: bad });
+      assert.strictEqual(r.ok, true, `stallMs=${bad} 时把正常请求掐了：${r.error}`);
+    }
+  });
+
+  /* ══════════════ ④ 默认值与区间只有一处真相 ══════════════ */
+
+  console.log('\n④ 常量互验');
+
+  await checkAsync('config.js 的 llm 超时默认值 = llm.js 的 LLM_TIMEOUT', async () => {
+    /* config.js 只用到 app.getPath，stub 掉 electron 就能直接 require
+     * （和 verify-config-defaults.js 同一套办法）。 */
+    const Module = require('module');
+    const orig = Module.prototype.require;
+    Module.prototype.require = function (id) {
+      if (id === 'electron') return { app: { getPath: () => require('os').tmpdir() } };
+      return orig.apply(this, arguments);
+    };
+    let def;
+    try {
+      def = require('../src/main/config').DEFAULT_CONFIG.llm;
+    } finally {
+      Module.prototype.require = orig;
+    }
+    assert.strictEqual(def.stallMs, LLM_TIMEOUT.stallMs,
+      'config.js 的 stallMs 默认值和 llm.js 的 LLM_TIMEOUT 不一致 —— 改一处必须改两处');
+    assert.strictEqual(def.totalMs, LLM_TIMEOUT.totalMs, '同上，totalMs 不一致');
+    assert.ok(LLM_TIMEOUT.stallMs >= LLM_TIMEOUT.stallMin && LLM_TIMEOUT.stallMs <= LLM_TIMEOUT.stallMax);
+    assert.ok(LLM_TIMEOUT.totalMs >= LLM_TIMEOUT.totalMin && LLM_TIMEOUT.totalMs <= LLM_TIMEOUT.totalMax);
   });
 
   global.fetch = realFetch;

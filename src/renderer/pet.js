@@ -42,6 +42,9 @@ const canvas = document.getElementById('canvas');
 const stageEl = document.getElementById('stage');
 const bubble = document.getElementById('bubble');
 const bubbleText = document.getElementById('bubble-text');
+/* 「心里想的」那一行。和 bubbleText 分开：它不进 replyBuffer、不朗读、不进历史，
+ * 只在气泡里显示成一行灰色小字（回退布局用；浮窗布局在 bubble.html 里同款）。 */
+const bubbleThink = document.getElementById('bubble-think');
 const composer = document.getElementById('composer');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
@@ -1509,6 +1512,7 @@ function say(text, autoHideMs = 9000) {
     if (busy) return;
     bubble.classList.add('hidden');
     bubbleText.textContent = '';
+    bubbleThink.textContent = '';
   }, autoHideMs);
 }
 
@@ -1524,6 +1528,7 @@ function hideUI() {
   } else {
     bubble.classList.add('hidden');
     bubbleText.textContent = '';
+    bubbleThink.textContent = '';
   }
   setState(State.IDLE);
 }
@@ -1599,6 +1604,15 @@ window.pet?.onChunk((text) => {
 // 情绪由主进程从回复的 [emo:xxx] 标签里解析出来后单独发过来，
 // 气泡文本里那一段已经被剥干净了，不用在渲染层再过滤一次。
 window.pet?.onEmotion((name) => setEmotion(name));
+
+/* 「心里想的」([think:…]) —— 主进程剥出来后单独发来，整段到达。
+ * ⚠️ 刻意**不进 replyBuffer**：那个变量驱动 TTS 朗读和聊天历史，
+ *    想法是没打算说出口的东西，混进去就等于当众念心声了。
+ *    这里只把它塞进气泡顶部那一行。 */
+window.pet?.onThink((text) => {
+  if (floatBubble()) return;          // 浮窗模式由气泡窗自己画那一行
+  bubbleThink.textContent = text;
+});
 
 // 托盘 / 右键菜单里改了开关，重新读一遍配置
 // （语音朗读、主动搭话、互动行为、系统状态显示等开关都在里面）
@@ -1696,6 +1710,7 @@ async function proactiveSpeak() {
    * 这里只管主窗 #bubble（回退模式）。 */
   if (!floatBubble()) {
     bubbleText.textContent = '';
+    bubbleThink.textContent = '';
     bubble.classList.add('waiting');
     bubble.classList.remove('hidden');
   }
@@ -1714,6 +1729,7 @@ async function proactiveSpeak() {
   } else if (!floatBubble()) {
     bubble.classList.add('hidden');
     bubbleText.textContent = '';
+    bubbleThink.textContent = '';
   }
   pokeIdleTimer();
 }
@@ -1735,6 +1751,7 @@ async function sendMessage() {
   gotFirstChunk = false;
   if (!floatBubble()) {
     bubbleText.textContent = '';
+    bubbleThink.textContent = '';
     bubble.classList.add('waiting');
     bubble.classList.remove('hidden');
   }

@@ -85,11 +85,17 @@
   "baseUrl": "https://api-inference.modelscope.cn/v1",  // 服务地址
   "apiKey":  "ms-xxxxxxxx",                             // 令牌
   "model":   "Qwen/Qwen3.8-Flash-Next",                 // 模型 Id
-  "extraBody": { "enable_thinking": false }             // 可选：透传给服务方的开关
+  "extraBody": { "enable_thinking": false },            // 可选：透传给服务方的开关
+  "stallMs": 20000,                                     // 可选：多久没有新数据就放弃
+  "totalMs": 120000                                     // 可选：整轮最多等多久
 }
 ```
 
 **改完不用重启** —— 每次对话都会重新读配置。
+
+两个超时（`stallMs` / `totalMs`）拦的是**服务卡住**：服务端连上之后不再吐数据，
+没有超时的话请求就永远不返回，气泡会一直停在"打字中"。`stallMs` 每收到一段数据
+就重新计时，所以正常的长回答不会被它误杀。
 
 以魔搭（ModelScope）的免费推理 API 为例：
 
@@ -109,13 +115,25 @@
 - **对话历史会跨重启保留**（`chat-history.json`，最多 16 轮）。她说话越来越短、
   开始复读半句话时，多半是历史被污染了，删掉那个文件就好。
 
+她说的每句话在进气泡之前都会过一遍**清洗**：丢掉 markdown 记号（星号加粗、
+井号标题、列表符号、代码块）、丢掉 emoji，并剥掉开头的填充词（「好的，」
+「作为一个AI，……」）。气泡只有 272px 宽还要被 TTS 念出来，这些在这里只有坏处。
+清洗只做**能确定性判定**的事，判不准的一律原样放行 —— 宁可漏掉一个星号，也不能吞字。
+助手腔的整句删不掉（字已经吐进气泡了），那部分靠人设里明令禁止，外加事后统计：
+命中会写进日志（`[chat] 助手腔命中`），用来判断禁用语到底管不管得住。
+
+她还可以有**没说出口的念头**：在回复的最开头另起一行写 `[think:一行心里话]`，
+那句话会显示成气泡顶部的一行灰色小字 —— **不进正文、不进聊天历史、不会被语音念出来**，
+写点与正话不一样的（犹豫、吐槽、腹诽），没有就不写。整行超过 80 字截断，
+markdown 和 emoji 照样清洗。措辞在「角色设定 → 内心想法协议」里可改。
+
 验证工具（都走真实代码路径，不是 curl 近似）：
 
 ```bash
 node debug/llm-probe.js                 # 按当前配置探一次：首字延迟 / 推理阶段 / 情绪标签
 node debug/llm-probe.js --model A,B,C   # 一次比多个模型
 node debug/llm-probe.js --list          # 列服务端当前提供的模型
-node debug/verify-llm.js                # 标签剥离 + extraBody 合并边界的单测
+node debug/verify-llm.js                # 标签剥离 / 清洗 / 想法通道 / 超时 / extraBody 边界（53 项）
 ./debug/gen-driver.sh driver-llm.js     # 实跑：从输入框打进消息，验完整链路
 ```
 

@@ -73,6 +73,26 @@
     content: "…";
     animation: blink 1.1s steps(4, end) infinite;
   }
+  /* 「心里想的」那一行。恒在正文**上方** —— 人设要求模型把 [think:…]
+   * 写在最前面，所以它是"先动念、再开口"的顺序，追加时不会把正文顶下去。
+   * 空的时候不占高度（:empty），说话时气泡里根本看不出有这个区域。
+   * ⚠️ 它长在正文上方，所以一定要**短**：llm.js 的 THINK_MAX 会截断，
+   *    这里的单行省略号只是第二道保险（万一有极长的英文单词兜不住）。 */
+  #think {
+    display: block;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #8a8a8e;
+    font-style: italic;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #think:not(:empty) {
+    margin-bottom: 5px;
+    padding-bottom: 5px;
+    border-bottom: 1px dashed #e6e6e9;
+  }
   @keyframes blink { 0%, 60% { opacity: 1; } 61%, 100% { opacity: 0.2; } }
   /* 淡出（主进程 hide 前来不及做动画，这里只做 show 的入场） */
   body { animation: pop 0.16s ease-out; }
@@ -81,11 +101,12 @@
 </head>
 <body>
   <div id="wrap">
-    <div id="shell" class="waiting"><span id="text"></span></div>
+    <div id="shell" class="waiting"><span id="think"></span><span id="text"></span></div>
     <div id="tail"></div>
   </div>
 <script>
   const shell = document.getElementById('shell');
+  const think = document.getElementById('think');
   const text = document.getElementById('text');
 
   /* 内容高度变化（流式打字 / 换行）→ 把整页高度报给主进程。
@@ -99,6 +120,7 @@
 
   window.bubbleHost.onBegin(() => {
     text.textContent = '';
+    think.textContent = '';        // 上一轮的想法不能留到这一轮
     shell.classList.add('waiting');
     report();
   });
@@ -108,14 +130,22 @@
     shell.scrollTop = shell.scrollHeight;
     report();
   });
+  /* 想法整段到达（llm.js 里是等 ']' 闭合才发的），直接替换即可。
+   * 不清 waiting：她还在想，正文一个字都没出来呢。 */
+  window.bubbleHost.onThink((t) => {
+    think.textContent = t;
+    report();
+  });
   window.bubbleHost.onEnd(() => shell.classList.remove('waiting'));
   window.bubbleHost.onAbort(() => {
     text.textContent = '';
+    think.textContent = '';
     shell.classList.remove('waiting');
     report();
   });
   window.bubbleHost.onFull((t) => {
     text.textContent = t;
+    think.textContent = '';        // 整段播报（提醒 / 番茄钟）没有想法，别留着旧的
     shell.classList.remove('waiting');
     report();
   });

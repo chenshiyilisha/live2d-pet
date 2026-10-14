@@ -38,8 +38,31 @@ console.log('[B] main.js —— 分片路由收拢 + 生命周期接线');
   ok(/function emitChatChunk\(t\)\s*\{/.test(m), 'emitChatChunk 收拢函数存在');
   const direct = (m.match(/send\('chat:chunk'/g) || []).length;
   ok(direct === 1, `chat:chunk 直发只许出现 1 次（emitChatChunk 内），实际 ${direct}`);
-  ok(/createStreamFilter\(emitChatChunk,\s*emitChatEmotion\)/.test(m), 'emitLocal 走收拢出口');
+  ok(/createStreamFilter\(emitChatChunk,\s*emitChatEmotion,\s*emitChatThink\)/.test(m),
+    'emitLocal 走收拢出口（正文 / 情绪 / 想法三路都走）');
   ok(/send:\s*emitChatChunk/.test(m), 'chatStream 走收拢出口');
+
+  /* 想法通道（2026-10-14 加的 [think:…]）—— 和 chat:chunk 完全同款的收拢要求：
+   * 有人图省事直接 webContents.send('chat:think') 绕过去，浮窗那一行就永远不亮；
+   * 或者只接了浮窗、忘了回退布局（#bubble-think），关掉悬浮气泡功能就整个消失。 */
+  const directThink = (m.match(/send\('chat:think'/g) || []).length;
+  ok(directThink === 1, `chat:think 直发只许出现 1 次（emitChatThink 内），实际 ${directThink}`);
+  ok(/sendThink:\s*emitChatThink/.test(m), 'chatStream 把想法接到收拢出口');
+  ok(/chat:think/.test(read('main/preload.js')), '主窗 preload 暴露 chat:think');
+  ok(/bubble:think/.test(read('main/bubble-preload.js')), '气泡窗 preload 暴露 bubble:think');
+
+  const bjs = read('main/bubble.js');
+  ok(/function appendThink\(text\)/.test(bjs), 'bubble.js 有 appendThink');
+  ok(/\n\s*appendThink,/.test(bjs), 'appendThink 在导出面上');
+
+  /* 想法显示在两个布局里各有一份，两边都得在 —— 否则换了布局它静默消失。 */
+  ok(/id="think"/.test(read('main/bubble.html')), '浮窗气泡有 #think 那一行');
+  ok(/id="bubble-think"/.test(read('renderer/index.html')), '回退布局有 #bubble-think');
+  ok(/onThink/.test(read('renderer/pet.js')), '渲染层订阅了 onThink');
+  /* ⚠️ 想法那一行必须在 #shell **内部**：它一跑到 shell 外面，窗口高度算式
+   *    就少算它一段，长内容会裁尾巴 —— 而 [H] 那组数字还会全部对得上。 */
+  ok(/<div id="shell"[^>]*><span id="think">/.test(read('main/bubble.html')),
+    '想法那一行在 #shell 内部（在壳外就得重算 MAX_H）');
 
   const begin = (m.match(/bubble\.beginStream\(\)/g) || []).length;
   const end = (m.match(/bubble\.endStream\(\)/g) || []).length;

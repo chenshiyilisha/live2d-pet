@@ -99,7 +99,9 @@ includes('第一句用默认名自称', p1, `你叫${DEFAULT_NAME}，`);
 includes('含身份定位', p1, '是常驻在这台电脑里的搭子');
 includes('含说话风格', p1, '说话干脆、直接、有主见');
 includes('含回答方式', p1, '先给结论，再给理由');
-includes('含输出格式约束', p1, '不要用 markdown 列表和代码块');
+includes('含输出格式约束', p1, '不要用 markdown');
+includes('输出格式里禁掉 emoji（情绪走 [emo:xxx]）', p1, '不要用 emoji');
+includes('说话风格里列了助手腔禁用语', p1, '很高兴为你解答');
 includes('含表情协议', p1, '[emo:xxx]');
 
 console.log('\n=== 人设：名字跟着走 ===');

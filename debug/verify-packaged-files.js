@@ -145,8 +145,13 @@ const localModels = path.join(ROOT, 'src', 'assets', 'models');
 if (fs.existsSync(localModels)) {
   const count = (d) => {
     let n = 0;
+    /* ⚠️ 手工备份（*.orig / *.bak / *.rej / *~）不算 —— 打包流程本来就不拷它们。
+     *    拿它们当基准会让这条校验永远差几个文件：本地留过一个 .orig，
+     *    就报「产物 20 / 源码 21」，看着像模型丢了，其实是拿草稿在量成品。 */
+    const isBackup = (name) => /\.(orig|bak|rej)$|~$/.test(name);
     const walk = (p) => { for (const e of fs.readdirSync(p, { withFileTypes: true })) {
-      if (e.isDirectory()) walk(path.join(p, e.name)); else n++; } };
+      if (e.isDirectory()) walk(path.join(p, e.name));
+      else if (!isBackup(e.name)) n++; } };
     if (fs.existsSync(d)) walk(d);
     return n;
   };

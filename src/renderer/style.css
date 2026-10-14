@@ -77,6 +77,25 @@ html, body {
   pointer-events: none;
 }
 
+/* 「心里想的」那一行（[think:…]）。恒在正文**上方** —— 人设要求模型把想法
+ * 写在最前面，所以是"先动念、再开口"的顺序，正文不会被它顶下去。
+ * 空的时候完全不占高度（:empty），平时看到的气泡和以前一模一样。
+ * ⚠️ 宽度固定，所以单行省略号是第二道保险（第一道是 llm.js 的 THINK_MAX 截断）。 */
+#bubble-think {
+  font-size: 12px;
+  line-height: 1.5;
+  font-style: italic;
+  color: #8a8a8e;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#bubble-think:not(:empty) {
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed #e6e6e9;
+}
+
 /* 等待首字时的呼吸提示 */
 #bubble.waiting #bubble-text::after {
   content: "…";

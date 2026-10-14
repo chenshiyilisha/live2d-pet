@@ -1,4 +1,7 @@
-# 开源参考调研（第 6 轮）· 逐项对照与可借鉴清单
+# 开源参考调研（第 6–7 轮）· 逐项对照与可借鉴清单
+
+> 第 6 轮（Nexus / Desktop-pet / chatgpt-desktopPet / Live2d-TTS-Audio-LipSync）见下；
+> 第 7 轮（AI 伴侣生态：Open-LLM-VTuber / astrbot 主动聊天插件 / awesome-ai-companion）见文末。
 
 > 时间：2026-10-14 · 动机：本项目 VAD / 表情抖动 / 纹理 LOD / 真口型 / 媒体感知 / 主动搭话
 > 六项均为自研，**没有一行参考过现成实现**。这一轮专门去找同类开源工程，回答两个问题：
@@ -290,4 +293,162 @@ Nexus-main/src/features/context/desktopContext.ts   引用前缀防注入
 Desktop-pet(app/shared/emotion-map.ts)              表情名映射（反面教材）
 Desktop-pet(app/electron/proactive-aware.ts)        事件驱动主动搭话 ★
 Live2d-TTS-Audio-LipSync/src/views/ModelViewer.vue  频域口型（反面教材）
+```
+
+---
+
+# 第 7 轮 · AI 伴侣生态（2026-10-14）
+
+## 7.0 方法
+
+- **走 GitHub 官方 API**（`search/repositories?sort=stars`，免 token），命中后 `git/trees?recursive=1`
+  取文件树，再用 `raw.githubusercontent.com` / `git/blobs/<sha>`（base64）取单文件。
+  **不用搜索引擎**——第 5 轮的教训是聚合/镜像站会把仓库名拼错。
+- 额外拿 **`DasterProkio/awesome-ai-companion`**（971★，「人机恋开源项目大全」，作者声明逐项目读过代码）
+  当索引入口，避免只看 star 榜漏掉垂直项目。
+- 抓下的证据在 `.research-tmp/refs/{olv,astrbot}/`（已 gitignore）。
+
+## 7.1 候选地图
+
+| 项目 | ★ | 语言 | 对口的位置 | 结论 |
+| --- | --- | --- | --- | --- |
+| `Open-LLM-VTuber/Open-LLM-VTuber` | 14095 | Python | 全链路：ASR / TTS / 口型 / **打断** / 主动搭话 | ★ 本轮最大参照系，**只借单点代码**（整体架构不搬） |
+| `Open-LLM-VTuber/Open-LLM-VTuber-Web` | — | TS | 前端口型与打断 | 借「打断必须复位口型」 |
+| `DBJD-CR/astrbot_plugin_proactive_chat` | — | Python | **主动搭话的调度与准入** | ★ 判据分层 + 退避（本轮最实用） |
+| `DasterProkio/awesome-ai-companion` | 971 | HTML | 索引 | 拿到 200+ 项目地图 |
+| `kiyotakali/Miru` | 175 | Python | 桌宠 + 记忆 | macOS 优先，思路级 |
+| `x380kkm/Live2DPet` | 87 | JS | Live2D + VOICEVOX TTS | TTS 引擎选型参考 |
+| `gameswu/NyaDeskPet` | 18 | TS | Live2D + Agent（同为 Electron 系） | 小项目，看布局 |
+| `pixelomer/Shijima-Qt` · `gil/shimeji-ee` · `DalekCraft2/Shimeji-Desktop` | 200/60/52 | C++/Java | 桌宠行为物理（抛掷 / 重力 / 爬窗口） | 行为库参照 |
+| `ChanceYu/CoPet` · `Shellishack/vibebud` | 36/63 | Rust/TS | 响应「AI 编程助手在跑任务」 | 事件源思路 |
+| `DonkeyKing01/BriefyPet` | 46 | Rust | RSS 摘要 + 提醒 | 与我们的 `reminder.js` 同方向 |
+| `KoljaB/RealtimeSTT` · `dscripka/openWakeWord` · `arcosoph/nanowakeword` | 10188/2844/130 | Python | 唤醒词 + 流式 VAD | 免手方案（偏重，列为备选） |
+| `myths-labs/prometheus-avatar` | 17 | TS | LLM 输出驱动 Live2D 的 SDK | 对照我们的参数级方案 |
+
+## 7.2 代码级可借鉴（4 条，均有文件证据）
+
+### ① 并行合成 + 序号重排投递 —— `olv/tts_manager.py:16-113` ★
+
+问题：我们是「合成一句 → 播 → 再合下一句」，N 句回复的延迟是**串行叠加**的。
+
+他们的做法：所有句子**并发**合成，每个 payload 带一个 `sequence_number`，由单独的
+`_process_payload_queue()` 按序投递（`buffered_payloads` 字典 + `_next_sequence_to_send` 游标）：
+
+```python
+buffered_payloads[sequence_number] = payload
+while self._next_sequence_to_send in buffered_payloads:
+    next_payload = buffered_payloads.pop(self._next_sequence_to_send)
+    await websocket_send(json.dumps(next_payload))
+    self._next_sequence_to_send += 1
+```
+
+可搬处：`src/renderer/tts.js` 把「合成」与「播放」解耦——首句延迟不变，后续句子**零等待**。
+注意两件事：常驻 PS 合成进程要限并发（我们目前是串行请求队列，建议上限 2）；
+`clear()` 的语义是 `task_list.clear()` + 取消 sender + **重建 queue**，正好对应我们的 `interrupt()`。
+
+### ② 🔴 被打断时「记忆里只记听到的部分」—— `olv/basic_memory_agent.py:195-220`
+
+我们**真实存在**这个缺口：用户打断 TTS 后，`chat-history.json` 仍记着完整回复，
+下一轮模型以为自己全说完了 → 出现「我刚说到哪了」的错位。
+
+他们的 `handle_interrupt(heard_response)` 是三段式：
+
+```python
+if self._interrupt_handled:            # ① 幂等：打断只处理一次
+    return
+self._interrupt_handled = True
+if self._memory and self._memory[-1]["role"] == "assistant":
+    self._memory[-1]["content"] = heard_response + "..."   # ② 只记听到的 + 省略号
+...
+self._memory.append({"role": interrupt_role, "content": "[Interrupted by user]", ...})  # ③ 显式标注
+```
+
+③ 的 role 还是**可配的**（`interrupt_method`：`system` / `user`）——让模型明确知道自己被打断。
+落地：渲染层 `interrupt()` 回传「已播出字数」，主进程落历史时截断 + 省略号 + 插一条标注。
+我们的 `createStreamFilter` 本来就是分片吐字，回传成本很低。
+
+### ③ 主动搭话的准入判据：把「重排」和「停」分开 —— `astrbot/gating_feature.py:24-92` ★
+
+```python
+if block_reason == "quiet_hours":      return StageResult.RESCHEDULE   # 重新调度
+...
+if unanswered_count >= max_unanswered: return StageResult.STOP         # 暂停，等用户开口
+```
+
+判据只有三类：**免打扰时段 / 会话禁用 / 未回复次数超限**，但返回值分两种语义
+（`RESCHEDULE` = 换个时间再来，`STOP` = 闭嘴直到用户说话）。参数默认值可直接借
+（`astrbot/_conf_schema.json`）：
+
+- `quiet_hours` = `"1-7"` —— 字符串「开始-结束」（私聊默认 1:00–7:00；群聊 `"2-6"`），
+  跨零点用一个串就能表达
+- `min_interval_minutes` 30 / `max_interval_minutes` 600 —— **区间随机**（`random.randint`），不是固定值
+- `max_unanswered_times` 4（私聊）/ 2（群聊），填 0 不限
+- `group_idle_trigger_minutes` 30 —— 沉默多久才考虑触发
+- 分条发送间隔：`interval_method` = `random`（`1.5, 3.5` 秒）或 **`log`（按字数 y=log_base(x)）**
+
+我们的现状：`proactiveSpeak` 三闸门被拦是**固定 2s 重试**（只等于 `RESCHEDULE`，且间隔不随机）；
+**没有**免打扰时段，也**没有**「用户一直不理就闭嘴」的退避。
+改法很小：闸门返回改成枚举 `{OK, RETRY, STOP}`，`RETRY` 用随机退避，`STOP` 记 `unanswered` 计数、
+用户说话清零。
+
+### ④ 🔴 打断必须**显式复位口型** —— `olv/web-audio-manager.ts:20-58`
+
+```ts
+model._wavFileHandler.releasePcmData();
+model._wavFileHandler._lastRms = 0.0;      // 兜底复位
+model._wavFileHandler._sampleOffset = 0;
+```
+
+他们注释写得很直白：`Release PCM data to stop lip sync calculation in update()`，还要**再手动把
+`_lastRms` 归零作为 fallback**；配合我们 `pet.js` 里 `lipEnv` 无波形时**回退正弦波**的语义——
+如果打断后 `speaking` 没在同一次状态变更里清掉，嘴会继续动。
+动作项：核对 `tts.js interrupt()` → `pet.js` 的 `speaking` / `lipEnv` 是否原子归零，
+并在 `verify-lip.js` 加一条「打断后 1s 内 `ParamMouthOpenY` 全 0」的断言。
+
+## 7.3 思路级（按性价比排序）
+
+1. **免打扰时段** —— 零新依赖（本机时间即可），配置就一个 `"1-7"` 字符串。凌晨三点别搭话。
+2. **未回复退避** —— 连续 N 次没人理自动静默，用户开口清零。（1、2 都是用户**真能感知**的）
+3. **媒体播放中不插话** —— 我们已有 `media.js` 的 `Playing` 状态，判据只差一行。
+4. **前台疑似专注时收敛** —— `fullscreen.js` 已经在看前台，可扩成「写代码 / 全屏」一类。
+5. **分条回复的条间停顿按字数取对数** —— 借 `interval_method=log`；我们已有分句，只差间隔曲线。
+6. **抛掷 / 重力 / 爬窗口** —— Shimeji 系；`motion.js` 已有拖拽与贴边，抛掷是自然的下一步。
+7. **用户音量基线** —— `ears` 把音高 / 能量 / 停顿与用户自己的基线比，产出「今天比平时小声」这种
+   相对线索；我们的 RMS / VAD 基建已经够用。
+8. **唤醒词** —— `openWakeWord` / `nanowakeword` 作可选免手入口；现阶段按住说话更省事，备选。
+9. **语音 3D 耳畔感** —— `binaural-voice`（KU100 HRIR），有趣但优先级低。
+10. **反应「AI 编程助手在跑任务」** —— `CoPet` / `vibebud`：Claude Code / Codex 跑任务时桌宠有反应；
+    与第 4 条同源，事件源要自己找。
+
+## 7.4 明确**不抄**
+
+- **Open-LLM-VTuber 整体**：Python 服务端 + WebSocket + 浏览器前端，我们是单进程 Electron，
+  照搬等于换项目（单点代码照抄，架构不抄）。
+- **Silero VAD / RealtimeSTT**：神经 VAD 与常驻 STT；我们是按住说话 + 双条件能量判据，够用且零依赖。
+- **重型本地 TTS**（GPT-SoVITS / CosyVoice / fish-speech）：体积与显存都不合适，我们已有 WinRT + 系统音色。
+- **porcupine**：唤醒词要 access key + 商业授权。
+- **长期记忆 / 向量库**（Ombre-Brain、kiwi-mem、Serein…）：我们场景是桌宠闲聊，6 条历史够用；
+  真要做也该是「Markdown + 遗忘曲线」的极简版，不是这些工程。
+- **只抄 star 数的项目**：`NyaDeskPet`（18★）看布局即可，代码质量未验证。
+
+## 7.5 本轮的空白（想找但没找到）
+
+- **Electron / Node 侧读 Windows GSMTC 的现成实现**：仍然没有（第 6 轮结论不变；
+  `awesome-ai-companion` 的 Perception 一节全是 Python / MCP 侧）。
+- **桌面宠物的「参数级情绪插值」**：仍无同类。别人的路线是 expression 名映射、
+  4 维连续模型（Nexus）或让 LLM 直接给表情标签（Desktop-pet）。
+- **纹理 LOD**：本轮再搜仍无命中，依然是我们独创。
+
+## 附：本轮抓下的证据
+
+```
+olv/tts_manager.py              并行合成 + 序号重排投递          ★
+olv/single_conversation.py      对话回合编排（打断 / 历史写入）
+olv/basic_memory_agent.py       记忆：被打断只记听到的部分        ★
+olv/sentence_divider.py         pysbd + 缩写表 + 多语言分句（608 行）
+olv/web-audio-manager.ts        打断时释放 WavFileHandler        ★
+olv/proactive_speak_prompt.txt  主动搭话提示词（全文一句话）
+astrbot/gating_feature.py       准入判据 + RESCHEDULE / STOP      ★
+astrbot/scheduler_service.py    随机间隔调度 + 未回复上限（792 行）
+astrbot/_conf_schema.json       免打扰 / 间隔 / 上限的默认参数     ★
 ```

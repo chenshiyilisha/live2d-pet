@@ -7,7 +7,7 @@ import {
   MODELS, MODEL_NAME, INK_TOP_C_RATIO, P, State, EMOTION,
   EMO_SPEED, EMO_SPEED_DEFAULT, PAT, buildEmoTarget
 } from './params.js';
-import { configureTTS, initTTS, speak, stopSpeak, ttsVoiceInfo } from './tts.js';
+import { configureTTS, initTTS, speak, enqueueSpeech, takeSentences, stopSpeak, ttsVoiceInfo, ttsQueueState, setSpeechObserver } from './tts.js';
 import { abortRecording, configureRecorder } from './recorder.js';
 
 // 渲染进程崩溃时默认什么线索都拿不到，先把未捕获异常转发出来
@@ -86,6 +86,12 @@ const history = [];
 let replyBuffer = '';
 let gotFirstChunk = false;
 let busy = false;
+/* 朗读的**分句缓冲**（边收边念，见下面 feedSpeech）。
+ * ⚠️ 和 replyBuffer 是两笔账，别合并：
+ *   · replyBuffer 给气泡和历史，收尾时要 `replace(/\s+$/, '')`；
+ *   · speechBuf 是"还没念出口的字"，够一句就被切走，念完即空。
+ *   合并的话，尾巴上的空行会被念一遍、而切走的句子又会从气泡里消失。 */
+let speechBuf = '';
 // 口型
 let mouthPhase = 0;
 let mouthLevel = 0;
@@ -105,6 +111,8 @@ const emoEff = { ...EMOTION.calm };
  * 规矩 7：异步等待的状态一律用状态机，不用一堆 bool。
  *   idle ──按下(在头顶)──▶ rising ──amt到1──▶ holding ──松手──▶ falling ──amt到0──▶ idle
  *                                     └───── 松手（rising 期间）──────┘
+ *   holding 里按时间依次触发：shyMs 害羞 → nagMs 抗议 → escapeMs **自己挣脱**
+ *   （挣脱也走 falling，且置 patEscaped 让随后那次 mouseup 不算点击）。
  * 规矩 6/26：被拖拽、被静默抢占时走 patAbort()（立刻归零，不走回落）——
  * 因为紧接着就有别的动作接管，慢慢回落会和它叠在一起。 */
 let patState = 'idle';    // idle | rising | holding | falling
@@ -114,6 +122,7 @@ let patMs = 0;            // 本次摸头已持续毫秒（只在 rising/holding
 let patReleased = false;  // rising 期间就松手了 —— 等它升完再回落，别半途砍断
 let patNagged = false;    // 这次已经抗议过了（只抗议一次）
 let patShy = false;       // 这次已经转过 shy（只转一次）
+let patEscaped = false;   // 她已经自己挣脱过 —— 随后那次鼠标松开不算点击
 // 上一帧往各参数里叠加的增量。每帧先把上一帧的增量减掉再写新的，
 // 否则叠加会一层层累积下去（尤其是被 focus()/motion 也在写的头部角度）。
 const emoApplied = {};
@@ -302,6 +311,7 @@ function patStart() {
   patReleased = false;
   patNagged = false;
   patShy = false;
+  patEscaped = false;
   window.pet?.activity?.();   // 手放上来了就算"有活动"：别在这时候溜达走
   setEmotion('happy');
 }
@@ -327,6 +337,7 @@ function patAbort() {
   patReleased = false;
   patNagged = false;
   patShy = false;
+  patEscaped = false;
 }
 
 /* 每帧推进。⚠️ 必须在 buildEmoTarget() 之前调（它要用 patAmt/patPhase）。 */
@@ -349,6 +360,14 @@ function updatePat(dt) {
     if (!patNagged && patMs >= PAT.nagMs) {
       patNagged = true;
       say('别摸啦，头发要乱了。');
+    }
+    /* 抗议过还不撒手 → 她自己挣脱（走 C 段回落，不理会手还在不在）。
+     * ⚠️ 置 patEscaped 是为了让随后那一次 mouseup **不算点击** ——
+     *    否则她挣脱完、用户松手，会被当成"戳了一下"再播一次 TapBody。 */
+    if (!patEscaped && patMs >= PAT.escapeMs) {
+      patEscaped = true;
+      say('……不理你了。');
+      patRelease();
     }
     return;
   }
@@ -1128,7 +1147,20 @@ async function boot() {
       pokeIdleTimer,
       /* ?snap=load 用它**强制**摆一次加载态（真的去调 builder，不是复制一份 DOM），
        * 好把"转圈时的牌"和"出数后的牌"量下来比尺寸 —— 这是加载态唯一会出错的地方。 */
-      renderStatsLoading
+      renderStatsLoading,
+      /* ── ?snap=tts 用的朗读探针 ──────────────────────────────
+       * 两件事在 mock 里测不到，只能在真实渲染层里跑：
+       *   ① 系统 TTS 引擎的 onend 到底会不会按时触发（兜底定时器就是为它写的）；
+       *   ② 队列在真引擎下是否真的一条条推进。
+       * ⚠️ forceTTS 只改**本进程内存里**的 cfg（默认 tts 是关的，不改它测不了）；
+       *    它不是配置写入路径 —— 正常开关仍然只走主进程的 patchConfig。 */
+      forceTTS: () => { if (cfg?.tts) cfg.tts.enabled = true; },
+      ttsState: () => ttsQueueState(),
+      ttsVoice: () => ttsVoiceInfo(),
+      setSpeechObserver,
+      feedSpeech,
+      enqueueSpeech,
+      stopSpeak
     });
   }
 
@@ -1676,6 +1708,16 @@ window.addEventListener('mouseup', () => {
     return;
   }
 
+  /* 她自己挣脱过了 → 这一次松手什么都不算。
+   * ⚠️ 必须在 patState 判断**之前**：挣脱的 falling 只有 0.71s，
+   *    用户往往在她已经回到 idle 之后才松手 —— 那时不拦就成了"戳了一下"，
+   *    会凭空播一次 TapBody 并甩出输入框。 */
+  if (patEscaped) {
+    patEscaped = false;
+    setState(State.IDLE);
+    return;
+  }
+
   /* 摸头这一路：走 A-B-C 的收尾，**不再**进 onPetClicked() ——
    * 否则会再播一次 TapBody（那是"被戳一下"，跟摸头是两回事），
    * 而且还会重复 setEmotion('happy')，把起手的势冲掉。 */
@@ -1820,6 +1862,37 @@ const floatBubble = () => cfg?.chat?.floatBubble !== false;
  *  对话
  * ========================================================== */
 
+/* ── 边收边念（流式朗读）──────────────────────────────────────
+ *
+ * 原来是"整段收完才开口"：speak(replyBuffer) 挂在回复结束那一步上。
+ * 回复一长，第一声要等好几秒，而气泡里的字早就一行行滚出来了 ——
+ * 观感是"她先看完再念给你听"。
+ *
+ * 现在：每收到一段增量就喂进缓冲，够一句立刻丢进 tts.js 的播放队列，
+ * 队列在后台一条接一条念。首声延迟从"整段生成时间"降到"第一句话的时间"。
+ *
+ * ⚠️ 分句接到的是**清洗之后**的文本（llm.js 的三级清洗在 emitChatChunk 之前
+ *    就跑完了），所以不会念出 markdown 星号和 [emo:] 标签。
+ * ⚠️ `[think:…]` 走的是另一个通道（onThink），不进这里 —— 心声不该被念出来。
+ * ⚠️ 没开语音时立刻返回（默认就是关的）：不做缓冲、不跑正则。 */
+function feedSpeech(text) {
+  if (!text || !cfg?.tts?.enabled) return;
+  speechBuf += text;
+  const { sentences, rest } = takeSentences(speechBuf, false);
+  speechBuf = rest;
+  for (const s of sentences) enqueueSpeech(s);
+}
+
+/* 回复收尾：把缓冲里剩下的（多半是最后那句没写标点的）念掉。
+ * 🔴 这里**不能**写成 speak(replyBuffer) —— 全文已经分批念过了，
+ *    那样会把整段再念一遍（这是分句之后最容易犯的错）。 */
+function flushSpeech() {
+  if (!cfg?.tts?.enabled) { speechBuf = ''; return; }
+  const { sentences } = takeSentences(speechBuf, true);
+  speechBuf = '';
+  for (const s of sentences) enqueueSpeech(s);
+}
+
 /* 🔴 桥的调用一律写成 `window.pet?.fn?.(...)` —— **两个 `?.`，缺一不可**。
  *
  * `?.` 护的是**对象**，不是**方法**：`window.pet?.onThink(...)` 在
@@ -1839,6 +1912,7 @@ window.pet?.onChunk?.((text) => {
     if (!floatBubble()) bubble.classList.remove('waiting');
   }
   replyBuffer += text;
+  feedSpeech(text);              // 边收边念：够一句就送播放队列
   if (!floatBubble()) {
     bubbleText.textContent = replyBuffer;
     bubble.scrollTop = bubble.scrollHeight;
@@ -1969,7 +2043,7 @@ async function proactiveSpeak() {
     if (!floatBubble()) bubbleText.textContent = replyBuffer;
     history.push({ role: 'assistant', content: replyBuffer });
     saveHistory();
-    speak(replyBuffer);
+    flushSpeech();
   } else if (!floatBubble()) {
     bubble.classList.add('hidden');
     bubbleText.textContent = '';
@@ -1984,6 +2058,12 @@ async function sendMessage() {
 
   busy = true;
   input.value = '';
+
+  /* 上一轮还没念完就被新消息打断 —— 清掉它的队列与分句缓冲，
+   * 否则新回复的朗读要排在旧句后面（"怎么还在念上一句"）。
+   * 原来整段念时靠 speak() 里的 cancel 顺带做到了，分句之后必须显式清。 */
+  stopSpeak();
+  speechBuf = '';
 
   history.push({ role: 'user', content: text });
   if (history.length > 16) history.splice(0, history.length - 16);
@@ -2012,6 +2092,9 @@ async function sendMessage() {
   if (!res?.ok) {
     showStatus(res?.error || '请求失败');
     history.pop();
+    /* 已经念出去半句话，剩下的不念了 —— 失败时不该继续把残缺内容读完。 */
+    stopSpeak();
+    speechBuf = '';
     if (!floatBubble()) bubble.classList.add('hidden');
     setState(State.IDLE);
     busy = false;
@@ -2024,7 +2107,7 @@ async function sendMessage() {
   if (!floatBubble()) bubbleText.textContent = replyBuffer;
   history.push({ role: 'assistant', content: replyBuffer });
   saveHistory();
-  speak(replyBuffer);   // 有开语音就念出来，它会自己把状态切到 SPEAKING
+  flushSpeech();        // 尾巴念掉；正文已经边收边念过（见 feedSpeech）
 
   // 说完了，稍微停一下再回到空闲
   setTimeout(() => {

@@ -212,6 +212,10 @@ const stripComments = (s) =>
         `起手(${PAT.rise}) 比收尾(${PAT.fall}) 快 —— 手放上去要跟手，拿开要愣一下`);
       ok(PAT.shyMs < PAT.nagMs,
         `先害羞(${PAT.shyMs}ms) 再抗议(${PAT.nagMs}ms) —— 顺序反了她会先骂人再脸红`);
+      /* 挣脱必须排在抗议**之后**：先提醒、不听再翻脸。反过来就是
+       * "一句话不说就甩手"，用户不知道自己哪里惹到她了。 */
+      ok(PAT.nagMs < PAT.escapeMs,
+        `抗议(${PAT.nagMs}ms) 在挣脱(${PAT.escapeMs}ms) 之前 —— 先提醒再挣脱`);
     }
 
     /* ③ patAmt === 0 时**零侵入**：逐字段必须与基础情绪全等。

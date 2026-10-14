@@ -774,6 +774,58 @@ export function attachSnapProbes(live) {
           console.log('[pet] pat done');
         }
 
+        /* ?snap=tts：边收边念的端到端（真引擎）
+         *
+         * 有两件事在 mock 里测不到，只能在真渲染层里跑：
+         *   ① 系统 TTS 引擎的 onend 到底会不会按时来（兜底定时器就是为它写的）；
+         *   ② 队列在真引擎下是否真的**一条条**推进（写错了就是"只听见最后一句"，
+         *      短回复听不出问题，长回复才露馅）。
+         *
+         * 喂法模拟真实流式：把一段回复按标点切成 7 片、每片间隔 120ms 喂进
+         * feedSpeech。判据是**第一句在全部喂完之前就已经开口** —— 那就是
+         * "边收边念"真的成立了（整段念的话要等所有片到齐才开始）。
+         * ⚠️ 这一项**会真的出声**（用的是系统音色），不是哑测试。 */
+        if (new URLSearchParams(location.search).get('snap') === 'tts') {
+          const t0 = Date.now();
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          live.forceTTS();                    // 默认 tts 是关的，只改本进程内存里的 cfg
+          const spoken = [];
+          live.setSpeechObserver((text, t) => spoken.push([Math.round(t - t0), text]));
+
+          const parts = ['你好呀。', '我是阿岩，', '就住在这个角落。', '……', '你要是有', '想说的', '就敲我一下。'];
+          const fedAt = [];
+          for (const p of parts) {
+            live.feedSpeech(p);
+            fedAt.push([Math.round(Date.now() - t0), live.ttsState().queued, live.ttsState().active]);
+            await wait(120);
+          }
+          const feedDoneAt = Math.round(Date.now() - t0);
+
+          /* 等队列念完（真引擎读三句短话 ≈ 6~8s；不靠猜，轮询到空为止） */
+          let waited = 0;
+          while (waited < 20000 && live.ttsState().active) { await wait(200); waited += 200; }
+          await wait(400);
+
+          const tts = live.ttsState();
+          const firstSpokenAt = spoken.length ? spoken[0][0] : null;
+          const okOne = firstSpokenAt !== null && firstSpokenAt < feedDoneAt;
+          const okTwo = spoken.length >= 3 && !tts.active && tts.queued === 0;
+          console.log('[pet] tts result', JSON.stringify({
+            voice: live.ttsVoice(),
+            feed: { fields: ['t_ms', 'queued', 'active'], rows: fedAt, doneAt: feedDoneAt },
+            spoken: { fields: ['t_ms', 'text'], rows: spoken },
+            waitedMs: waited + 400,
+            checks: {
+              earlyStart: okOne,          // 首句早于"喂完"= 边收边念成立
+              drained: okTwo              // 念完且队列归零 = 队列真在推进
+            }
+          }));
+          console.log('[pet] tts', okOne && okTwo ? 'PASS' : 'FAIL');
+          live.setSpeechObserver(null);
+          live.stopSpeak();
+          await sweep('shot-tts');
+        }
+
         // ?snap=chat：走一遍完整对话链路（流式 + 情绪标签剥离 + 气泡 + 朗读）
         if (new URLSearchParams(location.search).get('snap') === 'chat') {
           live.input.value = '在吗';

@@ -39,6 +39,12 @@ build/
 # WorkBuddy 工作区数据：每日记忆文件与备份，属本机私有内容
 .workbuddy/
 
+# 密钥 / 本地凭据 —— 本仓目前不读 .env，纯粹是预防：将来接本地模型或
+# agent 工具时十有八九要落一个（调研见同类项目把真实 API key 提进仓库的教训）。
+.env
+.env.*
+!.env.example
+
 # 编辑器与系统杂物
 .vscode/
 .idea/

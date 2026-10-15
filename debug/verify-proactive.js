@@ -170,6 +170,53 @@ console.log('\n══════ C. 主进程侧 ══════\n');
     '主进程对 ctx 做了缺省兜底（老版本渲染层传 undefined 也不炸）');
 }
 
+console.log('\n══════ D. 免打扰时段与「未回复退避」（2026-10-15 加） ══════\n');
+
+/* 11) 退避计数：开口 +1、用户搭理归零 */
+{
+  const hits = (PET.match(/proactiveUnanswered\+\+/g) || []).length;
+  check(hits === 2, `两条出声路径都记了一笔（本地话术 / API 各一处，找到 ${hits} 处）`);
+
+  const n = PET.slice(PET.indexOf('function noteUserResponse()'), PET.indexOf('function scheduleAfterQuietHours()'));
+  check(/proactiveUnanswered = 0/.test(n) && /pokeIdleTimer\(\)/.test(n),
+    'noteUserResponse = 退避归零 + 把闲置计时重新武装');
+  check(/if \(proactiveUnanswered === 0\) return;/.test(n),
+    '本来就没欠账时不白排定时器（直接返回）');
+
+  /* ⚠️ 每个"明确回应"的入口都要调它 —— 漏一个的表现是"用户点了她也没用"，
+   *    而且只在"她已经被冷落到上限"这个状态下才看得出来，非常隐蔽。 */
+  check(/noteUserResponse\(\);\s*\n\s*busy = true;/.test(PET), '发消息那一路清零');
+  check(/noteUserResponse\(\);.*\/\/ 点她/.test(PET), '点她那一路清零');
+  check(/noteUserResponse\(\);.*\/\/ 摸完/.test(PET), '摸完松手那一路清零');
+  /* 反向：mousemove 那条（5 秒一次）**不许**清零，否则退避形同虚设 */
+  const move = PET.slice(PET.indexOf("window.addEventListener('mousemove'"), PET.indexOf('scheduleHitTest(e.clientX'));
+  check(!/noteUserResponse/.test(move), '🔴 鼠标划过**不算**搭理（那个 5 秒就能触发一次）');
+}
+
+/* 12) 上限的钳法 + "到上限就彻底停手" */
+{
+  const cap = PET.slice(PET.indexOf('function maxUnanswered()'), PET.indexOf('function refreshProactiveConfig()'));
+  check(/Number\.isFinite\(n\) && n >= 0 \? Math\.floor\(n\) : 2/.test(cap),
+    '上限有钳法：配置写成乱码 / 负数 → 2（不许静默变成"永不开口"）');
+  check(/if \(cap > 0 && proactiveUnanswered >= cap\) return 'unanswered';/.test(PET),
+    '闸门里有这一条（返回的字符串给日志辨认）');
+  check(/if \(why === 'unanswered'\) \{ clearTimeout\(idleTimer\); return; \}/.test(PET),
+    '🔴 到上限 = 彻底停手：**不排新定时器**（排了就是每 8 分钟空转一次、永远不出声）');
+  check(/const cap = maxUnanswered\(\);\s*\n\s*if \(cap > 0 && proactiveUnanswered >= cap\) return;/.test(PET),
+    'pokeIdleTimer 里也拦住（那里是所有"人还在"入口的收口处）');
+}
+
+/* 13) 配置与接线 */
+{
+  const CFG = read('src/main/config.js');
+  const seg = CFG.slice(CFG.indexOf('proactive: {'), CFG.indexOf('media: {'));
+  check(/quietHours:\s*'23-8'/.test(seg), "默认免打扰时段 '23-8'（跨零点）");
+  check(/maxUnanswered:\s*2/.test(seg), '默认未回复上限 2');
+  check(/refreshProactiveConfig\(\);/.test(PET), '配置变更后重算区间（免得改完还要重启）');
+  check(/refreshProactiveConfig\(\);\s*\n\s*pokeIdleTimer\(\);/.test(PET),
+    '重算在排计时器**之前**（顺序反了会拿旧区间判一次）');
+}
+
 console.log('\n──────────────────────────────');
 if (failures) {
   console.log(`❌ 失败 ${failures} 项`);

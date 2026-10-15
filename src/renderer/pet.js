@@ -8,7 +8,8 @@ import {
   EMO_SPEED, EMO_SPEED_DEFAULT, PAT, buildEmoTarget,
   EMO_SETTLE_EPS, EMO_SETTLE_HOLD_MS, emotionDeviation
 } from './params.js';
-import { configureTTS, initTTS, speak, enqueueSpeech, takeSentences, stopSpeak, ttsVoiceInfo, ttsQueueState, setSpeechObserver, lipEnv } from './tts.js';
+import { configureTTS, initTTS, speak, enqueueSpeech, takeSentences, stopSpeak, ttsVoiceInfo, ttsQueueState, setSpeechObserver, lipEnv, spokenText, resetSpoken, isSpeaking } from './tts.js';
+import { parseQuietHours, inQuietHours, msUntilQuietEnd } from './quiet-hours.js';
 import { abortRecording, configureRecorder } from './recorder.js';
 import { rollFactors } from './jitter.js';
 
@@ -1145,12 +1146,16 @@ async function boot() {
      *     见 tts.js 的 lipEnv）→ 嘴直接跟随真实音量；
      *   · 没有（系统音色，或这一句刚回退过）→ 退回原来的正弦波。
      * ⚠️ lipEnv 必须**每帧都调**：它内部带快攻慢放的平滑，调用频率变了
-     *    平滑就变；而且队列空了（state 已回 IDLE）时还要靠它把嘴收回去。 */
+     *    平滑就变；而且队列空了（state 已回 IDLE）时还要靠它把嘴收回去。
+     * 🔴 正弦波那条分支的判据是 `state === SPEAKING && isSpeaking()` ——
+     *    **两个都要**。只判 state 会踩到一个静默故障：打断时被作废的那条
+     *    不会推进状态机（tts.js 的 finish 里 gen 不符就 return），
+     *    state 会卡在 SPEAKING，于是她闭着嘴还在那儿一张一合。 */
     const env = lipEnv(dt);
     if (env !== null) {
       mouthLevel = env;
       setParam(P.MOUTH_OPEN, mouthLevel);
-    } else if (state === State.SPEAKING) {
+    } else if (state === State.SPEAKING && isSpeaking()) {
       mouthPhase += dt * 10;
       mouthLevel = (Math.sin(mouthPhase) * 0.5 + 0.5) * 0.7 + 0.15;
       setParam(P.MOUTH_OPEN, mouthLevel);
@@ -1189,6 +1194,9 @@ async function boot() {
   });
 
   initTTS();
+  /* 免打扰区间先解析一次：后面每一步首次触发都要问它。
+   * （配置里没这个键 / 写错了 → parseQuietHours 返回 null = 不设免打扰。） */
+  refreshProactiveConfig();
   pokeIdleTimer();
 
   /* 底座先摆个转圈顶着：第一条 monitor:stats 要等主进程采到数才来
@@ -1837,6 +1845,7 @@ window.addEventListener('mouseup', () => {
     }
     setState(State.LISTENING);
     showComposer();
+    noteUserResponse();        // 摸完她松手 = 明确搭理（同上）
     pokeIdleTimer();
     return;
   }
@@ -1856,6 +1865,7 @@ window.addEventListener('mouseup', () => {
 function onPetClicked() {
   if (!model) return;
   window.pet?.activity?.();
+  noteUserResponse();          // 点她 = 明确搭理（proactive 退避归零）
   bumpClickStreak();
 
   try { model.motion('TapBody'); } catch { /* 模型没这个组就算了 */ }
@@ -2060,12 +2070,16 @@ window.pet?.onConfigChanged?.(async () => {
       layout();
     }
   } catch { /* ignore */ }
+  /* 免打扰时段 / 未回复上限可能刚被改过 —— cfg 已经换成新的了，重算一遍。
+   * （refreshProactiveConfig 会顺手把退避计数归零：用户刚动过设置 = 人还在。） */
+  refreshProactiveConfig();
   pokeIdleTimer();
 });
 
 window.pet?.onHistoryCleared?.(() => {
   history.length = 0;
   stopSpeak();
+  resetSpoken();            // 历史都清了，"念到哪"那笔账跟着作废
   hideUI();
 });
 
@@ -2075,6 +2089,69 @@ window.pet?.onHistoryCleared?.(() => {
 
 function saveHistory() {
   window.pet?.saveHistory?.(history);
+}
+
+/* ============================================================
+ *  打断：停朗读 + 把"她说到哪了"记进历史
+ * ==========================================================
+ *
+ *  出处：竞品调研第 7 轮，Open-LLM-VTuber 的
+ *  `basic_memory_agent.handle_interrupt()`（见 docs/open-source-reference.md）。
+ *  它干两件事：把最后一条 assistant 换成 `听到的部分 + "..."`，
+ *  再插一条 `[Interrupted by user]`。
+ *
+ *  我们缺的这个是真问题：**回复是流式边收边念的**，用户在她念到一半时
+ *  发下一条消息，历史里躺着的却是**完整回复** —— 模型据此以为"我已经说完了，
+ *  用户也知道全部内容"，于是下一轮要么直接接下文、要么把没说完的当说过了。
+ *  截成"她实际念出去的"之后，模型看到的是"（半句）……[被打断]"。
+ * ========================================================== */
+
+/* 记号文本只写一次：判幂等（下面第一行）和写入用的是同一个常量 ——
+ * 分两处写早晚会漂。 */
+const INTERRUPT_MARK = '[Interrupted by user]';
+
+/**
+ * 用户打断时，把历史里最后那条 assistant 截成"实际念出去的部分"。
+ *
+ * @returns {boolean} 是否真的截了（false = 没在念 / 念完了 / 对不上，历史原样）
+ *
+ * ⚠️ 幂等：上一条已经是打断标记就直接返回（同一个回合里被调两次不会写两条）。
+ * ⚠️ **对不上就不动**：念出去的部分必须是她那句话的前缀（分句只按标点切、
+ *    不改一个字，正常情况下必然成立）。对不上说明中间被清洗/改写过了 ——
+ *    这时候宁可保留完整回复，也不要写一条驴唇不对马嘴的历史。
+ * ⚠️ 无论走哪条返回路径，`spokenBuf` 都已经清过（下一轮从零起算）。
+ */
+function truncateHistoryOnInterrupt() {
+  const heard = spokenText();
+  resetSpoken();
+  if (!heard) return false;
+  if (history.length && history[history.length - 1].content === INTERRUPT_MARK) return false;
+
+  const last = history[history.length - 1];
+  if (!last || last.role !== 'assistant') return false;
+  if (!last.content.startsWith(heard)) return false;
+  if (last.content.length === heard.length) return false;   // 念完了，不算被打断
+
+  last.content = heard.replace(/\s+$/, '') + '...';
+  history.push({ role: 'user', content: INTERRUPT_MARK });
+  return true;
+}
+
+/**
+ * 停朗读**并把状态机一起收回**。
+ *
+ * ⚠️ 所有"只是想让她闭嘴"的地方都用这个，别直接 stopSpeak()：
+ *    tts.js 的 interrupt 靠代际令牌作废在途回调，而被作废那条**不会**
+ *    再推状态（见 finish 里的 `if (gen !== ttsGen) return`），
+ *    state 就留在 SPEAKING。两个后果都是静默的：
+ *      · 嘴闭着还在跑正弦波（渲染层那个分支要 state === SPEAKING）；
+ *      · 全屏静默解除之后，proactive 的 `state !== IDLE` 判据会**永久拦死**
+ *        她开口 —— 用户看到的是"打了一把游戏回来她再也不主动说话了"。
+ */
+function stopSpeaking() {
+  stopSpeak();
+  resetSpoken();
+  if (state === State.SPEAKING && !busy) setState(State.IDLE);
 }
 
 // 没配 Key 时主动搭话走本地短句池 —— 否则每次都只会弹出那句
@@ -2102,6 +2179,54 @@ function proactiveLine(emo) {
   return use[Math.floor(Math.random() * use.length)];
 }
 
+/* ---- 主动搭话的两条"别烦人"约束 ------------------------------------
+ *
+ * 出处：竞品调研第 7 轮里 astrbot 主动聊天插件的 gating_feature.py +
+ * quiet_hours 配置（见 docs/open-source-reference.md 的可借鉴 ③）。
+ * 它把"此刻不能发"分成两种语义：
+ *   · **能等**的（免打扰时段 / 会话被禁）        → 重新调度；
+ *   · **别追了**的（未回复次数到了上限）          → 停掉这次流程。
+ * 我们照这个分法落地，因为两者的重试代价完全不同：
+ *   免打扰要排到时段结束（2 秒探一次 = 空转一整晚）；
+ *   到上限就该彻底停手（继续排 = 每 8 分钟空转一次，用户永远不理就永远空转）。
+ *
+ * ⚠️ 这两个键都在配置文件里，**不进托盘**（规矩 5：菜单要短；它们不是
+ *    "打开/关闭"型的开关，是参数）。改完在托盘任意开关上点一下就会重读。 */
+let proactiveUnanswered = 0;    // 连着几次开口没被搭理；用户一回应就归零
+let quietRange = null;          // 解析后的免打扰区间（parseQuietHours 的结果）
+
+/** 未回复上限。⚠️ 同样的钳法：配置写成负数/乱码一律回落到 2，不许静默变成"永不开口"。 */
+function maxUnanswered() {
+  const n = Number(cfg?.proactive?.maxUnanswered);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 2;
+}
+
+/* 配置变动时重算。⚠️ 顺手把退避计数归零 —— 用户刚动了设置，
+ * 那是"人还在"的强信号，没必要接着冷着她。 */
+function refreshProactiveConfig() {
+  quietRange = parseQuietHours(cfg?.proactive?.quietHours);
+  proactiveUnanswered = 0;
+}
+
+/* 用户**明确**搭理她了（发消息 / 点她 / 摸她）—— 退避归零并把闲置计时重新排上。
+ *
+ * ⚠️ 刻意不含"鼠标从窗口上划过"：那个 5 秒就能触发一次（见 mousemove 那段），
+ *    算进来的话退避等于没做 —— 用户只是挪了下鼠标，她就又能连着追两句。 */
+function noteUserResponse() {
+  if (proactiveUnanswered === 0) return;
+  proactiveUnanswered = 0;
+  pokeIdleTimer();
+}
+
+/* 撞上免打扰时段 → 排到时段结束那一刻再看。
+ * ⚠️ 两头都要夹：下限 1 分钟（别刚跨过边界又反复贴上来），
+ *    上限 30 分钟（配置写错也不至于把她冻住一整天）。 */
+function scheduleAfterQuietHours() {
+  clearTimeout(idleTimer);
+  const ms = msUntilQuietEnd(quietRange, new Date());
+  idleTimer = setTimeout(proactiveSpeak, Math.min(Math.max(ms, 60 * 1000), 30 * 60 * 1000));
+}
+
 function pokeIdleTimer() {
   clearTimeout(idleTimer);
   /* 全屏静默中不排新的主动搭话 —— 所有"人还在"的入口（点击、划过、提醒、
@@ -2110,6 +2235,10 @@ function pokeIdleTimer() {
    * 这里不需要自己补。 */
   if (quiet) return;
   if (!cfg || cfg.proactive?.enabled === false) return;
+  /* 已经被冷落到上限：别再排了 —— 排了也是"到点必被闸门拦下"的空转。
+   * 她重新开口的时机是**用户有反应**（noteUserResponse）。 */
+  const cap = maxUnanswered();
+  if (cap > 0 && proactiveUnanswered >= cap) return;
   // 下限 0.05 分钟（3 秒）：配置写错时不至于让角色一直碎碎念
   const mins = Number(cfg.proactive?.idleMinutes);
   const safe = Number.isFinite(mins) && mins >= 0.05 ? mins : 8;
@@ -2122,7 +2251,9 @@ function pokeIdleTimer() {
  *    `pokeIdleTimer()`，也就是**再等一个完整的 idleMinutes（默认 8 分钟）**。
  *    而主动搭话本来就全靠撞时机（她可能正被摸着、输入框还开着、情绪没平息），
  *    罚一个整周期的结果是：这次闲置里她基本不会再开口了 —— 功能看着像坏的。
- *    改成 2 秒后再看一眼，代价只是每秒半次布尔判断。 */
+ *    改成 2 秒后再看一眼，代价只是每秒半次布尔判断。
+ * ⚠️ 只有"等等就好"那三条走这条路（busy / 不在空闲态 / 情绪没安定）。
+ *    免打扰和"到上限"各有各的走法 —— 见下面 proactiveSpeak 里的分派。 */
 const PROACTIVE_RETRY_MS = 2000;
 
 function retryIdleTimer() {
@@ -2131,7 +2262,9 @@ function retryIdleTimer() {
 }
 
 /* 此刻能不能开口。返回 '' 表示可以，否则返回不能的原因（进日志）。
- * ⚠️ 三个条件都只是"延后"，不是"取消" —— 全都交给 retry 去重看。 */
+ *
+ * ⚠️ 前三条只是"延后"，交给 retryIdleTimer 去看；后两条的语义**不同**
+ *    （分派见 proactiveSpeak）：免打扰要排到时段结束，到上限要彻底停手。 */
 function proactiveBlockedBy() {
   if (busy) return 'busy';
   if (state !== State.IDLE) return 'state:' + state;
@@ -2139,6 +2272,14 @@ function proactiveBlockedBy() {
    * 她刚被打断一次、刚溜达回来、或手还在头上时，情绪参数都还在往目标走；
    * 这时候插话读起来是"抢拍"。 */
   if (emoSteadyMs < EMO_SETTLE_HOLD_MS) return 'unsettled';
+  /* 免打扰时段（配置 proactive.quietHours，形如 "23-8"，见 quiet-hours.js）。
+   * 凌晨三点冒一句"起来动动"不是陪伴，是闹鬼 —— 调研里 astrbot 的
+   * quiet_hours 默认值就是 1-7 点整段闭嘴。 */
+  if (inQuietHours(quietRange, new Date())) return 'quiet_hours';
+  /* 连着追了几次都没人搭理 → 别追了（调研里的 max_unanswered_times）。
+   * 量的是"**连着**"，不是"今天累计"：用户回一句就归零。 */
+  const cap = maxUnanswered();
+  if (cap > 0 && proactiveUnanswered >= cap) return 'unanswered';
   return '';
 }
 
@@ -2147,7 +2288,13 @@ async function proactiveSpeak() {
   if (quiet) return;
   const why = proactiveBlockedBy();
   if (why) {
-    console.log('[pet] proactive 延后', JSON.stringify({ why, steadyMs: Math.round(emoSteadyMs) }));
+    console.log('[pet] proactive 延后', JSON.stringify({ why, steadyMs: Math.round(emoSteadyMs), unanswered: proactiveUnanswered }));
+    /* 免打扰时段：不该 2 秒探一次（那就是空转一整晚），排到时段结束那一刻。 */
+    if (why === 'quiet_hours') { scheduleAfterQuietHours(); return; }
+    /* 到未回复上限：这次不追了。**不排新定时器** —— 排了也是每 8 分钟一次、
+     * 到点必被同一道闸门拦下的空转。她重新开口的时机是用户有反应
+     * （noteUserResponse），那一下会把定时器重新武装上。 */
+    if (why === 'unanswered') { clearTimeout(idleTimer); return; }
     retryIdleTimer();
     return;
   }
@@ -2165,6 +2312,9 @@ async function proactiveSpeak() {
       bubble.classList.remove('hidden');
     }
     speak(line);
+    /* 记一次"她主动开口了"。用户不回应的话，攒到 proactive.maxUnanswered
+     * 就闭嘴（见 proactiveBlockedBy 的 'unanswered'）。 */
+    proactiveUnanswered++;
     /* 说完回中性。不回的后果不止是"她一直挂着笑"——**话术池会退化**：
      * 她停在 smile，下一轮 proactiveLine(emotion) 就永远从 smile 池里挑，
      * 按情绪分池这件事等于没做（实测日志里连着几条都是 smile 池）。
@@ -2208,6 +2358,7 @@ async function proactiveSpeak() {
     history.push({ role: 'assistant', content: replyBuffer });
     saveHistory();
     flushSpeech();
+    proactiveUnanswered++;    // 同上：攒到上限就闭嘴
   } else if (!floatBubble()) {
     bubble.classList.add('hidden');
     bubbleText.textContent = '';
@@ -2220,13 +2371,24 @@ async function sendMessage() {
   const text = input.value.trim();
   if (!text || busy || !model) return;
 
+  /* 用户发消息 = **明确**搭理她了 → 退避归零（见 noteUserResponse）。
+   * 这条是 proactive 退避唯一的"复活"入口之一，别挪走。 */
+  noteUserResponse();
+
   busy = true;
   input.value = '';
 
-  /* 上一轮还没念完就被新消息打断 —— 清掉它的队列与分句缓冲，
-   * 否则新回复的朗读要排在旧句后面（"怎么还在念上一句"）。
-   * 原来整段念时靠 speak() 里的 cancel 顺带做到了，分句之后必须显式清。 */
-  stopSpeak();
+  /* 上一轮她还没念完就被这一条打断 —— 分两步，顺序不能反：
+   *   ① 先把"她实际说到哪了"截进历史（读的是 tts.js 那笔已念出的账，
+   *      见 truncateHistoryOnInterrupt；开关 chat.interruptMark）；
+   *   ② 再停朗读、清队列与分句缓冲 —— 否则新回复的朗读要排在旧句后面
+   *      （"怎么还在念上一句"）。原来整段念时靠 speak() 里的 cancel 顺带
+   *      做到了，分句之后必须显式清。
+   * ⚠️ 停朗读用 stopSpeaking() 而不是裸的 stopSpeak()：后者不推状态，
+   *    她会卡在 SPEAKING（嘴继续动 + proactive 被 `state !== IDLE` 永久拦死）。 */
+  if (cfg?.chat?.interruptMark !== false) truncateHistoryOnInterrupt();
+  else resetSpoken();
+  stopSpeaking();
   speechBuf = '';
 
   history.push({ role: 'user', content: text });
@@ -2257,7 +2419,7 @@ async function sendMessage() {
     showStatus(res?.error || '请求失败');
     history.pop();
     /* 已经念出去半句话，剩下的不念了 —— 失败时不该继续把残缺内容读完。 */
-    stopSpeak();
+    stopSpeaking();
     speechBuf = '';
     if (!floatBubble()) bubble.classList.add('hidden');
     setState(State.IDLE);
@@ -2402,7 +2564,10 @@ window.pet?.on?.('pet:quiet', (d) => {
   quiet = on;
 
   if (changed && quiet) {
-    stopSpeak();              // 正在念的那句立刻掐掉 —— 打游戏时突然出声最讨厌
+    /* 停朗读 + 把她从"说话中"收回来 —— 必须是 stopSpeaking()，
+     * 裸的 stopSpeak() 会把 state 留在 SPEAKING（见那个函数的注释：
+     * 嘴会继续动，且静默解除后 proactive 永久开不了口）。 */
+    stopSpeaking();
     stopEventMotions();       // 拖拽 / 溜达的动作也一起收（规矩 19：静默七处一起收手）
     patAbort();               // 摸头也收（她进静默了，别再蹭）
     clearTimeout(idleTimer);  // 撤掉已经排好的主动搭话（醒来会重排）

@@ -263,6 +263,30 @@ let ttsGuard = null;    // 当前这条的兜底定时器（onend 偶尔不触�
  * 推进一个新队列（用户按了停止，却听见下一句接着念）。 */
 let ttsGen = 0;
 
+/* ---- 「已经念出去的那部分」 ------------------------------------
+ *
+ * 用途：用户打断时，把历史里那条 assistant 截成"她**实际**说完的"，
+ * 再补一条 [Interrupted by user]（见 pet.js 的 truncateHistoryOnInterrupt）。
+ * 出处是竞品调研里 Open-LLM-VTuber 的 `handle_interrupt`（保留 heard_response）。
+ * 不这么做的后果：历史里是一次完整回复，而用户只听到半句 ——
+ * 模型以为自己说完了，下一轮会接着往下讲，答非所问。
+ *
+ * ⚠️ 分句器（takeSentences）**只按标点切、不改一个字**，所以这里拼出来的
+ *    必然是那一轮回复的一个**前缀** —— 调用方正是靠这一条判断能不能截。
+ * ⚠️ 只在 playOne（= 队列真的泵出它、马上要念）里追加。被代际令牌作废的那条
+ *    排在它后面，根本没轮到 playOne，不会进这里。 */
+let spokenBuf = '';
+export function spokenText() { return spokenBuf; }
+export function resetSpoken() { spokenBuf = ''; }
+
+/* 此刻有没有一条真在念。
+ *
+ * 🔴 「嘴该不该跑正弦波」必须问它，**不能只看 pet.js 的 state**：
+ *    打断时被作废的那条不会推进状态机（下面 finish 里 gen 不符就 return），
+ *    state 于是停在 SPEAKING —— 只看 state 的话，嘴会一直动下去
+ *    （没有声音，但 12fps 静默档下也看得见）。 */
+export function isSpeaking() { return ttsActive; }
+
 /* 队列上限。正常情况根本到不了（边说边念，队列基本 0~2 条），
  * 纯粹是防御：模型一口气吐一堆短句、而 TTS 又比生成慢时，
  * 别让它无限堆积成一分钟的延迟。满了丢**最旧的** —— 要念就念最新的。 */
@@ -379,6 +403,10 @@ function playOne(text, onDone, pcm = null) {
   };
 
   try { speechObserver?.(text, Date.now()); } catch { /* 诊断钩子不许影响朗读 */ }
+
+  /* 记进「念出去的账」（上面的 spokenBuf）。放在这儿 = 队列真的泵出它、
+   * 马上要念 —— 打断时才拿它跟历史比对。 */
+  spokenBuf += text;
 
   if (engineOf() === ENGINE_WINRT) {
     playWinrt(text, gen, finish, pcm);

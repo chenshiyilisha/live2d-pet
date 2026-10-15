@@ -21,6 +21,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const vm = require('vm');
 const { pathToFileURL } = require('url');
 
 const ROOT = path.join(__dirname, '..');
@@ -147,6 +148,62 @@ globalThis.SpeechSynthesisUtterance = class {
   }
 
   /* ============================================================
+   *  [C2] 打断 —— 口型复位 + "她说到哪了"（2026-10-15）
+   *
+   *  出处是竞品调研第 7 轮的两条（docs/open-source-reference.md）：
+   *    · Open-LLM-VTuber 的 web-audio-manager：打断要 releasePcmData +
+   *      把 _lastRms 归零兜底 → 我们对应"停朗读时必须显式清口型/状态"；
+   *    · 它的 basic_memory_agent.handle_interrupt：只把**听到的部分**写进记忆
+   *      → 我们对应 truncateHistoryOnInterrupt。
+   * ========================================================== */
+  console.log('[C2] 打断 —— 口型复位与打断记忆');
+  {
+    /* 🔴 正弦波那条分支必须**同时**看 isSpeaking()。
+     *    只看 state 会踩到：打断时被作废那条不推状态（finish 里 gen 不符就
+     *    return），state 卡在 SPEAKING → 嘴闭着还在那儿一张一合。 */
+    const tick = between(petNoC, 'const env = lipEnv(dt)', 'PIXI.UPDATE_PRIORITY.LOW');
+    ok(/state === State\.SPEAKING && isSpeaking\(\)/.test(tick),
+      '🔴 正弦波分支要求 state===SPEAKING **且** isSpeaking()（少判后半个 = 静默时嘴一直动）');
+    ok(/export function isSpeaking\(\) \{ return ttsActive; \}/.test(tts),
+      'isSpeaking 就是队列的"在念"标志（ttsActive），不是状态机的副本');
+    ok(/\} else if \(mouthLevel > 0\) \{/.test(tick),
+      '两条路都不成立时走衰减分支 —— 嘴会自己闭上，不会僵住');
+
+    /* 停朗读必须连状态一起收（pet.js 的 stopSpeaking） */
+    const stopS = between(petNoC, 'function stopSpeaking()', '\n}\n');
+    ok(/stopSpeak\(\)/.test(stopS) && /resetSpoken\(\)/.test(stopS) && /setState\(State\.IDLE\)/.test(stopS),
+      'stopSpeaking = 停朗读 + 清账 + 把 state 收回 IDLE（裸的 stopSpeak 不做后两件）');
+    ok(/if \(changed && quiet\) \{\s*stopSpeaking\(\);/.test(petNoC),
+      '全屏静默那一路用的是 stopSpeaking()（静默解除后 proactive 才不会被永久拦死）');
+
+    /* ---- 打断记忆 ---- */
+    ok(/const INTERRUPT_MARK = '\[Interrupted by user\]'/.test(pet),
+      '标记文本只有一处定义（写进去和判幂等共用同一个常量）');
+
+    const tr = between(petNoC, 'function truncateHistoryOnInterrupt()', '\n}\n');
+    ok(/spokenText\(\)/.test(tr) && /resetSpoken\(\)/.test(tr),
+      '读的是 tts 那笔"已念出的账"，读完立刻清（下一轮从零起算）');
+    ok(/last\.content\.startsWith\(heard\)/.test(tr),
+      '🔴 念出去的部分必须是那条回复的**前缀**，对不上就不动历史（宁保留完整回复，不写驴唇不对马嘴的）');
+    ok(/length === heard\.length\) return false/.test(tr), '念完了就不算打断（不写标记）');
+    ok(/INTERRUPT_MARK\) return false/.test(tr), '幂等：上一条已经是标记就不再写第二条');
+    ok(/\+ '\.\.\.'/.test(tr), '截断后补省略号（"她说到一半"）');
+    ok(/role: 'user', content: INTERRUPT_MARK/.test(tr), '标记以 user 身份插进去（对齐参考实现）');
+
+    ok(/if \(cfg\?\.chat\?\.interruptMark !== false\) truncateHistoryOnInterrupt\(\);/.test(petNoC),
+      '受 chat.interruptMark 开关控制（参数型开关，不进托盘）');
+
+    const cleared = between(petNoC, 'onHistoryCleared', '});');
+    ok(/resetSpoken\(\)/.test(cleared), '清空历史那一路也把账清掉（否则下一轮会拿旧账去比）');
+
+    ok(/export function spokenText\(\)/.test(tts) && /export function resetSpoken\(\)/.test(tts),
+      'tts.js 暴露 spokenText / resetSpoken');
+    const po = between(ttsNoC, 'function playOne(', 'if (engineOf() === ENGINE_WINRT)');
+    ok(/spokenBuf \+= text;/.test(po),
+      '只在 playOne 里记账（= 队列真的泵出它、马上要念；被作废那条轮不到这里）');
+  }
+
+  /* ============================================================
    *  [D] 主进程接线 —— IPC / 起停 / 退出清理
    * ========================================================== */
   console.log('[D] 主进程 —— IPC 与生命周期');
@@ -230,7 +287,7 @@ globalThis.SpeechSynthesisUtterance = class {
     T.initTTS();
 
     const flush = () => new Promise((r) => setTimeout(r, 60));
-    const reset = () => { T.stopSpeak(); spoken.length = 0; pending.length = 0; state = 'idle'; };
+    const reset = () => { T.stopSpeak(); T.resetSpoken(); spoken.length = 0; pending.length = 0; state = 'idle'; };
 
     /* ① 引擎判定：注入了 synth 且 engine=winrt → 应该是 winrt */
     ok(T.ttsQueueState().engine === 'winrt', '注入合成通道后 engine 报 winrt');
@@ -260,7 +317,116 @@ globalThis.SpeechSynthesisUtterance = class {
     await flush();
     ok(spoken.includes('老路径'), '老路径照常出声');
 
+    /* ⑥ 「已念出的账」+「在念」标志（打断记忆 / 口型复位都靠这两个出口） */
+    synthImpl = async () => null;
+    T.configureTTS({
+      getCfg: () => ({ tts: { enabled: true, engine: 'winrt' } }),
+      getState: () => state,
+      isBusy: () => false,
+      setState: (s) => { state = s; },
+      isQuiet: () => false,
+      synth: (t, o) => synthImpl(t, o)
+    });
+    reset();
+    T.enqueueSpeech('第一句。');
+    T.enqueueSpeech('第二句。');
+    await flush();
+    ok(T.spokenText() === '第一句。',
+      '入队两条，但**只有真的开始念**的那条进账（第二条还在排队）');
+    ok(T.isSpeaking() === true, '队列里有一条在念 → isSpeaking() 为真（口型分支靠它，不是 state）');
+    /* 手动结束"当前这条"（fake 引擎不会自己 onend）→ 队列推进 */
+    const endLast = () => { const u = pending[pending.length - 1]; if (u?.onend) u.onend(); };
+    endLast();
+    await flush();
+    ok(T.spokenText() === '第一句。第二句。',
+      '第一条念完接第二条，账里按顺序拼出前缀 —— 这正是"截历史"要的形态');
+    ok(T.isSpeaking() === true, '第二条刚接上，仍在念 → 还是真');
+    endLast();
+    await flush();
+    ok(T.isSpeaking() === false, '队列空了也念完了 → isSpeaking() 为假（嘴该停了）');
+    T.resetSpoken();
+    ok(T.spokenText() === '', 'resetSpoken 清账（下一轮从零起算）');
+
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+
+  /* ============================================================
+   *  [G] 行为 —— 打断记忆真的截得出"听到的部分"
+   *
+   *  把 pet.js 里那段纯逻辑切出来（它不碰 DOM / PIXI，只碰 history 与
+   *  两个 tts 出口），注入一个假 history 直接跑。
+   * ========================================================== */
+  console.log('[G] 行为 —— 打断记忆的三条判断');
+  {
+    /* ⚠️ between 是 [起点, 终点) —— 不含终点，所以要自己把函数的收尾大括号补回来 */
+    const snippet = between(petNoC, 'const INTERRUPT_MARK', '\n}\n') + '\n}';
+    ok(snippet.length > 200, '切到了 truncateHistoryOnInterrupt 的实现');
+
+    const mk = (spoken) => {
+      /* 沙箱：两个 tts 出口换成假的，history 由用例给。
+       * ⚠️ 每次新建一个 —— 前一个用例跑完的 history 不能串味。 */
+      const box = { console, __heard: spoken, __reset: 0, history: [] };
+      vm.createContext(box);
+      vm.runInContext(
+        'function spokenText() { return __heard; }\n' +
+        'function resetSpoken() { __reset++; }\n' +
+        snippet +
+        '\n;globalThis.__t = { truncateHistoryOnInterrupt };',
+        box
+      );
+      return box;
+    };
+
+    /* ① 念了一半被打断 → 截成前缀 + 补一条标记 */
+    {
+      const FULL = '今天挺晴的，出门记得戴帽子。风也有点大。';
+      const box = mk('今天挺晴的，出门记得戴帽子。');
+      box.history = [{ role: 'user', content: '天气怎么样' }, { role: 'assistant', content: FULL }];
+      const cut = box.__t.truncateHistoryOnInterrupt();
+      ok(cut === true, '念了一半 → 判定为被打断');
+      ok(box.history[1].content === '今天挺晴的，出门记得戴帽子。...', '最后那条 assistant 截成"听到的部分+省略号"');
+      ok(box.history.length === 3 && box.history[2].role === 'user' &&
+         box.history[2].content === '[Interrupted by user]', '补了一条 user 身份的打断标记');
+      ok(box.__reset === 1, '账已清（下一轮从零起算）');
+    }
+
+    /* ② 幂等：同一个回合里再调一次不写第二条 */
+    {
+      const box = mk('半句话');
+      box.history = [{ role: 'assistant', content: '半句话后面还有很多字' }];
+      box.__t.truncateHistoryOnInterrupt();
+      const n = box.history.length;
+      const again = box.__t.truncateHistoryOnInterrupt();
+      ok(again === false && box.history.length === n, '🔴 幂等：上一条已是标记就不再写（不会堆一串标记）');
+    }
+
+    /* ③ 念完了 → 不算打断，历史一个字不动 */
+    {
+      const FULL = '好。';
+      const box = mk(FULL);
+      box.history = [{ role: 'assistant', content: FULL }];
+      ok(box.__t.truncateHistoryOnInterrupt() === false, '念完了不写标记');
+      ok(box.history.length === 1 && box.history[0].content === FULL, '历史保持原样（完整回复）');
+    }
+
+    /* ④ 对不上（不是前缀）→ 宁可保留完整回复 */
+    {
+      const box = mk('这句跟历史对不上');
+      box.history = [{ role: 'assistant', content: '完全不同的另一句话' }];
+      ok(box.__t.truncateHistoryOnInterrupt() === false, '🔴 不是前缀就不动历史（不写驴唇不对马嘴的东西）');
+      ok(box.history.length === 1, '历史原样');
+    }
+
+    /* ⑤ 没念任何东西 / 末条不是 assistant → 什么都不做 */
+    {
+      const box1 = mk('');
+      box1.history = [{ role: 'assistant', content: '没念过' }];
+      ok(box1.__t.truncateHistoryOnInterrupt() === false, '这一轮压根没朗读 → 不算打断');
+
+      const box2 = mk('用户说的话');
+      box2.history = [{ role: 'assistant', content: '上一轮' }, { role: 'user', content: '用户说的话' }];
+      ok(box2.__t.truncateHistoryOnInterrupt() === false, '末条是 user（用户刚发的新消息）→ 不截');
+    }
   }
 
   console.log(fails === 0 ? '\n全部通过（0 项失败）' : `\n${fails} 项失败`);

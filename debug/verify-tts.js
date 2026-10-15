@@ -367,10 +367,15 @@ const finishCurrent = () => {
     const flushCalls = (noComment.match(/flushSpeech\(\)/g) || []).length;
     ok(flushCalls >= 2, `两条回复路径都走 flushSpeech（找到 ${flushCalls} 处：对话 + 主动搭话）`);
 
-    /* ③ 新消息打断上一轮朗读 */
+    /* ③ 新消息打断上一轮朗读。
+     * ⚠️ 用的是 stopSpeaking()（pet.js 的一层包装），不是裸的 stopSpeak()：
+     *    裸的那个不会把 state 收回 IDLE —— 被作废那条不推状态（tts.js 的
+     *    finish 里 gen 不符就 return），她会卡在 SPEAKING。 */
     const send = noComment.slice(noComment.indexOf('async function sendMessage()'), noComment.indexOf('sendBtn.addEventListener'));
-    ok(/stopSpeak\(\)/.test(send) && /speechBuf = ''/.test(send),
-      'sendMessage 开头清掉上一轮的朗读队列与分句缓冲');
+    ok(/stopSpeaking\(\)/.test(send) && /speechBuf = ''/.test(send),
+      'sendMessage 开头清掉上一轮的朗读队列与分句缓冲（走 stopSpeaking，顺带收状态）');
+    ok(!/stopSpeak\(\);/.test(send.replace(/stopSpeaking\(\);/g, '')),
+      'sendMessage 里没有裸的 stopSpeak() 残留');
 
     /* ④ 分句缓冲与气泡缓冲是两笔账 */
     ok(/let speechBuf = ''/.test(noComment), 'speechBuf 独立于 replyBuffer');

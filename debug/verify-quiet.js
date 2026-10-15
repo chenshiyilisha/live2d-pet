@@ -265,6 +265,33 @@ console.log('\n══════ 3. 实跑一次采样（真的起 PowerShell�
   await new Promise((r) => setTimeout(r, 2500));
   check(samples.length === before, '⚠️ 关键：stop() 之后不再有样本（采样进程确实被杀了，不是野进程）');
 
+  /* ══════ 4. 静默"七处一起收手"里，朗读那一路必须收干净 ══════
+   * 2026-10-15 修的真 bug：这里原来只写了 stopSpeak()。tts.js 的 interrupt
+   * 靠**代际令牌**作废在途回调，而被作废的那条**不会**再推状态
+   * （finish 里 `if (gen !== ttsGen) return`），于是 pet.js 的 state 留在 SPEAKING。
+   * 两个后果都是静默的：
+   *   · 嘴闭着还在跑正弦波（渲染循环那个分支要 state === SPEAKING）；
+   *   · 静默解除之后，proactive 的 `state !== IDLE` 判据**永久拦死**她开口
+   *     —— 用户看到的是"打了一把游戏回来她再也不主动说话了"。 */
+  {
+    const fs = require('fs');
+    const path = require('path');
+    const PET = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'pet.js'), 'utf8');
+
+    const iQ = PET.indexOf("window.pet?.on?.('pet:quiet'");
+    const quietTick = PET.slice(iQ, PET.indexOf('applyFrameCap();', iQ));
+    check(/stopSpeaking\(\);/.test(quietTick),
+      '进静默时用的是 stopSpeaking()（不是裸的 stopSpeak）');
+    check(!/stopSpeak\(\);/.test(quietTick.replace(/stopSpeaking\(\);/g, '')),
+      '同一段里没有裸的 stopSpeak() 残留（它不收状态）');
+
+    const iS = PET.indexOf('function stopSpeaking()');
+    const fn = PET.slice(iS, iS + 500);
+    check(/state === State\.SPEAKING && !busy/.test(fn) && /setState\(State\.IDLE\)/.test(fn),
+      'stopSpeaking 把状态机一起收回 IDLE（busy 时不抢 —— 对话流程自己会收）');
+    check(/resetSpoken\(\)/.test(fn), '顺带把"念到哪"那笔账清掉');
+  }
+
   console.log('\n════════════════════════════════════════');
   if (failures) {
     console.log('❌ ' + failures + ' 项未通过');

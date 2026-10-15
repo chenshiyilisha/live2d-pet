@@ -161,6 +161,25 @@ console.log('\n══════ 5. 读不到配置时**拒绝写入**（防抹
   check(config.cfgReadBlocked() === null, '文件恢复可读后，写入封锁自动解除');
 }
 
+console.log('\n══════ 6. 新增的"参数型"键必须有默认值（免打扰 / 未回复上限 / 打断标记）══════\n');
+{
+  /* 这三个键都**不进托盘**（规矩 5：菜单要短 —— 它们是参数不是开关），
+   * 所以"默认值有没有"就变成了唯一的守门人：
+   * 缺了 → 渲染层读到 undefined → parseQuietHours(undefined) 返回 null
+   *        → **不设免打扰**，也就是"配了等于没配"，而且界面上完全看不出来。 */
+  rmCfg();
+  const cfg = config.loadConfig();
+  check(cfg.proactive.quietHours === '23-8', "免打扰时段默认 '23-8'（跨零点，见 quiet-hours.js）");
+  check(cfg.proactive.maxUnanswered === 2, '未回复上限默认 2');
+  check(cfg.chat.interruptMark === true, '打断标记默认开（记忆口径，不打扰、不占资源）');
+
+  writeCfg({ proactive: { enabled: true } });     // 老配置：只有 enabled 这一个键
+  const c2 = config.loadConfig();
+  check(c2.proactive.quietHours === '23-8' && c2.proactive.maxUnanswered === 2,
+    '老配置里缺这两个键时按默认值补上（逐段逐键合并，规矩 1）');
+  check(c2.proactive.enabled === true, '补键的同时不顶掉用户写的 enabled');
+}
+
 /* 清理：临时目录 + 撤销 require 劫持 */
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
 Module.prototype.require = origRequire;

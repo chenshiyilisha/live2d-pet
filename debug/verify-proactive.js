@@ -24,11 +24,15 @@ const no = (m) => { failures++; console.log('  ❌ ' + m); };
 const check = (cond, m) => (cond ? ok(m) : no(m));
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 
-/* params.js 是浏览器 ESM —— 剥掉 export 丢进 vm（与 verify-jitter.js 同款手法）。 */
+/* params.js 是浏览器 ESM —— 剥掉 export 丢进 vm（与 verify-jitter.js 同款手法）。
+ * 它还 import 了 profiles/hiyori.js 的档案数据 —— 档案剥 export 后拼在前面
+ * （import 行剥掉，标识符由前置的档案定义）。 */
+const stripEsm = (s) => s.replace(/^import[^\n]*$/gm, '').replace(/^export\s+/gm, '');
 const pSandbox = { console, Math };
 vm.createContext(pSandbox);
 vm.runInContext(
-  read('src/renderer/params.js').replace(/^export\s+/gm, '') +
+  stripEsm(read('src/renderer/profiles/hiyori.js')) + '\n' +
+  stripEsm(read('src/renderer/params.js')) +
   '\n;globalThis.__api = { EMOTION, EMO_SETTLE_EPS, EMO_SETTLE_HOLD_MS, emotionDeviation };',
   pSandbox
 );

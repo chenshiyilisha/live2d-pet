@@ -1,7 +1,8 @@
 import * as PIXI from 'pixi.js';
 import { Live2DModel, MotionPriority } from '@naari3/pixi-live2d-display/cubism5';
 
-/* 模型表 / 参数表 / 情绪姿态表 —— 全是只读的真相，见 params.js。
+/* 模型表 / 参数表 / 情绪姿态表 —— 全是只读的真相，见 params.js
+ * （引擎与注册表）与 profiles/<model>.js（模型专属数据本体）。
  * ⚠️ P 是 ESM 的 live binding：这里只能**读** P.XXX，不能赋值。 */
 import {
   MODELS, MODEL_NAME, INK_TOP_C_RATIO, P, State, EMOTION,

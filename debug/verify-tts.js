@@ -55,9 +55,16 @@ const finishCurrent = () => {
 };
 
 (async () => {
-  /* ---- 复制 params.js + tts.js 到临时目录（.mjs），改掉相对 import 后加载 ---- */
+  /* ---- 复制 params.mjs + profiles/ + tts.mjs 到临时目录，改掉相对 import 后加载 ---- */
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-tts-'));
-  fs.copyFileSync(path.join(SRC, 'renderer', 'params.js'), path.join(dir, 'params.mjs'));
+  fs.mkdirSync(path.join(dir, 'profiles'), { recursive: true });
+  fs.copyFileSync(
+    path.join(SRC, 'renderer', 'profiles', 'hiyori.js'),
+    path.join(dir, 'profiles', 'hiyori.mjs'));
+  fs.writeFileSync(
+    path.join(dir, 'params.mjs'),
+    fs.readFileSync(path.join(SRC, 'renderer', 'params.js'), 'utf8')
+      .replace("'./profiles/hiyori.js'", "'./profiles/hiyori.mjs'"));
   fs.writeFileSync(
     path.join(dir, 'tts.mjs'),
     read(path.join('renderer', 'tts.js')).replace(/from '\.\/params\.js'/, "from './params.mjs'")

@@ -37,14 +37,24 @@ const stripComments = (s) =>
   s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
 
 (async () => {
-  /* ---- 把 params.js 复制成 .mjs 再 import（工作区是 CJS 包，.js 会被拒）---- */
-  const tmp = path.join(os.tmpdir(), `wb-params-${process.pid}.mjs`);
-  fs.copyFileSync(path.join(SRC, 'renderer', 'params.js'), tmp);
+  /* ---- 复制 params.mjs + profiles/*.mjs 到临时目录再 import ----
+   * params.js 现在从 profiles/hiyori.js import 档案数据 —— 单文件复制
+   * 会断 import，必须带上档案一起搬（目录结构保持相对路径）。 */
+  const tmp = path.join(os.tmpdir(), `wb-params-${process.pid}`);
+  fs.rmSync(tmp, { recursive: true, force: true });
+  fs.mkdirSync(path.join(tmp, 'profiles'), { recursive: true });
+  fs.copyFileSync(
+    path.join(SRC, 'renderer', 'profiles', 'hiyori.js'),
+    path.join(tmp, 'profiles', 'hiyori.mjs'));
+  fs.writeFileSync(
+    path.join(tmp, 'params.mjs'),
+    fs.readFileSync(path.join(SRC, 'renderer', 'params.js'), 'utf8')
+      .replace("'./profiles/hiyori.js'", "'./profiles/hiyori.mjs'"));
   let M;
   try {
-    M = await import(pathToFileURL(tmp).href);
+    M = await import(pathToFileURL(path.join(tmp, 'params.mjs')).href);
   } finally {
-    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
   }
   const { EMOTION, EMO_SPEED, EMO_SPEED_DEFAULT, PARAM } = M;
 

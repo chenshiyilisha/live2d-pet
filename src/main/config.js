@@ -187,7 +187,8 @@ const DEFAULT_CONFIG = {
      * 默认开。关掉 = 纹理完全不动（排查画质问题时用）。 */
     textureLod: true
     /* 这里原本有 model: 一个可选的模型名。春移除后模型固定成日和，
-     * 不再是可配置项 —— 名字只在 params.js 的 MODEL_NAME 写一次。 */
+     * 不再是可配置项 —— 档案键只在渲染层 profiles/hiyori.js 的 name 写一次
+     * （params.js 的 MODEL_NAME 引它，见 verify-rename）。 */
   },
   /* 互动行为（开关 + 各自参数）。
    * ⚠️ wander（闲置自己溜达）= 不打招呼就挪窗口，属于"自动移动"，
@@ -287,11 +288,11 @@ const EMOTION_TAGS = ['calm', 'happy', 'smile', 'think', 'shy', 'serious', 'surp
 /* 默认角色名 —— 就是**模型自己的名称**（`MODELS[MODEL_NAME].label`）。
  * 三处落点（托盘提示 / 窗口标题 / 人设自称）都读它。
  *
- * 为什么这里是**副本**而不是 import：主进程是 CJS、params.js 是浏览器 ESM
+ * 为什么这里是**副本**而不是 import：主进程是 CJS、渲染层是浏览器 ESM
  * （由 index.html 以 <script type="module"> 加载），require 不进来。
  * 与 llm.js 的 `LLM_TIMEOUT` 是同一个困境，走同一条路 —— 留字面量副本 +
- * 断言互验（verify-rename.js 的 [G] 段把 params.js 的 label、这里的
- * DEFAULT_NAME、index.html 的 <title> 三份一起比，不一致就报红）。
+ * 断言互验（verify-rename.js 的 [G] 段把 profiles/hiyori.js 的 label、
+ * 这里的 DEFAULT_NAME、index.html 的 <title> 三份一起比，不一致就报红）。
  * 🔴 改模型名时这三处要一起改。
  *
  * ⚠️ 别和**产品名**「阿岩」混淆：安装包名、快捷方式、Release 标题仍叫阿岩，

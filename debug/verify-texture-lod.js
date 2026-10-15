@@ -38,7 +38,7 @@ check(/Math\.floor\(Math\.log2\(w \/ Math\.max\(1, onScreenPx\)\)\)/.test(pet),
   'pet.js 的 level 公式仍在（log2(纹理宽/屏幕需求)）');
 
 const TEX_LOD = { maxLevel: 1, margin: 2 };
-const INK_W = 897;                    // params.js MODELS.hiyori.inkW（放宽值）
+const INK_W = 897;                    // profiles/hiyori.js 的 model.inkW（放宽值）
 const s = 0.19097;                    // 实测 holder.scale（窗口 308×342）
 const DPR = 1.5;
 

@@ -267,7 +267,14 @@ globalThis.SpeechSynthesisUtterance = class {
   console.log('[F] 行为 —— 合成失败必须回退，不能哑');
   {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-lip-'));
-    fs.copyFileSync(path.join(SRC, 'renderer', 'params.js'), path.join(dir, 'params.mjs'));
+    fs.mkdirSync(path.join(dir, 'profiles'), { recursive: true });
+    fs.copyFileSync(
+      path.join(SRC, 'renderer', 'profiles', 'hiyori.js'),
+      path.join(dir, 'profiles', 'hiyori.mjs'));
+    fs.writeFileSync(
+      path.join(dir, 'params.mjs'),
+      fs.readFileSync(path.join(SRC, 'renderer', 'params.js'), 'utf8')
+        .replace("'./profiles/hiyori.js'", "'./profiles/hiyori.mjs'"));
     fs.writeFileSync(
       path.join(dir, 'tts.mjs'),
       tts.replace(/from '\.\/params\.js'/, "from './params.mjs'")

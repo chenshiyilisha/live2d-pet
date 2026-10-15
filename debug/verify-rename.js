@@ -156,13 +156,18 @@ ok('槽位数量 ≥ 4（够细分）', PERSONA_PARTS.length >= 4);
 ok('表情槽位被标为 tech（界面会警告）', PERSONA_PARTS.some((p) => p.key === 'emotion' && p.tech));
 
 console.log('\n=== 默认名 = 模型自己的名称（三处副本必须一致）===');
-/* 为什么这里要查三份源码：主进程是 CJS、params.js 是浏览器 ESM（由 index.html
+/* 为什么这里要查三份源码：主进程是 CJS、渲染层是浏览器 ESM（由 index.html
  * 以 <script type="module"> 加载），require 不进来 —— 所以「模型自己的名称」
  * 在三个地方各存了一份字面量。手抄的副本一脱节，症状就是"没设过名字时，
  * 自称叫 A、窗口标题叫 B"，从界面上很难看出是哪一份错了。这里一次性钉死。
- * （与硬规矩 30 的 LLM_TIMEOUT「config.js 那份是副本，verify 互验」同一套路。） */
+ * （与硬规矩 30 的 LLM_TIMEOUT「config.js 那份是副本，verify 互验」同一套路。）
+ * 2026-10-15 模型数据搬进 profiles/：name/label 的**唯一出处**在档案里，
+ * params.js 只引档案键（MODEL_NAME = HIYORI.name），不再各写字面量。 */
 const paramsSrc = fs
   .readFileSync(path.join(ROOT, 'src/renderer/params.js'), 'utf8')
+  .replace(/\r\n/g, '\n');
+const profileSrc = fs
+  .readFileSync(path.join(ROOT, 'src/renderer/profiles/hiyori.js'), 'utf8')
   .replace(/\r\n/g, '\n');
 const htmlSrc = fs
   .readFileSync(path.join(ROOT, 'src/renderer/index.html'), 'utf8')
@@ -171,16 +176,15 @@ const mainSrc = fs
   .readFileSync(path.join(ROOT, 'src/main/main.js'), 'utf8')
   .replace(/\r\n/g, '\n');
 
-const mName = paramsSrc.match(/^export const MODEL_NAME = '([^']+)';$/m);
-ok('params.js 里能找到 MODEL_NAME', !!mName);
+ok('params.js 的 MODEL_NAME 取自档案（不另写字面量）',
+  /^export const MODEL_NAME = HIYORI\.name;/m.test(paramsSrc));
+ok('params.js 的 MODELS 注册用档案键',
+  /\[\s*HIYORI\.name\s*\]:\s*HIYORI\.model/.test(paramsSrc));
+const mName = profileSrc.match(/^\s*name:\s*'([^']+)',\s*$/m);
+ok('档案里有 name', !!mName);
 const modelKey = mName ? mName[1] : '';
 
-const modelsHead = paramsSrc.indexOf('export const MODELS = {');
-const modelsTail = paramsSrc.indexOf('\n};', modelsHead);
-const modelsBlock = modelsHead >= 0 && modelsTail > modelsHead ? paramsSrc.slice(modelsHead, modelsTail) : '';
-const mEntry = modelsBlock.match(new RegExp(`\\n  ${modelKey}: \\{([\\s\\S]*?)\\n  \\}`));
-ok(`MODELS 表里有 ${modelKey || '(?)'} 这一项`, !!mEntry);
-const mLabel = mEntry && mEntry[1].match(/label: '([^']+)'/);
+const mLabel = profileSrc.match(/label:\s*'([^']+)'/);
 ok(`${modelKey || '(?)'} 有 label（= 模型自己的名称）`, !!mLabel);
 const modelLabel = mLabel ? mLabel[1] : '';
 

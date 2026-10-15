@@ -123,9 +123,9 @@ console.log('\n═══ D. 自制动作（Drag / Walk）的接线还在 ══�
   /* 这两个动作是 2026-10-13 手写的（tools/make-motions.js），专门解决
    * 「拖拽 / 溜达没有动作」。鼠标交互那条路容易在重构里被顺手改回去。 */
   const petSrc = read('src/renderer/pet.js');
-  const pubSrc = read('src/renderer/params.js');
+  const pubSrc = read('src/renderer/profiles/hiyori.js');
   check(/keepLoopGroups: \['Drag', 'Walk'\]/.test(pubSrc),
-    'params.js 里 Drag / Walk 仍标着"保持循环"（不 loop 的话动作播一次就停）');
+    '档案（profiles/hiyori.js）里 Drag / Walk 仍标着"保持循环"（不 loop 的话动作播一次就停）');
   check(/fadeOverride: \{ Drag:/.test(pubSrc), 'Drag 的淡化覆盖还在');
   check(/playEventMotion\('Drag'\)/.test(petSrc), '拖拽仍走 playEventMotion(Drag)');
   check(/on\?\.\('pet:wander-start'[\s\S]{0,120}playEventMotion\('Walk'\)/.test(petSrc),

@@ -298,16 +298,25 @@ function createWindow() {
   // Windows 上 transparent 窗口用「隐藏创建 → 首帧就绪再显示」更稳：
   // 一创建就显示的话，DWM 可能把首帧那个还没上 alpha 的底缓存住，
   // 结果就是窗口一直是一块白底，怎么改配置都不生效。
+  //
+  // 📌 PET_HIDDEN=1（2026-10-15 加，血的教训）：纯采样类实跑（量内存之类，
+  //    不截图）让窗口**完全不显示**。起因：dev 实例可见、置顶、默认位置与
+  //    用户自己的桌宠完全一致，用户启动自己的实例时屏幕上出现"两个重叠的
+  //    人"——而 requestSingleInstanceLock 按 userData 目录互斥，--user-data-dir
+  //    隔离的 dev 实例根本拦不住。⚠️ 两处 show（这里 + 4s 兜底）都要拦，
+  //    漏一处照样弹出来；⚠️ 别和 PET_SNAPSHOT 同用（隐藏窗口 capturePage
+  //    截不到内容，截图类探针必须可见）。
   mainWindow.once('ready-to-show', () => {
     if (!mainWindow) return;
-    mainWindow.show();
+    if (process.env.PET_HIDDEN !== '1') mainWindow.show();
+    else console.log('[pet] PET_HIDDEN=1 —— 窗口不显示（采样模式）');
     mainWindow.setAlwaysOnTop(isOn('appearance', 'alwaysOnTop'), 'floating');
     // 页面就绪后把外观配置（缩放 / 透明度 / 模型）同步过去
     syncAppearance();
   });
   // 兜底：万一 ready-to-show 没触发，也不能让窗口永远不出现
   setTimeout(() => {
-    if (mainWindow && !mainWindow.isVisible()) mainWindow.show();
+    if (mainWindow && !mainWindow.isVisible() && process.env.PET_HIDDEN !== '1') mainWindow.show();
   }, 4000);
 
   // PET_ENTRY 用于排查：可临时指向最小页面

@@ -366,6 +366,57 @@ check('未闭合的 [think: 扣得比普通方括号久（emo 的 64 上限对�
   assert.strictEqual(s.f.think(), near + '了');
 });
 
+/* ══════════════ ①d [silent] 沉默标签（2026-10-15 加，第 9 轮第一档） ══════════════ */
+
+console.log('\n①d createStreamFilter —— [silent] 沉默标签');
+
+check('整条 [silent]：一个字都不出去，silent() 为 true', () => {
+  const s = makeFilter();
+  s.f.push('[silent]');
+  s.f.end();
+  assert.strictEqual(s.text(), '', '沉默的标签进了正文');
+  assert.strictEqual(s.f.silent(), true);
+});
+
+check('标签被分片切开也认得（SSE 分片边界）', () => {
+  const s = makeFilter();
+  for (const p of ['[sil', 'ent]']) s.f.push(p);
+  s.f.end();
+  assert.strictEqual(s.text(), '');
+  assert.strictEqual(s.f.silent(), true);
+});
+
+check('混在正文里的 [silent] 不算沉默（那是她说的话，照常处理）', () => {
+  const s = makeFilter();
+  s.f.push('[silent] 算了，没什么。');
+  s.f.end();
+  assert.ok(s.text().includes('算了'), '正文被吞了 —— 判不准一律放行');
+  assert.strictEqual(s.f.silent(), false, '有正文还判成沉默 = 吞话');
+});
+
+check('只有 [emo:xxx] 没有 [silent]：silent() 为 false', () => {
+  const s = makeFilter();
+  s.f.push('在呢。\n[emo:calm]');
+  s.f.end();
+  assert.strictEqual(s.f.silent(), false);
+});
+
+check('大小写与空格容错： [ Silent ]', () => {
+  const s = makeFilter();
+  s.f.push('[ Silent ]');
+  s.f.end();
+  assert.strictEqual(s.f.silent(), true);
+});
+
+check('end() 之后才能定沉默（剥器尾巴可能吐字，之前读会误判）', () => {
+  const s = makeFilter();
+  s.f.push('[silent]');
+  // 没调 end() 就读 —— 不做断言值的要求，只要求不抛；定论必须 end() 之后
+  s.f.end();
+  assert.strictEqual(s.f.silent(), true);
+});
+
+
 check('未闭合且超过想法上限时仍然放行（绝不吞字）', () => {
   const s = makeFilter();
   const body = '想'.repeat(THINK_HOLD + 10);
@@ -502,6 +553,25 @@ const BASE = { baseUrl: 'https://example.invalid/v1', apiKey: 'k', model: 'm', s
     assert.strictEqual(r.emotion, 'surprised');
   });
 
+  /* ---- [silent] 的端到端（第 9 轮第一档）：标签剥干净 + 返回值带 silent ---- */
+
+  await checkAsync('整条 [silent]：ok 且 silent=true，正文一个字不 send', async () => {
+    const got = [];
+    stubFetch(sse('[si', 'lent]'));
+    const r = await streamLLM([{ role: 'user', content: 'x' }], { ...BASE, send: (t) => got.push(t) });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.silent, true, '分片切开的 [silent] 没被认出');
+    assert.strictEqual(got.join(''), '', '沉默的标签进了正文（气泡会闪出字）');
+  });
+
+  await checkAsync('正常回复 silent=false（不误伤）', async () => {
+    stubFetch(sse('在呢。\n[emo:calm]'));
+    const r = await streamLLM([{ role: 'user', content: 'x' }], BASE);
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.silent, false);
+    assert.strictEqual(r.emotion, 'calm');
+  });
+
   /* ══════════════ ③ 请求超时（2026-10-13 加） ══════════════
    *
    * 在这之前 fetch 完全没有超时 —— 服务端连上后不再吐数据，请求就永远不返回，
@@ -544,6 +614,24 @@ const BASE = { baseUrl: 'https://example.invalid/v1', apiKey: 'k', model: 'm', s
     assert.strictEqual(r.ok, false);
     assert.ok(/整轮超过/.test(r.error), `应该报"整轮超时"：${r.error}`);
     assert.ok(dt < 4000, `中断太慢：${dt}ms`);
+  });
+
+  /* ---- 外部中止（在途作废，第 9 轮第一档）----
+   * 与超时共用同一条"掐流"路径，但 abortWhy 是 external ——
+   * 错误信息必须能区分"超时"和"被新一轮对话取代"。 */
+  await checkAsync('外部 signal 中止：报"在途作废"而不是超时', async () => {
+    global.fetch = async (_u, opts) => stallingResponse(opts.signal);
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 150);
+    const t0 = Date.now();
+    const r = await streamLLM([{ role: 'user', content: 'x' }], {
+      ...BASE, stallMs: 30000, totalMs: 30000, signal: ac.signal
+    });
+    const dt = Date.now() - t0;
+    assert.strictEqual(r.ok, false);
+    assert.ok(/作废/.test(r.error), `应该是"在途作废"：${r.error}`);
+    assert.ok(!/超时/.test(r.error), '被误报成超时');
+    assert.ok(dt < 3000, `中断太慢：${dt}ms`);
   });
 
   await checkAsync('正常回复完全不受影响，超时定时器不残留', async () => {

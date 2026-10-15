@@ -2255,6 +2255,32 @@ function maxUnanswered() {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 2;
 }
 
+/* ---- 四闸门的状态（第 9 轮调研第一档，2026-10-15）---- */
+
+/* 锁屏中（主进程 powerMonitor 推过来）。只拦主动搭话，不动静默状态机 ——
+ * 锁屏时她照样眨眼呼吸，反正谁也看不见；解锁那一刻主进程会再推一次，
+ * 那边的 pokeIdleTimer 把闲置周期重新排上。 */
+let screenLocked = false;
+
+/* 最近一次对话交互（用户开口 / 回复完成 / 她主动说完）的时间戳。
+ * "聊完天后的一段安静期"就靠它：刚聊完她马上又主动冒一句，
+ * 是最容易被读成"烦"的场景。0 = 从没聊过（冷启动不拦）。 */
+let lastChatAt = 0;
+
+/** 聊完安静期（毫秒）。写 0/负数 = 关；乱码/缺失回落默认 10 分钟；
+ *  上限 720 分钟 —— 手滑写个大数不至于把她冻到明天。 */
+function cooldownMs() {
+  const n = Number(cfg?.proactive?.cooldownMinutes);
+  const mins = Number.isFinite(n) ? n : 10;
+  return mins <= 0 ? 0 : Math.min(mins, 720) * 60 * 1000;
+}
+
+/* 对话代次（在途作废的渲染层保险）。sendMessage 每次开口 ++；
+ * proactiveSpeak 在 await 前记下当时的值，回来后对不上 = 期间用户
+ * 开过口，那句晚到的主动话整条作废（不进历史、不念、气泡收掉）。
+ * 主进程在 chat:send 里还会先 abort 断流 —— 这里是双保险的第二道。 */
+let chatEpoch = 0;
+
 /* 配置变动时重算。⚠️ 顺手把退避计数归零 —— 用户刚动了设置，
  * 那是"人还在"的强信号，没必要接着冷着她。 */
 function refreshProactiveConfig() {
@@ -2355,9 +2381,16 @@ function proactiveBlockedBy() {
    * 她刚被打断一次、刚溜达回来、或手还在头上时，情绪参数都还在往目标走；
    * 这时候插话读起来是"抢拍"。 */
   if (emoSteadyMs < EMO_SETTLE_HOLD_MS) return 'unsettled';
+  /* 锁屏 / 屏保中 → 不主动出声（主进程 powerMonitor 推的标志）。
+   * 默认开（proactive.muteOnLock），写 false = 关掉这条闸门。 */
+  if (cfg?.proactive?.muteOnLock !== false && screenLocked) return 'locked';
   /* 主人正在放东西听/看 → 别插嘴（见 refreshMediaPlaying）。
    * 判据是 `status === 'Playing'`：暂停着的不算，那时候他多半就是在等她说话。 */
   if (mediaPlaying) return 'media';
+  /* 聊完天后的安静期（proactive.cooldownMinutes）：口径是"最后一次
+   * 对话交互"—— 用户开口、回复完成、她主动说完，三个时点都刷。 */
+  const cd = cooldownMs();
+  if (cd > 0 && Date.now() - lastChatAt < cd) return 'chat_cooldown';
   /* 免打扰时段（配置 proactive.quietHours，形如 "23-8"，见 quiet-hours.js）。
    * 凌晨三点冒一句"起来动动"不是陪伴，是闹鬼 —— 调研里 astrbot 的
    * quiet_hours 默认值就是 1-7 点整段闭嘴。 */
@@ -2387,6 +2420,15 @@ async function proactiveSpeak() {
     if (why === 'unanswered') { clearTimeout(idleTimer); return; }
     /* 正在放媒体：别用 2 秒的周期陪着他把整部片子放完。 */
     if (why === 'media') { retryIdleTimer(MEDIA_RETRY_MS); return; }
+    /* 锁屏中：unlock 事件会主动重排，这里 60 秒只是防事件丢失的兜底
+     * （丢了的话她也不会永远哑着 —— 下一个整闲置周期照样轮到）。 */
+    if (why === 'locked') { retryIdleTimer(60 * 1000); return; }
+    /* 聊完安静期：排到冷却结束那一刻再看。下限 3 秒 —— 时钟回拨 /
+     * 刚说完的边界情形不至于排出一个立刻触发又立刻被拦的空转循环。 */
+    if (why === 'chat_cooldown') {
+      retryIdleTimer(Math.max(3000, lastChatAt + cooldownMs() - Date.now()));
+      return;
+    }
     retryIdleTimer();
     return;
   }
@@ -2407,6 +2449,9 @@ async function proactiveSpeak() {
     /* 记一次"她主动开口了"。用户不回应的话，攒到 proactive.maxUnanswered
      * 就闭嘴（见 proactiveBlockedBy 的 'unanswered'）。 */
     proactiveUnanswered++;
+    /* 她主动说完也算一次"对话交互"—— 冷却期从这里起算，
+     * 不然刚说完主动的话又马上再挑一次话头。 */
+    lastChatAt = Date.now();
     /* 说完回中性。不回的后果不止是"她一直挂着笑"——**话术池会退化**：
      * 她停在 smile，下一轮 proactiveLine(emotion) 就永远从 smile 池里挑，
      * 按情绪分池这件事等于没做（实测日志里连着几条都是 smile 池）。
@@ -2437,12 +2482,44 @@ async function proactiveSpeak() {
    *   · 情绪 —— 主进程按它挑话头（PROACTIVE_LINES 那张表的口径）；
    *   · 历史 —— **老代码这里只发一句写死的 prompt，等于失忆**：
    *     她可能刚聊过这个话题又从头问一遍。只取最近 6 条，
-   *     主动搭话不需要长记忆，多了反而把"现在是什么时候"淹掉。 */
+   *     主动搭话不需要长记忆，多了反而把"现在是什么时候"淹掉。
+   * ⚠️ await 之前先记下对话代次 —— 主人随时可能开口（sendMessage 会 ++），
+   *    回来后对不上就整条作废，晚到的主动话不会从新对话里冒出来。 */
+  const epoch = chatEpoch;
   try {
     res = await window.pet.proactive({ emotion, history: history.slice(-6) });
   } catch { res = { ok: false }; }
   if (!floatBubble()) bubble.classList.remove('waiting');
   busy = false;
+
+  /* 在途作废：等她这句主动话的功夫主人开口了。主进程那边已经断流
+   * （chat:send 一进来就 abort），万一这句还是完整回来了，也绝不落账 ——
+   * 不进历史、不念、气泡收掉。注意此时主窗气泡可能已经显示过几个分片，
+   * 必须显式清（浮窗由主进程 abortStream 收，这里再兜一道 floatHide）。 */
+  if (epoch !== chatEpoch) {
+    window.pet?.floatHide?.();
+    if (!floatBubble()) {
+      bubble.classList.add('hidden');
+      bubbleText.textContent = '';
+      bubbleThink.textContent = '';
+    }
+    console.log('[pet] proactive 在途作废（主人先开口了）');
+    pokeIdleTimer();
+    return;
+  }
+
+  /* 她选择沉默（主进程判好送回来的 [silent]）：等待态已由主进程收掉，
+   * 这里不 push 历史、不念、**也不记"没被搭理"** —— 她根本没开口，
+   * 不该占用 proactiveUnanswered 的配额。照常排下一轮。 */
+  if (res?.ok && res.silent) {
+    if (!floatBubble()) {
+      bubble.classList.add('hidden');
+      bubbleText.textContent = '';
+      bubbleThink.textContent = '';
+    }
+    pokeIdleTimer();
+    return;
+  }
 
   if (res?.ok) {
     replyBuffer = replyBuffer.replace(/\s+$/, '');   // 同 sendMessage：收掉标签留下的空行
@@ -2451,6 +2528,7 @@ async function proactiveSpeak() {
     saveHistory();
     flushSpeech();
     proactiveUnanswered++;    // 同上：攒到上限就闭嘴
+    lastChatAt = Date.now();  // 她主动说完了 —— 冷却期从这刻起算
   } else if (!floatBubble()) {
     bubble.classList.add('hidden');
     bubbleText.textContent = '';
@@ -2466,6 +2544,11 @@ async function sendMessage() {
   /* 用户发消息 = **明确**搭理她了 → 退避归零（见 noteUserResponse）。
    * 这条是 proactive 退避唯一的"复活"入口之一，别挪走。 */
   noteUserResponse();
+
+  /* 开口 = 在途的主动话全部作废（双保险的第一道；主进程的 abort 在源头）。
+   * 顺带把冷却期刷到"现在"—— 用户开口就是一次对话交互。 */
+  chatEpoch++;
+  lastChatAt = Date.now();
 
   busy = true;
   input.value = '';
@@ -2526,6 +2609,9 @@ async function sendMessage() {
   history.push({ role: 'assistant', content: replyBuffer });
   saveHistory();
   flushSpeech();        // 尾巴念掉；正文已经边收边念过（见 feedSpeech）
+  /* 回复完成 = 冷却期重新起算（覆盖开口时那个时间戳 —— 口径是
+   * "最后一次对话交互"，这轮聊完了从这里起算更准）。 */
+  lastChatAt = Date.now();
 
   // 说完了，稍微停一下再回到空闲
   setTimeout(() => {
@@ -2682,6 +2768,18 @@ window.pet?.on?.('pet:visible', (d) => {
   if (hidden === hiddenByUser) return;
   hiddenByUser = hidden;
   applyFrameCap();
+});
+
+/* 锁屏 / 解锁（主进程 powerMonitor 推来，四闸门之一）。
+ * 进锁屏：撤掉排好的主动搭话 —— 定时器到点必被闸门拦下，白排。
+ * 解锁：主人回来了，闲置周期从现在重新计（不是"把剩的那半截续上"）。 */
+window.pet?.on?.('pet:screen-locked', (d) => {
+  const locked = !!d?.locked;
+  if (locked === screenLocked) return;
+  screenLocked = locked;
+  if (locked) clearTimeout(idleTimer);
+  else pokeIdleTimer();
+  console.log('[pet] screen-locked', JSON.stringify({ locked }));
 });
 
 // 系统状态悬浮显示

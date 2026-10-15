@@ -321,6 +321,7 @@ function createStreamFilter(send, sendEmotion, sendThink = () => {}) {
   let emotion = null;
   let thought = null;
   let emitted = '';
+  let silentSeen = false;   // 出现过 [silent] 标签（"整条都是沉默"才作数，见 silent()）
   const cleaner = createCleaner();
   const opener = createOpenerStripper();
 
@@ -377,6 +378,13 @@ function createStreamFilter(send, sendEmotion, sendThink = () => {}) {
         const clean = cleanThink(mThink[1]);
         if (clean) { thought = clean; sendThink(clean); }
         if (i > 0) emit(pending.slice(0, i));
+      } else if (/^\[\s*silent\s*\]$/i.test(seg)) {
+        /* [silent] = 她选择这一轮不说（第 9 轮调研的 send-silent）。
+         * 同想法的处理：正文里不留字符；区别是它连独立通道都没有 ——
+         * 上层靠返回值里的 silent 知道这一轮是沉默。正文里还有别的内容时
+         * 标签照剥（当她开了个玩笑），但 silent() 只认"整条都是它"。 */
+        silentSeen = true;
+        if (i > 0) emit(pending.slice(0, i));
       } else {
         // 不是标签（模型自己用了方括号），原样发出去
         emit(pending.slice(0, j + 1));
@@ -408,7 +416,13 @@ function createStreamFilter(send, sendEmotion, sendThink = () => {}) {
 
     /* 这一轮解析出的想法（没有则 null）。
      * ⚠️ 必须在 end() 之后读 —— 最后一个标签是 end() 里 drain(true) 才定下来的。 */
-    think() { return thought; }
+    think() { return thought; },
+
+    /* 这一轮是不是"她选择沉默"：出现过 [silent] 且**一个字都没说出口**。
+     * emitted 含 end() 里剥器吐出的尾巴，所以同样必须在 end() 之后读。
+     * 模型把 [silent] 混在正文里（"[silent] 算了，没什么"）不算沉默 ——
+     * 那是她说的一句话，照常处理。 */
+    silent() { return silentSeen && !emitted; }
   };
 }
 
@@ -430,12 +444,13 @@ function createStreamFilter(send, sendEmotion, sendThink = () => {}) {
  * ⚠️ 合并顺序把 model / messages / stream 放在后面 —— 这三个是本层的契约，
  *    不许被 extraBody 顶掉（verify-llm.js 有断言拦这条）。
  *
- * 返回值：{ ok, emotion, think, tone, offline? } / { ok:false, error }
+ * 返回值：{ ok, emotion, think, tone, silent?, offline? } / { ok:false, error }
  *   · emotion —— 这一轮的情绪标签（没有则 null）
  *   · think   —— 这一轮的想法（[think:…] 的内容，没有则 null）；**不在正文里**
  *   · tone    —— 命中的助手腔短语，**只统计不改文本**，给上层记日志用
+ *   · silent  —— true = 她回了 [silent] 且整条没有正文（主动搭话的"不说"出口）
  *   · error   —— 出错时一定是**可读的一句话**，包含超时的原因和实际等了多少 */
-async function streamLLM(messages, { baseUrl, apiKey, model, extraBody, send, sendEmotion, sendThink, stallMs, totalMs }) {
+async function streamLLM(messages, { baseUrl, apiKey, model, extraBody, send, sendEmotion, sendThink, stallMs, totalMs, signal }) {
   const filter = createStreamFilter(send, sendEmotion, sendThink);
 
   if (!apiKey) {
@@ -460,6 +475,15 @@ async function streamLLM(messages, { baseUrl, apiKey, model, extraBody, send, se
   let abortWhy = null;
   let stallTimer = null;
 
+  /* 外部中止（在途作废，第 9 轮调研第一档）：她正生成主动话时用户开口，
+   * 上层（main.js 的 chat:send）把上一轮的 AbortController 掐掉 ——
+   * 在源头断流，chunk 不再往外走。abortWhy 记 'external'，
+   * 错误信息里能分清"超时"还是"被新一轮对话取代"。 */
+  if (signal) {
+    if (signal.aborted) abortWhy = 'external';
+    else signal.addEventListener('abort', () => { abortWhy = 'external'; ac.abort(); }, { once: true });
+  }
+
   /* 每收到一段数据就重新计时 —— 所以它拦的是"卡住"，不是"慢"。 */
   const armStall = () => {
     if (stallTimer) clearTimeout(stallTimer);
@@ -472,9 +496,12 @@ async function streamLLM(messages, { baseUrl, apiKey, model, extraBody, send, se
    * 不会泄漏：下面每条返回路径都会 stopTimers()（两个早退分支各自调，
    * 读循环那条走 finally）。 */
   const stopTimers = () => { clearTimeout(stallTimer); clearTimeout(totalTimer); };
-  const timeoutMsg = () => (abortWhy === 'total'
-    ? `响应超时：整轮超过 ${(total / 1000).toFixed(0)} 秒还没收完`
-    : `响应中断：${(stall / 1000).toFixed(0)} 秒没有收到新数据`);
+  const timeoutMsg = () => {
+    if (abortWhy === 'external') return '在途作废：主人先开口了，这句主动话不说了';
+    return abortWhy === 'total'
+      ? `响应超时：整轮超过 ${(total / 1000).toFixed(0)} 秒还没收完`
+      : `响应中断：${(stall / 1000).toFixed(0)} 秒没有收到新数据`;
+  };
 
   let res;
   try {
@@ -536,10 +563,10 @@ async function streamLLM(messages, { baseUrl, apiKey, model, extraBody, send, se
     stopTimers();
   }
 
-  /* ⚠️ 先 end() 再 think()：最后一个标签（含想法）是 end() 里那次
-   * drain(true) 才定下来的，顺序反了会漏掉收尾那一个。 */
+  /* ⚠️ 先 end() 再 think()/silent()：最后一个标签（含想法/沉默）是 end() 里
+   * 那次 drain(true) 才定下来的，顺序反了会漏掉收尾那一个。 */
   const emotion = filter.end();
-  return { ok: true, emotion, think: filter.think(), tone: filter.tone() };
+  return { ok: true, emotion, think: filter.think(), tone: filter.tone(), silent: filter.silent() };
 }
 
 module.exports = {

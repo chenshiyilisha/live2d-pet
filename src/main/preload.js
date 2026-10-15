@@ -15,6 +15,7 @@ const MAIN_EVENTS = [
   'pet:play-motion',    // 右键菜单里选了动作
   'pet:quiet',          // 进入 / 退出全屏静默（渲染层据此降帧、闭嘴）
   'pet:visible',        // 窗口显示 / 隐藏了（隐藏时降到 1fps，别白烧）
+  'pet:screen-locked',  // 锁屏 / 解锁了（渲染层据此拦主动搭话）
   'monitor:stats'       // 系统状态悬浮显示的数据
 ];
 

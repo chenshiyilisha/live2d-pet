@@ -172,12 +172,19 @@ console.log('\n══════ 6. 新增的"参数型"键必须有默认值�
   check(cfg.proactive.quietHours === '23-8', "免打扰时段默认 '23-8'（跨零点，见 quiet-hours.js）");
   check(cfg.proactive.maxUnanswered === 2, '未回复上限默认 2');
   check(cfg.chat.interruptMark === true, '打断标记默认开（记忆口径，不打扰、不占资源）');
+  /* 四闸门三键（第 9 轮第一档，2026-10-15）—— 都是"少打扰"型，默认开；
+   * 同样不进托盘，默认值是唯一守门人（渲染层都是 !== false 才生效）。 */
+  check(cfg.proactive.muteOnLock === true, '锁屏闭嘴默认开（对着锁屏说话没有场景）');
+  check(cfg.proactive.cooldownMinutes === 10, '聊完安静期默认 10 分钟');
+  check(cfg.proactive.allowSilent === true, '允许她沉默默认开（不勾她就没有"不说"的出口）');
 
   writeCfg({ proactive: { enabled: true } });     // 老配置：只有 enabled 这一个键
   const c2 = config.loadConfig();
   check(c2.proactive.quietHours === '23-8' && c2.proactive.maxUnanswered === 2,
     '老配置里缺这两个键时按默认值补上（逐段逐键合并，规矩 1）');
   check(c2.proactive.enabled === true, '补键的同时不顶掉用户写的 enabled');
+  check(c2.proactive.muteOnLock === true && c2.proactive.cooldownMinutes === 10 &&
+    c2.proactive.allowSilent === true, '四闸门三键在老配置里也按默认补上');
 }
 
 /* 清理：临时目录 + 撤销 require 劫持 */

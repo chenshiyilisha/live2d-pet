@@ -184,8 +184,11 @@ console.log('\n══════ D. 免打扰时段与「未回复退避」（2
     '本来就没欠账时不白排定时器（直接返回）');
 
   /* ⚠️ 每个"明确回应"的入口都要调它 —— 漏一个的表现是"用户点了她也没用"，
-   *    而且只在"她已经被冷落到上限"这个状态下才看得出来，非常隐蔽。 */
-  check(/noteUserResponse\(\);\s*\n\s*busy = true;/.test(PET), '发消息那一路清零');
+   *    而且只在"她已经被冷落到上限"这个状态下才看得出来，非常隐蔽。
+   *    （sendMessage 里 noteUserResponse 之后紧跟着 chatEpoch++ ——
+   *    在途作废和退避归零必须是同一动作的两半。） */
+  check(/noteUserResponse\(\);\s*\n\s*\/\* 开口 = 在途的主动话全部作废[\s\S]{0,200}?chatEpoch\+\+;/.test(PET),
+    '发消息那一路清零');
   check(/noteUserResponse\(\);.*\/\/ 点她/.test(PET), '点她那一路清零');
   check(/noteUserResponse\(\);.*\/\/ 摸完/.test(PET), '摸完松手那一路清零');
   /* 反向：mousemove 那条（5 秒一次）**不许**清零，否则退避形同虚设 */
@@ -287,6 +290,115 @@ console.log('\n══════ E. 媒体播放中不插话（2026-10-15 加�
       '🔴 用户自己发消息不看媒体状态 —— 插不插话由主人决定，不由我们');
     check(read('src/main/preload.js').includes("media: () => ipcRenderer.invoke('media:get')"),
       'preload 暴露了 media()（闸门唯一的取数口）');
+  }
+
+  console.log('\n══════ F. 四闸门：锁屏 / 聊完安静 / 在途作废 / send-silent（2026-10-15 加） ══════\n');
+
+  /* CRLF 工作区：切函数体前先归一化（verify-jitter 踩过的坑，这里统一用帮手） */
+  const petLF = (s) => s.replace(/\r\n/g, '\n');
+  const PET_LF = petLF(PET);
+  const MAIN_LF = petLF(MAIN);
+
+  /* 17) cooldownMs 的钳法 —— 切函数体配假配置真跑 */
+  {
+    const h = PET_LF.indexOf('function cooldownMs()');
+    const t = PET_LF.indexOf('\n}', h);
+    const sb = { Number };
+    vm.createContext(sb);
+    vm.runInContext(PET_LF.slice(h, t + 2) + ';globalThis.__cd = cooldownMs;', sb);
+    const cd = (o) => { sb.cfg = { proactive: o }; return sb.__cd(); };
+
+    check(cd(undefined) === 10 * 60 * 1000, '缺省回落默认 10 分钟（乱码/没写都不至于关掉闸门）');
+    check(cd({}) === 10 * 60 * 1000, '空对象同上');
+    check(cd({ cooldownMinutes: 0 }) === 0, '写 0 = 关');
+    check(cd({ cooldownMinutes: -5 }) === 0, '负数同"关"');
+    check(cd({ cooldownMinutes: 25 }) === 25 * 60 * 1000, '正常值直通');
+    check(cd({ cooldownMinutes: 99999 }) === 720 * 60 * 1000, '上限钳到 720 分钟（手滑不冻到明天）');
+    check(cd({ cooldownMinutes: 'abc' }) === 10 * 60 * 1000, '乱码回落默认（NaN 分支）');
+  }
+
+  /* 18) 闸门与分派（proactiveBlockedBy / proactiveSpeak 的源码形状） */
+  {
+    check(/muteOnLock !== false && screenLocked\)\s*return 'locked';/.test(PET_LF),
+      "锁屏闸门在 blockedBy 里，且带 muteOnLock !== false（默认开语义）");
+    check(/screenLocked\)\s*return 'locked';[\s\S]{0,400}?mediaPlaying\)\s*return 'media';/.test(PET_LF),
+      '顺序：locked 在 media 之前（锁屏比放媒体更"绝对"）');
+    check(/cd > 0 && Date\.now\(\) - lastChatAt < cd\)\s*return 'chat_cooldown';/.test(PET_LF),
+      '聊完安静期的判据（最后一次对话交互时间戳）');
+    check(/why === 'locked'\) \{ retryIdleTimer\(60 \* 1000\); return; \}/.test(PET_LF),
+      '锁屏分派：60 秒兜底（unlock 事件会主动重排）');
+    check(/why === 'chat_cooldown'\) \{\s*\n\s*retryIdleTimer\(Math\.max\(3000, lastChatAt \+ cooldownMs\(\) - Date\.now\(\)\)\);/.test(PET_LF),
+      '冷却分派：排到冷却结束，下限 3 秒防时钟回拨空转');
+  }
+
+  /* 19) 锁屏事件的两端（主进程推送 + 渲染层收口） */
+  {
+    check(/powerMonitor\.on\('lock-screen'/.test(MAIN_LF) && /powerMonitor\.on\('unlock-screen'/.test(MAIN_LF),
+      '主进程挂了 lock-screen / unlock-screen 两个监听');
+    check(/'pet:screen-locked', \{ locked: true \}/.test(MAIN_LF) && /'pet:screen-locked', \{ locked: false \}/.test(MAIN_LF),
+      '两个方向都推 pet:screen-locked');
+    check(read('src/main/preload.js').includes("'pet:screen-locked'"),
+      'preload 白名单放行 pet:screen-locked');
+    const sub = PET_LF.slice(
+      PET_LF.indexOf("on?.('pet:screen-locked'"),
+      PET_LF.indexOf('// 系统状态悬浮显示')
+    );
+    check(/if \(locked\) clearTimeout\(idleTimer\);/.test(sub), '进锁屏：撤掉排好的主动搭话');
+    check(/else pokeIdleTimer\(\);/.test(sub), '解锁：闲置周期从现在重新计');
+  }
+
+  /* 20) 在途作废的双保险（主进程断流 + 渲染层 epoch） */
+  {
+    check(/if \(proactiveAbort\) \{\s*\n\s*proactiveAbort\.abort\(\);/.test(MAIN_LF),
+      'chat:send 开头就 abort 在途的主动搭话（源头断流）');
+    check(/\{ signal: ac\.signal \}/.test(MAIN_LF), 'chat:proactive 把 AbortController 传进了 chatStream');
+    check(/proactiveAbort === ac\) proactiveAbort = null;/.test(MAIN_LF),
+      'finally 里只清自己那把锁（别把别人的账抹了）');
+    check(/const epoch = chatEpoch;/.test(PET_LF) && /await window\.pet\.proactive/.test(PET_LF),
+      '渲染层在 await 之前记下对话代次');
+    check(/if \(epoch !== chatEpoch\) \{/.test(PET_LF), 'await 之后对不上就整条作废');
+    const discard = PET_LF.slice(
+      PET_LF.indexOf('if (epoch !== chatEpoch)'),
+      PET_LF.indexOf('pokeIdleTimer();', PET_LF.indexOf('if (epoch !== chatEpoch)')) + 40
+    );
+    check(!/history\.push/.test(discard), '🔴 作废的话不进历史');
+    check(/floatHide/.test(discard), '作废时把浮窗也收掉（万一断流前已经说了半句）');
+  }
+
+  /* 21) send-silent（她可以选择不说） */
+  {
+    check(/proactive\?\.allowSilent !== false/.test(MAIN_LF), 'allowSilent 默认开语义（写 false 才关）');
+    check(/只回一个 \[silent\]/.test(MAIN_LF), '主动搭话的 prompt 给了"不说"的出口');
+    check(/res\?\.ok && res\.silent\)[\s\S]{0,320}?return \{ ok: true, silent: true \};/.test(MAIN_LF),
+      '主进程识别沉默并原样转告（正文早已被清洗层剥掉）');
+    const silentBranch = PET_LF.slice(
+      PET_LF.indexOf('if (res?.ok && res.silent)'),
+      PET_LF.indexOf('pokeIdleTimer();', PET_LF.indexOf('if (res?.ok && res.silent)')) + 40
+    );
+    check(!/proactiveUnanswered\+\+/.test(silentBranch),
+      '🔴 沉默不占"没被搭理"的配额（她根本没开口）');
+    check(!/history\.push/.test(silentBranch), '沉默不进历史');
+    check(/pokeIdleTimer\(\)/.test(silentBranch), '沉默照常排下一轮');
+  }
+
+  /* 22) 冷却时间戳的三个刷新点 */
+  {
+    const send = PET_LF.slice(PET_LF.indexOf('async function sendMessage()'), PET_LF.indexOf('sendBtn.addEventListener'));
+    check((send.match(/lastChatAt = Date\.now\(\)/g) || []).length >= 2,
+      'sendMessage 里两个刷新点（开口时 + 回复完成时）');
+    const speak = PET_LF.slice(PET_LF.indexOf('async function proactiveSpeak()'), PET_LF.indexOf('async function sendMessage()'));
+    check(/lastChatAt = Date\.now\(\);/.test(speak), '她主动说完也刷（冷却期从说完起算）');
+  }
+
+  /* 23) llm.js 的 [silent] 剥离（清洗层的标签分支） */
+  {
+    const LLM = read('src/main/llm.js');
+    check(LLM.includes('silentSeen = true;'), 'drain 认得 [silent] 标签（正文里剥掉不留字符）');
+    check(LLM.includes('silent() { return silentSeen && !emitted; }'),
+      "silent() 只认'整条都是沉默'（混在正文里的标签不算）");
+    check(LLM.includes('silent: filter.silent()'), 'streamLLM 返回值带 silent');
+    check(LLM.includes("signal.addEventListener('abort'") && LLM.includes("abortWhy = 'external'"),
+      '外部中止信号接进了 llm.js（在途作废的源头断流）');
   }
 
   console.log('\n──────────────────────────────');

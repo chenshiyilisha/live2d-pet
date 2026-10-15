@@ -2,7 +2,7 @@
 
 const {
   app, BrowserWindow, ipcMain, Tray, Menu,
-  screen, nativeImage, shell
+  screen, nativeImage, shell, powerMonitor
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -531,6 +531,17 @@ function refreshStatsTimer() {
  * ========================================================== */
 
 let quiet = false;
+
+/* 锁屏状态（powerMonitor 事件维护，渲染层闸门吃）。
+ * 与 quiet 的分界：quiet 是全屏静默那套七处收手的**状态机**；
+ * screenLocked 只拦主动搭话 —— 锁屏时她照常待机，只是不主动出声。 */
+let screenLocked = false;
+
+/* 在途的主动搭话请求（第 9 轮第一档的"在途作废"）。
+ * 她正生成主动话时用户开口 → chat:send 一进来就 abort()：
+ * 在 llm.js 的源头断流，chunk 不再往外走，晚到的主动话不会
+ * 从新对话的气泡里冒出来。 */
+let proactiveAbort = null;
 
 function quietPayload() {
   const q = loadConfig().quiet || {};
@@ -1715,7 +1726,7 @@ function proactiveMoodHint(emotion) {
 /* 把 llm.js 的 streamLLM 接到窗口上。
  * 依赖注入的代价就是这里多一层胶水 —— 但换来 llm.js 完全不碰窗口，
  * 可以脱离 Electron 单独 require 与测试。 */
-function chatStream(messages) {
+function chatStream(messages, opts = {}) {
   const cfg = loadConfig();
   /* 两条上下文都插进第二位（紧跟人设那条 system）。
    * ⚠️ 顺序：两个都是 splice(1, 0)，**后插的在前**。这里让媒体在外层，
@@ -1730,7 +1741,9 @@ function chatStream(messages) {
     ...cfg.llm,
     send: emitChatChunk,
     sendEmotion: emitChatEmotion,
-    sendThink: emitChatThink
+    sendThink: emitChatThink,
+    /* 外部中止信号（在途作废）：不传时 streamLLM 的行为与从前逐位一致 */
+    signal: opts.signal
   }).then((res) => {
     /* 助手腔短语**拦不住** —— 流式的字已经进气泡了，事后删不掉。
      * 这里只统计，用来判断提示词（config.js 的 style / format）到底管不管得住：
@@ -1959,6 +1972,14 @@ function registerIpc() {
   });
 
   ipcMain.handle('chat:send', async (_e, messages) => {
+    /* 用户开口 = 在途的主动搭话全部作废（第 9 轮第一档）。在源头断流，
+     * 晚到的主动话不会从这一轮的气泡里冒出来。渲染层还有一道 epoch
+     * 双保险（见 pet.js proactiveSpeak）—— 万一流恰好在断流前收完了，
+     * 那边也不会把它落进历史。 */
+    if (proactiveAbort) {
+      proactiveAbort.abort();
+      proactiveAbort = null;
+    }
     // 悬浮气泡：这一轮对话从现在开始显示（浮窗关着时是 no-op）
     bubble.beginStream();
     try {
@@ -2033,6 +2054,16 @@ function registerIpc() {
       .slice(-6)
       .map((m) => ({ role: m.role, content: m.content.slice(0, 500) }));
 
+    /* send-silent（第 9 轮第一档）：给她留"不说"的出口 —— 没什么自然
+     * 可说的就回一个 [silent]，标签由 llm.js 的清洗层剥掉，不进气泡
+     * 不进历史。关掉 allowSilent 时提示词不提，模型自然不会输出标签。 */
+    const allowSilent = cfg.proactive?.allowSilent !== false;
+    const silentHint = allowSilent
+      ? '如果实在没什么自然可说的，就只回一个 [silent]，不用硬找话说。'
+      : '';
+
+    const ac = new AbortController();
+    proactiveAbort = ac;
     bubble.beginStream();
     try {
       const res = await chatStream([
@@ -2042,14 +2073,26 @@ function registerIpc() {
           role: 'user',
           content: '（主人已经有一阵子没搭理你了。主动开个话头，一句话就够，' +
                    '别问"在忙吗"这种客套，按你的性子随口说点什么。' +
+                   (silentHint ? silentHint : '') +
                    proactiveMoodHint(c.emotion) + '）'
         }
-      ]);
+      ], { signal: ac.signal });
+      if (res?.ok && res.silent) {
+        /* 她选择沉默：等待态照常收掉，但渲染层不 push 历史、不念、
+         * 也不记"没被搭理"（她根本没开口）。 */
+        bubble.endStream();
+        console.log('[chat] proactive silent（她选择这会儿不说）');
+        return { ok: true, silent: true };
+      }
       if (res?.ok) bubble.endStream(); else bubble.abortStream();
       return res;
     } catch (err) {
       bubble.abortStream();
       throw err;
+    } finally {
+      /* 只有还是自己那把锁才清 —— 期间 chat:send 可能已经 abort 并置
+       * 过 null，别把别人的账抹了。 */
+      if (proactiveAbort === ac) proactiveAbort = null;
     }
   });
 
@@ -2257,6 +2300,25 @@ if (!gotLock) {
     createWindow();
     createTray();
     startCursorPolling();
+
+    /* 锁屏 / 解锁 → 推给渲染层当主动搭话的闸门（第 9 轮第一档）。
+     * 对着锁屏说话没有任何场景；解锁 = 主人回来了，渲染层会自己重排闲置。
+     * ⚠️ 这只拦**主动搭话**，不进全屏静默那套状态机 —— 锁屏时她照样
+     *    眨眼呼吸（反正谁也看不见），只是不主动出声。 */
+    try {
+      powerMonitor.on('lock-screen', () => {
+        screenLocked = true;
+        console.log('[lock] screen locked');
+        try { mainWindow?.webContents.send('pet:screen-locked', { locked: true }); } catch { /* ignore */ }
+      });
+      powerMonitor.on('unlock-screen', () => {
+        screenLocked = false;
+        console.log('[lock] screen unlocked');
+        try { mainWindow?.webContents.send('pet:screen-locked', { locked: false }); } catch { /* ignore */ }
+      });
+    } catch (err) {
+      console.warn('[lock] powerMonitor 不可用:', String(err?.message || err));
+    }
 
     /* 换显示器 / 改系统缩放后自动适配。
      *

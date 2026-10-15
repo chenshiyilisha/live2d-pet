@@ -1278,6 +1278,7 @@ function buildMenuTemplate() {
     ...appearanceSubmenu(cfg),
     { type: 'separator' },
     flag('appearance', 'jitter', '表情节奏抖动'),
+    flag('appearance', 'emotionDecay', '情绪自然回落'),
     flag('appearance', 'textureLod', '纹理降档（省显存）'),
     flag('appearance', 'alwaysOnTop', '窗口置顶')
   ];

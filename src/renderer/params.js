@@ -360,3 +360,79 @@ export function emotionDeviation(cur, eff) {
   }
   return m;
 }
+
+/* ============================================================
+ *  情绪衰减 —— 安定之后按指数曲线回落到 calm
+ *
+ *  要解决的问题：`[emo:xxx]` 之后情绪目标**永远保持** —— 一句
+ *  [emo:happy] 过后她能高兴一整晚，惊讶挂半小时。竞品（Open-LLM-VTuber
+ *  那一族）靠"下一次回复自带新标签"盖掉旧的，没人再说话表情就冻在
+ *  那儿 —— 第 8 轮定向调研确认这是全行业的通病。
+ *
+ *  学界口径（R. Picard, "Affective Computing", 1997）：情绪是强度随
+ *  时间**指数衰减**的瞬态 —— I(t) = I(t₀)·e^(−t/τ)。衰减率按情绪效价
+ *  （valence）取"正快负慢"：高兴来得快去得也快，气要生一阵 ——
+ *  学界对快慢有分歧，但"惊讶转瞬即逝、不快消得慢"是日常直觉，照此给值。
+ *
+ *  落法（刻意不动插值层一根手指）：
+ *    · 安定保持满（EMO_SETTLE_HOLD_MS）之后才启动 —— 表情还在
+ *      "长出来"的路上就衰减，脸上永远长不满；
+ *    · 衰减只把**本帧有效目标**向 calm 混合（mixEmoDecay），逼近目标
+ *      的那套错峰插值（EMO_SPEED）原样复用 —— 回落自带"眉先回、
+ *      身体后回"的层次，不用另写一套衰减动画；
+ *    · 情绪**标签**不动：`emotion` 永远是最后一次的情绪名（台词池、
+ *      [emo:xxx] 诊断都靠它），衰减只管脸上的姿态强度。
+ *
+ *  ⚠️ 键集合必须写全 8 个情绪（与 EMO_SPEED 同款约束）—— 漏一个就
+ *     静默走 EMO_DECAY_DEFAULT，verify-emotion-decay.js 会拦。
+ *  数值口径：**秒**。0 = 该情绪不衰减（calm 的目标本来就是 calm）。
+ * ========================================================== */
+export const EMO_DECAY = {
+  calm: 0,        // 中性姿态，衰减没有对象
+  happy: 30,      // 开心来得快去得也快
+  smile: 50,      // 浅浅的笑挂得久一点
+  shy: 40,        // 害羞要脸红一阵才退
+  surprised: 12,  // 惊讶转瞬即逝 —— 全表最短
+  think: 150,     // 在想事情，念头不会瞬间散
+  serious: 200,   // 严肃 / 不快消得最慢（负效价，最慢的一档）
+  sleepy: 90      // 困意是慢慢退的
+};
+
+/* 表里没写的情绪兜底（真走到这里 = EMO_DECAY 漏了键，verify 会报红）。 */
+export const EMO_DECAY_DEFAULT = 60;
+
+/* 强度跌到这以下直接归 0。不归 0 的话目标永远在慢慢挪，emoCur 追它
+ * 的偏差就永远压不进 EMO_SETTLE_EPS，「情绪安定」这个主动搭话的
+ * 前置条件就永远凑不满了 —— 衰减必须有一个干净的终点。 */
+export const EMO_DECAY_EPS = 0.02;
+
+/* 衰减启动后经过 decayMs 毫秒，该情绪**剩下的强度**（1 → 0）。
+ * 纯函数、无状态 —— verify-emotion-decay.js 喂假时钟逐点对曲线。
+ * decayMs ≤ 0 一律满强度（还没开始衰减）；τ = 0 的情绪（calm）只要
+ * 启动就已到底 —— 它的目标就是中性，没有可衰减的东西。 */
+export function emoDecayAmt(name, decayMs) {
+  if (!(decayMs > 0)) return 1;
+  const tau = (EMO_DECAY[name] ?? EMO_DECAY_DEFAULT) * 1000;
+  if (!tau) return 0;
+  const amt = Math.exp(-decayMs / tau);
+  return amt <= EMO_DECAY_EPS ? 0 : amt;
+}
+
+/* 把本帧有效目标向 calm 混合（**原地改 eff**，复用调用方的对象不分配）。
+ *   amt = 1（或更大） 满强度 —— 逐字段不动：与没这功能时逐位一致
+ *   amt = 0           衰减到底 —— eff == calm
+ * ⚠️ 必须在 buildEmoTarget() 之后、插值循环之前调：混合的是「基础 +
+ *    摸头调制」算完的有效目标，夹取（EMO_RANGE）已经做过 —— calm 的
+ *    每个值都在范围内，凸组合不会把夹好的值再顶出界。
+ * 纯函数可测（verify 拿合成表逐字段对数）。 */
+export function mixEmoDecay(eff, amt) {
+  if (!(amt < 1)) return eff;
+  const calm = EMOTION.calm;
+  if (amt <= EMO_DECAY_EPS) {
+    for (const k in eff) eff[k] = calm[k];
+    return eff;
+  }
+  const w = 1 - amt;                       // calm 的权重
+  for (const k in eff) eff[k] += (calm[k] - eff[k]) * w;
+  return eff;
+}

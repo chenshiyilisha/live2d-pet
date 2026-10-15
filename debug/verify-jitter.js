@@ -106,8 +106,21 @@ check(/import\s*\{\s*rollFactors\s*\}\s*from\s*'\.\/jitter\.js'/.test(pet),
   "pet.js 从 './jitter.js' 引进 rollFactors");
 check(/emoJitter\s*=\s*rollFactors\(Object\.keys\(EMOTION\.calm\)\)/.test(pet),
   '初始 emoJitter 就绪（不是 null —— 首次切换前也已确定）');
-check(/function setEmotion[\s\S]{0,400}?rollFactors\(Object\.keys\(emoTarget\)\)/.test(pet),
-  'setEmotion 里重抽一整套（切换点唯一，不会漏抽）');
+/* 2026-10-15 从「400 字符窗口」改成切函数体：setEmotion 里加了情绪衰减的
+ * 清零段后 rollFactors 离函数头远了，窗口断言会误报。真正要保证的是
+ * rollFactors 在 setEmotion **函数体内**（切换点唯一）且在同名早退之后。 */
+{
+  /* ⚠️ 工作区是 CRLF（git autocrlf），`\n}\n` 必须先归一化行尾才切得到。 */
+  const petN = pet.replace(/\r\n/g, '\n');
+  const h = petN.indexOf('function setEmotion(');
+  const t = petN.indexOf('\n}\n', h);
+  const fn = petN.slice(h, t);
+  check(h >= 0 && t > h, 'setEmotion 函数体能切出来');
+  check(fn.includes('rollFactors(Object.keys(emoTarget))'),
+    'setEmotion 里重抽一整套（切换点唯一，不会漏抽）');
+  check(fn.indexOf('rollFactors(Object.keys(emoTarget))') > fn.indexOf('if (name === emotion) return;'),
+    '抽在同名早退之后（没换情绪就不抽、不白推随机序列）');
+}
 check(/emoJitter\s*=\s*cfg\?\.appearance\?\.jitter\s*===\s*false\s*\n?\s*\?\s*null/.test(pet),
   '开关语义：`=== false ? null` —— 默认开，关掉时**不抽**（不推进随机序列）');
 check(/emoJitter\s*\?\s*emoJitter\[key\]\s*\?\?\s*1\s*:\s*1/.test(pet),

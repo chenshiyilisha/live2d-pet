@@ -6,7 +6,8 @@ import { Live2DModel, MotionPriority } from '@naari3/pixi-live2d-display/cubism5
 import {
   MODELS, MODEL_NAME, INK_TOP_C_RATIO, P, State, EMOTION,
   EMO_SPEED, EMO_SPEED_DEFAULT, PAT, buildEmoTarget,
-  EMO_SETTLE_EPS, EMO_SETTLE_HOLD_MS, emotionDeviation
+  EMO_SETTLE_EPS, EMO_SETTLE_HOLD_MS, emotionDeviation,
+  emoDecayAmt, mixEmoDecay
 } from './params.js';
 import { configureTTS, initTTS, speak, enqueueSpeech, takeSentences, stopSpeak, ttsVoiceInfo, ttsQueueState, setSpeechObserver, lipEnv, spokenText, resetSpoken, isSpeaking } from './tts.js';
 import { parseQuietHours, inQuietHours, msUntilQuietEnd } from './quiet-hours.js';
@@ -149,6 +150,19 @@ let lastActivityPoke = 0;
  * ⚠️ 不另起一个时钟去算 —— 规矩 16：能自调度/由主循环推进就别开第二个定时器。 */
 let emoSteadyMs = 0;
 
+/* ── 情绪衰减（安定后按 Picard 曲线回 calm，查表见 params.js 的 EMO_DECAY）──
+ * 三个量一笔账：
+ *   decayAmt     当前情绪强度（1 = 满情绪，0 = 已衰减回中性）
+ *   decayMs      衰减启动后累计的毫秒（喂给 emoDecayAmt 算强度）
+ *   decayActive  衰减是否已启动。
+ * ⚠️ decayActive 必须有、不能只回看 emoSteadyMs：衰减本身让目标在动，
+ *    追它的 emoCur 偏差可能重新超 EMO_SETTLE_EPS（目标每秒挪 0.2 时，
+ *    身体通道的稳态滞后就有 0.09），启动条件会被衰减自己打破 ——
+ *    启动看一眼条件，之后只认状态。 */
+let decayAmt = 1;
+let decayMs = 0;
+let decayActive = false;
+
 /* ============================================================
  *  工具
  * ========================================================== */
@@ -205,7 +219,14 @@ function stopEventMotions() {
 
 /* 切情绪。目标变了之后由 ticker 逐帧插值过去，不会硬切。 */
 function setEmotion(name) {
-  if (!EMOTION[name] || name === emotion) return;
+  if (!EMOTION[name]) return;
+  /* 衰减的账清零。🔴 必须放在早退**之前**：同一个情绪再次触发
+   * （LLM 连两句都给 happy、摸头时她本来就在 happy）也该算
+   * "新的一股满强度情绪"，而不是接着上一次的残量继续往下衰。 */
+  decayAmt = 1;
+  decayMs = 0;
+  decayActive = false;
+  if (name === emotion) return;
   emotion = name;
   emoTarget = EMOTION[name];
   /* 重抽这一趟的节奏抖动（就为这一件事：同一句情绪两次进入别长得一模一样）。
@@ -1124,6 +1145,30 @@ async function boot() {
     updatePat(dt);
     buildEmoTarget(emoEff, emoTarget, patAmt, patPhase);
 
+    /* 情绪衰减：安定保持满了之后，目标按 Picard 指数曲线向 calm 滑
+     * （曲线与每情绪的 τ 见 params.js 的 EMO_DECAY）。
+     * ⚠️ 位置必须卡在 buildEmoTarget 之后、插值循环之前 —— 混合的是
+     *    本帧有效目标，回落因此**复用整套错峰插值**：眉先回、身体后回。
+     * ⚠️ 启动条件只看这一下，启动后只认 decayActive：衰减本身会让
+     *    偏差超标（见状态变量那段），回看 emoSteadyMs 会被自己打破。
+     *    摸头开始时 setEmotion 已把账清零，这里不会和摸头打架。
+     * ⚠️ emotion 标签不随衰减改 —— 台词池 / [emo:xxx] 诊断靠它，
+     *    脸上的强度看 decayAmt（PET_SNAPSHOT=mood 一并输出）。 */
+    if (cfg?.appearance?.emotionDecay !== false) {
+      if (!decayActive && emotion !== 'calm' &&
+          emoSteadyMs >= EMO_SETTLE_HOLD_MS) decayActive = true;
+      if (decayActive && emotion !== 'calm') {
+        decayMs += dt * 1000;
+        decayAmt = emoDecayAmt(emotion, decayMs);
+      }
+      mixEmoDecay(emoEff, decayAmt);
+    } else if (decayAmt !== 1) {
+      /* 开关中途被关掉：回满强度，让插值自己滑回去（不硬跳）。 */
+      decayAmt = 1;
+      decayMs = 0;
+      decayActive = false;
+    }
+
     /* 情绪插值：指数逼近（与帧率无关），但**每个字段一个速度** ——
      * 一张脸同时到位是木偶，错峰到位才像活人。速度表见 params.js 的 EMO_SPEED。
      * 用 1 − e^(−dt·s) 而不是乘一个固定 k，是为了不同帧率下轨迹一致。
@@ -1229,6 +1274,10 @@ async function boot() {
       headTop: () => headTopY,   // 实量头顶（诊断探针用；0 = 还没量到）
       pointer: () => pointer,
       emotion: () => emotion,
+      /* 情绪衰减的强度（1 = 满情绪，0 = 已回中性）。和 emotion 标签一起
+       * 看：标签永远是最后那个情绪，脸上的实际强度在这里 ——
+       * PET_SNAPSHOT=mood 的衰减追踪靠它，不截一张图猜"她淡了没有"。 */
+      decay: () => decayAmt,
       /* 摸头（A-B-C）的状态机快照。露出来是为了让诊断脚本能**读真实状态**
        * 判断"按下到底有没有起手、按住期间在不在摆"，而不是靠盯截图猜。 */
       pat: () => ({

@@ -663,6 +663,7 @@ export function attachSnapProbes(live) {
             console.log('[pet] mood', JSON.stringify({
               emo: name,
               cur: live.emotion(),
+              decay: live.decay(),       // 8 档都在安定保持期内，应恒为 1
               browLY: rd(live.P().BROW_L_Y), browRY: rd(live.P().BROW_R_Y),
               browLX: rd(live.P().BROW_L_X), browRX: rd(live.P().BROW_R_X),
               ahoge: rd(live.P().AHOGE),
@@ -671,6 +672,29 @@ export function attachSnapProbes(live) {
               ink: snap?.ink
             }));
           }
+
+          /* --- ③ 情绪衰减曲线（emotion.decay，Picard 指数回 calm）---
+           * 切 happy 后：插值到位约 2s，安定保持 5s，第 7s 起开始衰减
+           * （τ=30s）。前 7s 采样应恒为 1，之后逐秒按 e^(-t/30) 落：
+           * 8s≈0.97 → 15s≈0.79 → 37s（5s 保持 + 32s）≈0.34。
+           * 采 BROW_L_Y / BODY_Y 是为了顺带看错峰回落：眉快（速度 9）
+           * 先回，身体慢（2.2）后回，两条曲线不该齐头。 */
+          live.setEmotion('happy');
+          const dec = [];
+          const t1 = performance.now();
+          for (let i = 0; i <= 32; i++) {
+            await wait(i === 0 ? 7000 : 1000);
+            dec.push([
+              Math.round(performance.now() - t1),
+              Number(live.decay().toFixed(3)),
+              rd(live.P().BROW_L_Y), rd(live.P().BODY_Y)
+            ]);
+          }
+          console.log('[pet] decay-trace', JSON.stringify({
+            fields: ['t_ms', 'decay', 'browLY', 'bodyY'],
+            tau_s: 30, holdMs: 5000,
+            rows: dec
+          }));
           console.log('[pet] mood done');
         }
 

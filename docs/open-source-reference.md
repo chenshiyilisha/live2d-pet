@@ -1,7 +1,10 @@
-# 开源参考调研（第 6–7 轮）· 逐项对照与可借鉴清单
+# 开源参考调研（第 6–10 轮）· 逐项对照与可借鉴清单
 
 > 第 6 轮（Nexus / Desktop-pet / chatgpt-desktopPet / Live2d-TTS-Audio-LipSync）见下；
-> 第 7 轮（AI 伴侣生态：Open-LLM-VTuber / astrbot 主动聊天插件 / awesome-ai-companion）见文末。
+> 第 7 轮（AI 伴侣生态：Open-LLM-VTuber / astrbot 主动聊天插件 / awesome-ai-companion）见文末；
+> 第 8 轮（参数级情绪插值：Cubism SDK / VTube Studio / Picard 衰减）紧随其后；
+> 第 9 轮（Cyrene-Agent 主动搭话策略 / Live2DPet 窗口停留）在文档最后；
+> 第 10 轮（自家 3D 版 ayan-3d 的四块积木对照）收尾。
 
 > 时间：2026-10-14 · 动机：本项目 VAD / 表情抖动 / 纹理 LOD / 真口型 / 媒体感知 / 主动搭话
 > 六项均为自研，**没有一行参考过现成实现**。这一轮专门去找同类开源工程，回答两个问题：
@@ -538,4 +541,193 @@ DenchiSoft/VTubeStudio wiki                      Interaction-between-Animations.
 npm: vtube-studio-controller                     resetToNeutral(fadeTime) / smoothParameterTransitionBatch
 Picard 1997 / TRIPLE ECA / EMIA 2015             情绪指数衰减 + 正负衰减率 + mood 两层
 CSDN blog.csdn.net/weixin_29274969/164590413     Fay×Live2D：表情回落机制 + lerp 平滑（0.2-0.3 系数）
+```
+
+
+# 第 9 轮 · 主动搭话策略（2026-10-15）
+
+背景：第 6/7 轮的防复读、免打扰时段、未回复退避、媒体播放中不插话，到 v0.2.0 都已落地。
+本轮不再重复 Nexus / Desktop-pet / Open-LLM-VTuber，专门找**还没写进闸门的「什么时候值得开口」**。
+**结论：值得搬的是 Cyrene-Agent 的主动搭话策略（纯函数闸门 + 四个由头 + 模型可以保持沉默）。
+Live2DPet 的窗口停留记录可以看，先不搬；它的情绪槽和第二轮选表情与我们的参数级方案冲突。**
+
+## 9.0 方法
+
+- 仍走 **GitHub 官方 API**（`search/repositories` + `git/trees` + `contents` base64）。
+  `raw.githubusercontent.com` 本机多次超时（情绪系统那份 300s 超时），改走 contents API 才拿到全文。
+- ⚠️ `Playa-0v0/Cyrene-Agent` 已改名，API 回 **301**，真实仓库是 **`Playa-Cyrene/Cyrene-Agent`**
+  （705★，2026-10-14 仍在推）。搜索引擎上的旧地址会指到改名前的链接。
+- 证据在 `.research-tmp/refs/round9/`（已 gitignore）。
+
+## 9.1 候选
+
+| 项目 | ★ | 推送 | 对口的位置 | 结论 |
+| --- | --- | --- | --- | --- |
+| `Playa-Cyrene/Cyrene-Agent` | 705 | 2026-10-14 | `src/main/proactive/proactive-policy.ts` + `proactive-trigger.ts` + `proactive-prompt.ts` | ★ 本轮主参照。Electron + pixi-live2d-display，体量是整套 Agent，**只借主动搭话这三份纯函数** |
+| `x380kkm/Live2DPet` | 87 | 2026-06-22 | `emotion-system.js` / `audio-state-machine.js` / `enhance/memory-tracker.js` | 窗口停留可参考；情绪槽与预制音频不搬 |
+| `Tacky7788/Project-elino` | 8 | 2026-03 | `memory-vector.cjs` 等 | 向量记忆，第 7 轮已判定过重 |
+| `gameswu/NyaDeskPet` | 18 | 2026-02 | Agent 插件 | 第 7 轮已看过布局，本轮无新的可搬单点 |
+
+同一次 `live2d desktop pet electron` 搜索（按更新排序，33 条）里其余仓库 star 为 0–9，未逐份读源码。
+
+## 9.2 代码级可借鉴：Cyrene 主动搭话 ★
+
+我们现在的搭话（`pet.js` `proactiveBlockedBy`）：闲置够久 + 情绪安定 + `quietHours` **23–8 整段闭嘴**
++ 连续不理就停 + 媒体在播就延后。Cyrene 把「值不值得开口」拆成闸门和由头两层，都是纯函数。
+
+### ① 闸门 `canStartProactiveGeneration`（`proactive-policy.ts`）
+
+返回 `{ allowed, reason }`，调用方决定重试还是丢掉。我们缺、且**零新依赖**的几条：
+
+| reason | 判据 | 和我们的差别 |
+| --- | --- | --- |
+| `screen_locked` | 锁屏 | 我们没有。Electron `powerMonitor` 的 `lock-screen` 即可 |
+| `normal_quiet_period` | 正常对话结束后 **30 分钟**内不再主动开口（`NORMAL_QUIET_MS`） | 我们聊完仍按闲置分钟计，可能刚说完又来一句 |
+| `global_cooldown` | 两次主动之间至少 **2 小时** | 我们被闸门拦住是 2 秒重试；开口成功后主要靠闲置周期和未回复上限 |
+| `night_inactive` | 22 点–8 点 **且** 闲置 ≥ 60 秒才闭嘴 | 我们是整段硬闭嘴。人还在键盘前时，他们允许一句轻声关心 |
+| `unanswered_limit` | 连续未回复 ≥ 2 直接停 | 我们已有同类上限 |
+| `followup_cooldown` / `followup_same_scene` / `followup_score_too_low` | 第一次没人理：再等 **6 小时**、必须换由头、评分 ≥ 85，才允许最后一次 | 我们是「到上限就停」，没有「换个由头再试一次」 |
+| `stale_epoch` | 生成途中用户开口 → `proactiveEpoch += 1`，晚到的那句丢掉（`canCommitProactiveMessage`） | 我们没有「在途主动句作废」 |
+
+`markUserActivity` 会把 `unansweredCount` 清零并推进 epoch，对得上我们的 `noteUserResponse()`。
+
+### ② 由头 `proactive-trigger.ts`（60 秒扫一次，启动后先等 90 秒）
+
+四个场景，各有冷却，评分低于 60 直接扔掉：
+
+| sceneId | 窗口 / 事件 | 基础分 | 冷却 |
+| --- | --- | --- | --- |
+| `morning_greeting` | 7:00–10:30，离窗心越近分越高（`timeWindowFit` 0–15） | 52 | 23 小时 |
+| `evening_checkin` | 18:00–22:00 | 44 | 8 小时 |
+| `back_from_away` | 上一拍闲置 ≥ 30 分钟，这一拍闲置 < 60 秒（人回来了） | 68 | 4 小时 |
+| `work_break` | 连续活跃 ≥ 90 分钟（闲置 ≥ 60 秒就清掉这段计时） | 56 | 3 小时 |
+
+评分：`基础分 + 时间窗贴合 + 事件紧迫 + 沉默奖励(0–12) + 未回复惩罚(0 / −18 / −100)`，夹到 0–100。
+`back_from_away` 的紧迫度 = 离开分钟数（封顶 20）；`work_break` 从 90 分钟起每多 30 分钟 +4（封顶 20）。
+同优先级时按定义顺序稳定排序，`back_from_away` 的 priority 最高。
+
+天气三个 sceneId（`weather_rain` / `weather_temperature_drop` / `weather_sunny`）只是占位，`getWeatherContext` 为空就不生成。**先不要接天气。**
+
+`work_break` 只看「连续活跃多久」，不读窗口标题。这比 Live2DPet 的标题累计更适合我们的打扰尺度，
+也能接到已有的 `powerMonitor.getSystemIdleTime()`。
+
+### ③ 模型可以闭嘴（`proactive-prompt.ts`）
+
+系统提示写死：没有自然的话就返回 silent；不要声称看过屏幕、检测过键鼠、调用过工具。
+深夜仍在使用时另加一段：可以轻轻关心休息，不要说教，不要每次都提睡觉。
+第一次未回复的跟进另加一段：不要责怪、催促、卖惨，也不要重复「在吗」。
+
+模型只能返回两种 JSON（无 markdown）：
+
+```json
+{"decision":"send","text":"一句自然的话"}
+{"decision":"silent","text":""}
+```
+
+`parseProactiveDecision`：非法 JSON、形状不对、空文本、超过 500 字 → `{ kind: "invalid" }`，调用方丢掉。
+主动话和普通聊天**分两段历史**写进提示（各最多 16 条，带时间戳），避免自说自话污染主会话。
+
+落地时闸门仍放 `proactiveBlockedBy()`，由头与评分做成纯函数，verify 喂假时钟（同 `verify-quiet-hours` / `verify-emotion-decay`）。
+提示词里的「不许说破」补到现有 `PROACTIVE_MOOD_HINT`。
+
+## 9.3 Live2DPet：可看、先不搬
+
+证据：`x380kkm/Live2DPet` `main` 分支，contents API 抓下。
+
+- **`enhance/memory-tracker.js`**：前台窗口标题按秒累计，5 分钟刷一次；每个标题留 `totalSec / lastSeen / dayCount / recentDays`，`recentDays` 只留 7 天，30 天没见过的标题整份删掉。这是「你在某个窗口停了多久」的轻量记法。窗口标题经常带文档名和聊天对象，**默认不该进提示词**。要做「写代码写了很久」优先用上一节的 `work_break`（不看标题）。
+- **`emotion-system.js`**：情绪值每秒往上涨，悬停再加一半速率，满 100 才播一次表情/动作，时长 3–5 秒后回落；回复文本会再打**一次**模型，从模型自带的表情名里挑。和我们的 `[emo:]`、16 字段错峰、Picard 衰减回 calm 是两条路，换过去会拆掉规矩 28/31。
+- **`audio-state-machine.js`**：偏好模式 `tts → default-audio → silent`，合成不可用就播预制短音频。我们 WinRT 失败已经逐句退回系统语音（规矩 33），中间不必再加一套素材。
+- **`prompt-builder.js`**：`{{petName}}` / `{{userIdentity}}` 模板替换。我们的名字和人设已经走 `resolveName` / `resolvePersona`。
+- 同仓库还有定时截屏 + VLM 关键帧（`screen-capture.js` / `vlm-extractor.js`）。和「桌宠闲聊」的范围不合，**不搬**。
+
+## 9.4 明确不搬
+
+- **Cyrene 整体**（2765 个文件：DMAE 记忆、QQ/微信/飞书投递、工具沙箱、Obsidian 同步）。只借 `src/main/proactive/` 这三份。
+- **向量记忆**（elino 的 `memory-vector.cjs`，Cyrene 的 memory 目录）。第 7 轮结论不变。
+- **第二轮 LLM 选表情名**、**情绪槽涨满再播 5 秒**、**预制语音片段**、**截屏 / VLM**。
+- **天气主动搭话**：Cyrene 自己也还是空函数。
+
+## 9.5 本轮空白
+
+- Electron / Node 侧读 Windows GSMTC 的现成实现：本轮没再找到，第 6/7 轮结论不变。
+- 参数级错峰插值：本轮对照的两家仍是表情名 / 动作名，第 8 轮结论不变。
+
+## 附：本轮证据路径
+
+```
+.research-tmp/refs/round9/cyrene-proactive-policy.ts    闸门 + epoch + 未回复跟进   ★
+.research-tmp/refs/round9/cyrene-proactive-trigger.ts   四场景评分与冷却            ★
+.research-tmp/refs/round9/cyrene-proactive-prompt.ts    send/silent JSON + 不许说破 ★
+.research-tmp/refs/round9/live2d-emotion.js             情绪槽 + 第二轮选表情（反面）
+.research-tmp/refs/round9/live2d-audio-sm.js            tts → 预制音频 → 静音
+.research-tmp/refs/round9/live2d-memory.js              窗口标题停留秒数
+.research-tmp/refs/round9/live2d-prompt-builder.js      模板变量人设
+Playa-Cyrene/Cyrene-Agent@master  src/main/proactive/{proactive-policy,proactive-trigger,proactive-prompt}.ts
+x380kkm/Live2DPet@main            src/core/{emotion-system,audio-state-machine,prompt-builder}.js
+                                  src/core/enhance/memory-tracker.js
+```
+
+
+# 第 10 轮 · 自家 3D 版对照（2026-10-15）
+
+背景：用户问 `E:/UnityProjects` 里有什么可借鉴的。那里是**同一产品的 3D 版**
+（`ayan-3d`，Unity 2022.3 + VRM）及其 M1–M6 构建验证基建 —— 不是第三方项目，
+是自家的另一半，而且它把 2D 版下一步要走的路提前趟了一截。
+
+## 10.1 四块积木（`Assets/Scripts/Runtime/`，全部 2026-10-15 新写）
+
+| 文件 | 行数 | 内容 | 与 2D 版的关系 |
+| --- | --- | --- | --- |
+| `PetMood.cs` | 890 | **四条漂移轴**（能量 / 社交渴望 / 效价 / 困倦），每分钟速率表，越阈值才触发表情；只调制呼吸/摇摆幅度，**绝不写姿势通道、永不碰 blink 键** | 就是 2D 第 8 轮「备选 A mood 心境层」的完整设计+实现。量纲坑已标：参考实现是 0–100 尺度，归一到 [0,1] 后常数**不能照抄**（差 100 倍） |
+| `PetRelationship.cs` | ~400 | 好感轴：边际递减 + 最小可见增量 + 日涨幅上限 + 慢衰减 + MaxTierReached 永不回退 | 2D 完全没有。设计出处四份真实源码（VPet `Likability` / Nexus `relationshipTracker` / dg-man / Mochi），取舍逐条注明 |
+| `PetRhythm.cs` | ~300 | 24 小时活跃槽学习（学作息，接替静态 quietHours） | 🔴 参考实现（Nexus `rhythmLearner.ts`）逮到**真 bug**：周衰减分支写在 `elapsed < 7 天` 早退之后几乎不可达，实际是"隔周整份重置"；照抄前必须修。陈旧重置还把 Total 一起清零（Nexus 保留 → 全天假活跃） |
+| `PetFocusSensor.cs` | ~300 | 全屏/游戏静默：**SHQueryUserNotificationState 先问系统**（QUNS_BUSY=2 / D3D=3 / PRESENTATION_MODE=4 / NOT_PRESENT=1）、矩形兜底、rcMonitor 口径、进入零延迟/退出 4s 迟滞 | 直接回答 2D 的「Win11 XAML 岛误判全屏」待观察项（见 10.3） |
+
+共同戒律（对 2D 移植友好）：**纯逻辑、零时钟（时间由调用方注入）、自带持久化清洗** ——
+意味着从 C# 移植到 2D 版的 JS 几乎是直译，不碰 Unity API。
+
+## 10.2 状态与验证方法论
+
+- **PetMood 已接入** 3D 主循环（AyanRuntime 调制点）；其余三块是"积木"，等 M6-C 验证落地再接线。
+- M6-C 验证当前 **INCOMPLETE**（19 条声明全部"证据不足"，多臂探针未跑完）——3D 版自己也还没验收。
+- 值得偷师：**验证侧独立写解析解**（`merge_m6c.py` 的 `offline_integrate` 与生产代码不是同一份实现），
+  生产代码悄悄改了漂移常量而没人动设计文档时会立刻炸出来。
+- 好感轴设计共识（四个参考同时指向）：**永不惩罚性状态**（Petz 1997 式"离家出走"被
+  2026 年的三个项目同时否定）；解锁过的表现力不收回（Mochi）；衰减要慢（Nexus 形状 × 1/5）。
+
+## 10.3 已落地到 2D 版：fullscreen.js 的 QUNS + explorer 排除
+
+照 PetFocusSensor 的论证给 `live2d-pet/src/main/fullscreen.js` 补了两道矩形之外的证据：
+
+- **采样**：常驻 PS 脚本加 `SHQueryUserNotificationState`（sample 新增 `q`）+ 前台进程名（`n`）。
+- **判定**：`q∈{2,3,4}` → 直接全屏（矩形量不到的演示模式/DPI 错位也兜得住）；`q==1`（锁屏/屏保）
+  → 明确不算（why 标 `quns:not-present`，将来锁屏闸门可吃）；其余态度矩形才有发言权
+  （无边框窗口游戏和全屏 UWP 的 QUNS 不保证 BUSY，**矩形兜底不能撤**）。
+- **explorer.exe 宿主一票否决**：Win11 的任务栏/小组件/开始菜单宿主都是 explorer 里的
+  XAML 岛窗口，矩形能盖满整屏（实测误判过全屏）；但 explorer 进程永远不可能是全屏应用 ——
+  按进程名排除比猜类名稳。类名排除表同时补了 `XamlExplorerHostIslandWindow`。
+- 排除顺序锁死：self / shell 类 在 QUNS 与 explorer 判定**之前**（输入自相矛盾时宁可漏判，
+  死锁豁口不许重开）。回归 `debug/verify-quiet.js` 新增 1b 节（18 项断言）。
+
+## 10.4 对 2D 版的移植路线（未做，按优先级）
+
+1. **mood 层落地时直接拿 PetMood 当蓝本**：速率表、阈值、三条边界（只调制不写姿势通道 /
+   永不碰 blink / 开关语义不变）+ 量纲换算的教训。等 3D 的 M6-C 验证报告出来再动手。
+2. **第 9 轮第一档的「锁屏闸门」**：`quns:not-present` 已在样本里，接 `proactiveBlockedBy` 即可。
+3. **PetRhythm 学习作息**：先在 3D 版验证周衰减修复后的行为，2D 版照抄修过的版本。
+4. **PetRelationship 好感轴**：2D 版要不要做是新决策；设计文档已现成（含四份出处的取舍理由）。
+
+## 10.5 不搬的
+
+- TransparentWindow / WindowHitTest / NativeContextMenu 等 Unity 侧窗口功夫 ——
+  2D 版 Electron 自己的方案已验证过，且两边窗口体系不同（D3D vs Chromium 合成器）。
+- 3D 版的验证基建（m6-tools 探针群）—— 思路可学（独立解析解），工具本身绑 Unity 工程。
+
+## 附：本轮证据路径
+
+```
+E:/UnityProjects/ayan-3d/Assets/Scripts/Runtime/{PetMood,PetRelationship,PetRhythm,PetFocusSensor}.cs ★
+E:/UnityProjects/m6-run/_dryrun/M6-C-验证汇总.md                      19 条声明全 INCOMPLETE 的现场
+E:/UnityProjects/ayan-3d/README.md                                   Library 死锁坑（工程不能搬回工作区）
+2D 版同日落地：src/main/fullscreen.js（QUNS + explorer 排除）+ debug/verify-quiet.js 1b 节
 ```

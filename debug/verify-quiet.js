@@ -125,6 +125,85 @@ check(
   '最小化窗口（矩形在 -32000 附近）→ 不算全屏'
 );
 
+console.log('\n══════ 1b. QUNS 系统判定 + explorer 宿主排除（2026-10-15）══════\n');
+
+/* 带 q（SHQueryUserNotificationState）与 n（前台进程名）的样本 */
+const S2 = (r, m, c, p, q, n) => ({ r, m, c, p, q, n });
+
+/* 系统明确表态的三种 → 直接全屏，矩形说了不算（演示模式/DPI 错位也兜得住） */
+check(
+  evaluateSample(S2([-8, -8, 1928, 1040], MON, 'GameWin', 100, 2, 'game'), SELF).full === true,
+  'QUNS_BUSY（F11 全屏/多数游戏）→ 全屏（哪怕矩形只到工作区）'
+);
+check(
+  evaluateSample(S2([-8, -8, 1928, 1040], MON, 'GameWin', 100, 3, 'game'), SELF).full === true,
+  'QUNS_RUNNING_D3D_FULL_SCREEN（独占 D3D）→ 全屏'
+);
+check(
+  evaluateSample(S2([0, 0, 800, 600], MON, 'Powerpnt', 100, 4, 'powerpnt'), SELF).full === true,
+  'QUNS_PRESENTATION_MODE（演示勿扰）→ 全屏（矩形量不到的场合）'
+);
+check(
+  evaluateSample(S2([0, 0, 1920, 1080], MON, 'GameWin', 100, 2, 'game'), SELF).why === 'quns:2',
+  '  why 标 quns:2（能从日志看出是系统判的，不是矩形）'
+);
+
+/* 锁屏/屏保：明确不算全屏（那是"没人看"，不是"全屏"） */
+check(
+  evaluateSample(S2([0, 0, 1920, 1080], MON, 'Whatever', 100, 1, 'whatever'), SELF).full === false,
+  'QUNS_NOT_PRESENT（锁屏/屏保）→ 不算全屏'
+);
+check(
+  evaluateSample(S2([0, 0, 1920, 1080], MON, 'Whatever', 100, 1, 'whatever'), SELF).why === 'quns:not-present',
+  '  why 单独标 not-present（将来锁屏闸门可吃）'
+);
+
+/* 系统没态度（正常桌面 / UWP）→ 矩形兜底必须保留：
+ * 无边框窗口游戏和全屏 UWP 的 QUNS 不保证给 BUSY。 */
+check(
+  evaluateSample(S2([0, 0, 1920, 1080], MON, 'GameWin', 100, 5, 'game'), SELF).full === true,
+  'QUNS_ACCEPTS_NOTIFICATIONS + 矩形盖满 → 全屏（无边框窗口游戏仍靠矩形兜底）'
+);
+check(
+  evaluateSample(S2([0, 0, 1920, 1080], MON, 'AppWin', 100, 7, 'app'), SELF).full === true,
+  'QUNS_APP（全屏 UWP）+ 矩形盖满 → 全屏'
+);
+check(
+  evaluateSample(S2([-8, -8, 1928, 1040], MON, 'Notepad', 100, 5, 'notepad'), SELF).full === false,
+  'QUNS_ACCEPTS_NOTIFICATIONS + 只是最大化 → 不算全屏（兜底不改变原判据）'
+);
+
+/* explorer 宿主一票否决 —— Win11 XAML 岛（任务栏/小组件宿主）矩形能盖满屏 */
+check(
+  evaluateSample(S2([0, 0, 1920, 1080], MON, 'XamlExplorerHostIslandWindow', 100, 5, 'explorer'), SELF).full === false,
+  '⚠️ 关键：explorer 的 XAML 岛盖满屏 → 不算全屏（Win11 实测误判场景）'
+);
+check(
+  evaluateSample(S2([0, 0, 1920, 1080], MON, 'SomeIslandHost', 100, 5, 'EXPLORER'), SELF).why === 'shell-proc:explorer',
+  '  进程名大小写不敏感，why 标 shell-proc:explorer'
+);
+check(
+  evaluateSample(S2([0, 0, 1920, 1080], MON, 'XamlExplorerHostIslandWindow', 100), SELF).full === false,
+  '  类名排除独立于进程名（老样本没有 n 也能挡住已知类）'
+);
+
+/* 排除顺序：self / shell 类 在 QUNS 之前 —— 输入自相矛盾时（explorer 在前
+ * 但系统说 BUSY）宁可漏判一次全屏，也不能让死锁豁口重开。 */
+check(
+  evaluateSample(S2([0, 0, 1920, 1080], MON, 'Chrome_WidgetWin_1', SELF, 2, 'electron'), SELF).why === 'self',
+  '排除顺序：self 先于 QUNS（自己永远不算全屏）'
+);
+check(
+  evaluateSample(S2([0, 0, 1920, 1080], MON, 'WorkerW', 100, 2, 'explorer'), SELF).why === 'shell:WorkerW',
+  '排除顺序：shell 类先于 explorer 进程/QUNS'
+);
+
+/* 老样本兼容：没有 q/n 字段的样本行为与从前逐位一致（S 造的就是这种） */
+check(
+  evaluateSample(S([0, 0, 1920, 1080], MON, 'GameWin', 100), SELF).full === true,
+  '老样本（无 q/n）矩形判定照旧 —— 上面的基准组全部重跑即证'
+);
+
 console.log('\n══════ 2. Hysteresis —— 进出的不对称与防抖 ══════\n');
 
 /* 场景一：进立刻、出等 4 秒（生产参数）。 */

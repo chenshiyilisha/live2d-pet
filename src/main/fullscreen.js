@@ -21,6 +21,18 @@ const { spawn } = require('child_process');
  *    如果拿 rcWork 去比，**任何最大化的记事本都会被判成全屏**，
  *    她就会在你写文档时莫名其妙地静默。
  *
+ *  两道矩形之外的证据（2026-10-15，参照自家 3D 版 PetFocusSensor 的论证）：
+ *    ① **SHQueryUserNotificationState 先问系统**（采样脚本的 q 字段）：
+ *      系统说 QUNS_BUSY（F11 全屏 / 多数游戏）/ QUNS_RUNNING_D3D_FULL_SCREEN
+ *      （独占 D3D）/ QUNS_PRESENTATION_MODE（演示勿扰）→ 直接算全屏，
+ *      矩形量不到的场合（演示模式、DPI 错位）也兜得住；
+ *      QUNS_NOT_PRESENT（锁屏/屏保）→ 明确不算。系统没有明确态度的
+ *      （ACCEPTS_NOTIFICATIONS 等正常态）才走矩形判定 —— 边框窗口游戏仍靠矩形兜底。
+ *    ② **explorer.exe 宿主一票否决**（n 字段 = 前台窗口进程名）：
+ *      Win11 的任务栏 / 小组件 / 开始菜单宿主都是 explorer 里的 XAML 岛窗口，
+ *      矩形可能盖满整块屏（实测误判过全屏）。但 explorer 进程永远不可能是
+ *      全屏应用 —— 按进程名排除，比猜窗口类名稳。
+ *
  *  ⚠️ 起一个**常驻**的 powershell.exe，而不是每次采样起一个。
  *    每个 powershell.exe 有 ~500ms 的固定启动开销（模块自动加载），
  *    1 秒采一次就等于每秒烧掉半个 CPU 核。常驻进程里 Add-Type 只编译一次，
@@ -39,10 +51,11 @@ const { spawn } = require('child_process');
  *    但收益明确：开始菜单一点就开、再点就关，若把它算成全屏，
  *    关掉开始菜单后还要等 4 秒迟滞才恢复 —— 那种"卡住 4 秒"比漏检更烦人。 */
 const SHELL_CLASSES = new Set([
-  'Progman',                 // 桌面（旧版）
-  'WorkerW',                 // 桌面壁纸层（Win10 起）
-  'Shell_TrayWnd',           // 主任务栏
-  'Shell_SecondaryTrayWnd'   // 副屏任务栏
+  'Progman',                       // 桌面（旧版）
+  'WorkerW',                       // 桌面壁纸层（Win10 起）
+  'Shell_TrayWnd',                 // 主任务栏
+  'Shell_SecondaryTrayWnd',        // 副屏任务栏
+  'XamlExplorerHostIslandWindow'   // Win11 任务栏/小组件的 XAML 岛宿主（实测盖满屏、误判过）
 ]);
 
 /* 采样间隔。900ms 是"感知不到延迟"与"几乎不占资源"之间的折中：
@@ -63,11 +76,28 @@ const EXIT_MS = 4000;
  *  判定（纯函数，可单测）
  * ========================================================== */
 
+/* SHQueryUserNotificationState 的返回值（shell32，系统对"用户在干什么"的态度）。
+ * 取值出处：MSDN QueryUserNotificationState。⚠️ 1（NOT_PRESENT）是锁屏/屏保 ——
+ * 那是"没人看"，不是"全屏"，判 false 但 why 单独标出来（第 9 轮的锁屏闸门将来可吃）。 */
+const QUNS = {
+  NOT_PRESENT: 1,             // 锁屏 / 屏保 / 切到安全桌面
+  BUSY: 2,                    // F11 全屏与多数游戏
+  D3D_FULL_SCREEN: 3,         // 独占 D3D 全屏
+  PRESENTATION_MODE: 4,       // 用户显式开的演示勿扰
+  ACCEPTS_NOTIFICATIONS: 5,   // 正常桌面
+  QUIET_TIME: 6,              // 通知勿扰开着（Focus Assist）
+  APP: 7                      // UWP 应用在前台（含全屏 UWP —— 所以矩形兜底必须保留）
+};
+/* 系统明确说"在全屏"的三种态度，命中即全屏，矩形不用再量。 */
+const QUNS_FULL = new Set([QUNS.BUSY, QUNS.D3D_FULL_SCREEN, QUNS.PRESENTATION_MODE]);
+
 /* sample 形状（PowerShell 每行吐一个 JSON）：
  *   { r: [l,t,r,b] | null,   // 前台窗口矩形；null = 没有前台窗口
  *     m: [l,t,r,b],          // 该窗口所在显示器的物理边界
  *     c: 'Chrome_WidgetWin_1',
- *     p: 1234 }
+ *     p: 1234,
+ *     q: 5,                  // SHQueryUserNotificationState（缺省 = 老样本/采样端拿不到）
+ *     n: 'explorer' }        // 前台窗口进程名（缺省 = 不排除；空串 = 进程已死）
  *
  * ⚠️ 必须排除**自己**（selfPid）：桌宠窗口虽然小，但如果哪天它自己被判定
  *    成全屏（比如将来改成可拉伸），就会"自我静默"并且再也醒不过来 ——
@@ -80,6 +110,20 @@ function evaluateSample(sample, selfPid) {
 
   const cls = String(sample.c || '');
   if (SHELL_CLASSES.has(cls)) return { full: false, why: `shell:${cls}` };
+
+  /* explorer 宿主一票否决：Win11 的 XAML 岛（任务栏 / 小组件 / 开始菜单宿主）
+   * 矩形能盖满整屏，但 explorer 进程永远不是全屏应用。
+   * 进程名大小写不敏感（Windows 不区分，ProcessName 可能返回任何大小写）。 */
+  if (String(sample.n || '').toLowerCase() === 'explorer') {
+    return { full: false, why: 'shell-proc:explorer' };
+  }
+
+  /* 系统先表态：明确说全屏 → 就是全屏；说"没人"（锁屏/屏保）→ 不是。
+   * 其余态度（正常桌面 / UWP）矩形才有发言权 —— 无边框窗口和全屏 UWP
+   * 的 QUNS 不保证给 BUSY，矩形兜底不能撤。q 缺省（老样本/采样端失败）当没态度。 */
+  const q = sample.q;
+  if (q === QUNS.NOT_PRESENT) return { full: false, why: 'quns:not-present' };
+  if (QUNS_FULL.has(q)) return { full: true, why: `quns:${q}` };
 
   const [l, t, r, b] = sample.r;
   const [ml, mt, mr, mb] = sample.m;
@@ -196,6 +240,7 @@ function psScript(sampleMs, parentPid) {
     '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);',
     '  [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);',
     '  [DllImport("user32.dll")] public static extern bool GetMonitorInfo(IntPtr m, ref MONITORINFO mi);',
+    '  [DllImport("shell32.dll")] public static extern int SHQueryUserNotificationState(out int state);',
     '}',
     '\'@',
     '$parent = ' + parentPid,
@@ -207,9 +252,11 @@ function psScript(sampleMs, parentPid) {
     '  if (($tick % 10) -eq 0) {',
     '    if (-not (Get-Process -Id $parent -ErrorAction SilentlyContinue)) { break }',
     '  }',
+    '  $q = 0',
+    '  [void][AyanFg]::SHQueryUserNotificationState([ref]$q)',
     '  $h = [AyanFg]::GetForegroundWindow()',
     '  if ($h -eq [IntPtr]::Zero) {',
-    '    $w.WriteLine(\'{"r":null}\')',
+    '    $w.WriteLine(\'{"r":null,"q":\' + $q + \'}\')',
     '  } else {',
     '    $rc = New-Object AyanFg+RECT',
     '    [void][AyanFg]::GetWindowRect($h, [ref]$rc)',
@@ -225,7 +272,11 @@ function psScript(sampleMs, parentPid) {
     // ⚠️ 这一行必须**整条写在同一行**里。拆成多个数组元素会被 '\n' 接起来，
     //    变成在表达式中间换行 —— PS 5.1 对"行尾是二元运算符"的续行支持
     //    不如 PS 7 可靠，赌它会解析失败不如写长一行。
-    '    $w.WriteLine(\'{"r":[\' + $rc.L + \',\' + $rc.T + \',\' + $rc.R + \',\' + $rc.B + \'],"m":[\' + $mi.rcMonitor.L + \',\' + $mi.rcMonitor.T + \',\' + $mi.rcMonitor.R + \',\' + $mi.rcMonitor.B + \'],"c":"\' + $sb.ToString() + \'","p":\' + $op + \'}\')',
+    // ⚠️ ProcessName 理论上可含双引号（畸形文件名）→ JSON 坏行 → JS 丢弃该样本
+    //    → 判"没前台"= 不静默。失败方向是安全侧，不为边角补一层转义。
+    '    $pn = \'\'',
+    '    try { $pn = [System.Diagnostics.Process]::GetProcessById([int]$op).ProcessName } catch { }',
+    '    $w.WriteLine(\'{"r":[\' + $rc.L + \',\' + $rc.T + \',\' + $rc.R + \',\' + $rc.B + \'],"m":[\' + $mi.rcMonitor.L + \',\' + $mi.rcMonitor.T + \',\' + $mi.rcMonitor.R + \',\' + $mi.rcMonitor.B + \'],"c":"\' + $sb.ToString() + \'","p":\' + $op + \',"q":\' + $q + \',"n":"\' + $pn + \'"}\')',
     '  }',
     '  $w.Flush()',
     '  Start-Sleep -Milliseconds ' + sampleMs,
@@ -344,6 +395,8 @@ function stopFullscreenWatch() {
 
 module.exports = {
   SHELL_CLASSES,
+  QUNS,
+  QUNS_FULL,
   ENTER_MS,
   EXIT_MS,
   evaluateSample,

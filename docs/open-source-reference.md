@@ -452,3 +452,90 @@ astrbot/gating_feature.py       准入判据 + RESCHEDULE / STOP      ★
 astrbot/scheduler_service.py    随机间隔调度 + 未回复上限（792 行）
 astrbot/_conf_schema.json       免打扰 / 间隔 / 上限的默认参数     ★
 ```
+
+
+# 第 8 轮 · 参数级情绪插值定向调研（2026-10-15）
+
+背景：第 6/7 轮把这个主题列为空白（同类桌宠工程里没有参数级情绪插值的实现）。本轮按用户要求
+扩大到搜索引擎（谷歌/必应通用检索）+ 官方 SDK 源码 + 学术文献，专门挖这一个主题。
+**结论：找到了参照物——但不是"同类实现"（逐字段错峰插值依然是我们独创），而是三个层面的外围证据：
+官方 SDK 的表情淡变体系、VTube Studio 的参数仲裁原则、学术上的情绪衰减模型。其中「情绪衰减回中性」
+是我们真正缺的东西。**
+
+⚠️ 本轮再次踩到伪造镜像站：搜索结果里出现 `github.es` / `github.org` / `forge.dotclear.watch`
+（与 `github.com` 一字之差的假站，内容是抄的）。核实一律以 `api.github.com` / 官方域名为准。
+另有两个中文站（live2d.net.cn、gitcode 博客）和 johal.in 是 **AI 内容农场**：文风整齐、
+编造统计（"2025 itch.io analytics"）、假专家引言。它们描述的 `setFadeInTime` / 混合模式确实与
+SDK 一致（抄官方文档），但**引用只引官方源码与文档本体，不引农场**。
+
+## 8.1 官方 Cubism SDK 的表情体系（真实源码，已抓下）
+
+证据：`Live2D/CubismWebFramework`（develop 分支）`src/motion/cubismexpressionmotion.ts`
+（已存 `.research-tmp/refs/cubism-expression-motion.ts`，366 行）。
+
+- 表情 = `exp3.json` 里的一组 `(参数ID, 值, 混合模式)`；三种混合模式 **Add / Multiply / Overwrite**，
+  非法值回落 Add（官方注释原话："以加算模式复原"）。
+- `FadeInTime` / `FadeOutTime` 默认 **1.0s**；🔴 **每个表情只有一个 fade 权重**——表情内所有参数
+  **同速率**淡变。对照我们：16 字段**逐字段错峰速度**（眉9→眼7→呆毛5→嘴4.5→脸红2.8→头3.2→肩2.6→身2.2，
+  见 params.js）官方没有这个粒度，"错峰"依然是我们独创。
+- Cubism 5 起**多表情并发**（Cubism 5 R1 把权重从 Motion 挪进 `CubismExpressionMotionManager`）：
+  逐参数维护 additive / multiply / overwrite 三个累积值，新表情加入时按 fadeWeight 线性插值
+  （`source*(1-w) + dest*w`，`calculateValue()`，源码 316-322 行）。
+- **官方的"回落"做在混合层**：当前表情没引用到的参数，也按 fadeWeight 渐变回默认值
+  （Add 回 0、Multiply 回 1、Overwrite 回当前值；源码 153-179 行）。
+- 与我们的关系：我们**没用** SDK 表情系统——`applyEmotion()` 每帧独占直写 16 字段（规矩 31），
+  两层互不干扰。**混合模式（Add 相对中性值）不建议学**：规矩 31 决定了 motion 与情绪不同通道，
+  绝对写法更简单、verify 更好断言。
+
+## 8.2 VTube Studio 的参数仲裁（DenchiSoft 官方 wiki）
+
+证据：`DenchiSoft/VTubeStudio` wiki「Interaction between Animations, Tracking, Physics, etc.」。
+
+- 每个 Live2D 参数同一时刻只能归一个"值提供者"，六个优先级：
+  **P0 默认值 → P1 待机动画 → P2 面捕 → P3 一次性动画 → P4 表情 → P5 物理**，高者赢；
+  高优先级结束后控制权交还次高者。
+- 🔴 原则性的一条（wiki 原话）："当参数的控制权在提供者之间交接时，**永远平滑淡变，绝不瞬间设置**，
+  防止难看的跳变。"——与我们规矩 28③（`updateGaze` 在前 `applyEmotion` 在后）和规矩 31
+  （applyEmotion 每帧独占，motion 不得同通道）是同款原则。工业级实现也是这么做的，交叉验证成立。
+- 表情参数的 Add/Multiply 可叠加：两个 0.5 倍率 → 复合 0.25；**乘法先算、加法后算**。
+- `vtube-studio-controller`（npm）有 `resetToNeutral(fadeTime)`——**带淡变时间的归零**，
+  又一个"表情要回落、且回落要插值"的工程佐证。
+
+## 8.3 学术侧：情绪衰减模型（本轮真正值钱的发现）
+
+证据：Picard《Affective Computing》(1997)；TRIPLE ECA（ResearchGate）；EMIA（J. Intelligent Systems, 2015）；
+SAGE 多智能体风险行为仿真；CSDN Fay × Live2D 集成实践。
+
+- **Picard 衰减函数**：`Intensity(em, t) = Intensity(em, t₀) · e^(−b·t)`——情绪**不会**因为触发事件
+  消失就消失，而是随时间**指数衰减**；b 为衰减率。TRIPLE、EMIA、多智能体论文全部引用它。
+  EMIA 的离散形式：`EIₜ = EIₜ₋₁ · exp(−0.1 · d(e) · t)`。
+- **正负情绪谁衰减快，学界有分歧**（EMIA 原文明说 unresolved）：多数观点 + Velasquez 调查
+  = **正面情绪衰减快、负面情绪衰减慢**（忧伤挂脸比高兴挂脸更常见、也更容易读成"她在闹情绪"）。
+  我们若做，取多数观点即可，但别当科学定论写死。
+- 衰减率可挂人格（OCEAN 大五）：外向者正面情绪衰减更慢；神经质者负面情绪更缠——两篇论文方向
+  还不一致，这一层只适合当**可调风味**。
+- EMIA 还区分**情绪（秒~分钟级，指数衰减）与心境 mood（缓慢线性回归中性）**，情绪以约 10% 的
+  势能喂给心境——两层结构，心境决定后续情绪的触发阈值（心情差时更容易不开心）。
+- **我们现状的缺口**：`[emo:xxx]` 设定后目标**永远保持**，直到下一个标签进来——高兴会高兴一整晚。
+  缺的正是衰减层。
+- 工程侧同款佐证：Fay 集成文的「回落机制」——情绪表情保留 3~5s 后逐步回中性，**回中性同样要
+  插值，不能硬切**（与我们插值层无缝衔接）。
+
+## 8.4 落地建议
+
+| 优先级 | 条目 | 判断 |
+| --- | --- | --- |
+| ⭐ 主推 | **情绪衰减回中性** | 安定（`emoSteadyMs` 达标）后开始按 Picard 曲线向 calm 衰减，逐字段走既有插值；衰减率按情绪效价查表（正快负慢）。改动集中 params.js/pet.js，`emotion.decay` 开关 + verify 喂假时钟。同时让 proactive 的按情绪挑话术更可信（不会永远基于 8 小时前的情绪） |
+| 备选 A | mood 心境层 | 情绪喂心境、心境影响触发阈值。等衰减层跑稳看效果，**先不做** |
+| 备选 B | 复合情绪混合（happy+sad 并存） | 官方 Cubism 5 / VTS 都支持，但我们 8 情绪是单选语义、LLM 打标签也只打一个，**不建议** |
+
+## 附：本轮证据路径
+
+```
+.research-tmp/refs/cubism-expression-motion.ts   官方表情运动源码（366 行，API 抓取）★
+Live2D/CubismWebFramework@develop               src/motion/cubismexpressionmotion(.manager).ts
+DenchiSoft/VTubeStudio wiki                      Interaction-between-Animations...（P0-P5 仲裁）
+npm: vtube-studio-controller                     resetToNeutral(fadeTime) / smoothParameterTransitionBatch
+Picard 1997 / TRIPLE ECA / EMIA 2015             情绪指数衰减 + 正负衰减率 + mood 两层
+CSDN blog.csdn.net/weixin_29274969/164590413     Fay×Live2D：表情回落机制 + lerp 平滑（0.2-0.3 系数）
+```

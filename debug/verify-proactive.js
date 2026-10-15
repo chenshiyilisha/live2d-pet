@@ -217,9 +217,82 @@ console.log('\n══════ D. 免打扰时段与「未回复退避」（2
     '重算在排计时器**之前**（顺序反了会拿旧区间判一次）');
 }
 
-console.log('\n──────────────────────────────');
-if (failures) {
-  console.log(`❌ 失败 ${failures} 项`);
-  process.exit(1);
-}
-console.log('✅ 全部通过（主动搭话判据）');
+console.log('\n══════ E. 媒体播放中不插话（2026-10-15 加） ══════\n');
+
+/* 这一段要 await（refreshMediaPlaying 是 async），所以整段包在 IIFE 里，
+ * 末尾的汇总也挪进来 —— 否则汇总会抢在真跑之前打印。 */
+(async () => {
+  /* 14) 取数与缓存：**真跑**（把那段源码切出来丢进 vm，喂一个假 window） */
+  {
+    const MEDIA = PET.slice(PET.indexOf('const MEDIA_RETRY_MS'), PET.indexOf('function pokeIdleTimer()'));
+    check(MEDIA.length > 200, '切到了 media 闸门那段（常量 + 缓存 + refreshMediaPlaying）');
+    check(/const MEDIA_RETRY_MS = 30 \* 1000;/.test(MEDIA), '重试周期 30 秒（不是 2 秒空转）');
+
+    const sandbox = { console, window: {} };
+    vm.createContext(sandbox);
+    vm.runInContext(MEDIA + '\n;globalThis.__api = { refreshMediaPlaying, playing: () => mediaPlaying };',
+      sandbox);
+    const { refreshMediaPlaying, playing } = sandbox.__api;
+
+    const feed = (v) => { sandbox.window = { pet: { media: async () => v } }; };
+
+    feed({ active: true, status: 'Playing' });
+    await refreshMediaPlaying();
+    check(playing() === true, 'Playing → 拦住（这才是"别插话"的那一档）');
+
+    feed({ active: true, status: 'Paused' });
+    await refreshMediaPlaying();
+    check(playing() === false, 'Paused 不算 —— 暂停着往往就是在等她说话');
+
+    feed(null);
+    await refreshMediaPlaying();
+    check(playing() === false, 'media.enabled 关着（主进程恒返回 null）→ 等于这功能不存在');
+
+    feed({ active: false });
+    await refreshMediaPlaying();
+    check(playing() === false, '没在放东西 → 放行');
+
+    sandbox.window = {};
+    await refreshMediaPlaying();
+    check(playing() === false, '🔴 桥不存在（旧 preload）→ 放行，不抛');
+
+    sandbox.window = { pet: { media: async () => { throw new Error('boom'); } } };
+    await refreshMediaPlaying();
+    check(playing() === false, '🔴 取数抛异常 → 放行（fail-open：绝不能让读不到状态把她哑掉）');
+
+    check(/window\.pet\?\.media\?\.\(\)/.test(MEDIA), '按规矩 31 用 `window.pet?.xxx?.(`（护到方法一层）');
+  }
+
+  /* 15) 闸门与分派 */
+  {
+    const gate = PET.slice(PET.indexOf('function proactiveBlockedBy()'), PET.indexOf('async function proactiveSpeak()'));
+    check(/if \(mediaPlaying\) return 'media';/.test(gate), "闸门里有这一条（返回 'media' 供日志辨认）");
+    check(gate.indexOf('mediaPlaying') < gate.indexOf('inQuietHours'),
+      '排在免打扰之前（都是"延后"，先报更近的那个原因）');
+
+    const sp = PET.slice(PET.indexOf('async function proactiveSpeak()'), PET.indexOf('async function sendMessage()'));
+    check(/await refreshMediaPlaying\(\);\s*\n\s*const why = proactiveBlockedBy\(\);/.test(sp),
+      '🔴 每轮闸门判断**之前**刷一次缓存（顺序反了就是拿上一轮的状态判）');
+    check(/if \(why === 'media'\) \{ retryIdleTimer\(MEDIA_RETRY_MS\); return; \}/.test(sp),
+      '分派：媒体走 30 秒长周期，不是 2 秒（整部片子期间别每 2 秒敲一次主进程）');
+    check(/function retryIdleTimer\(ms = PROACTIVE_RETRY_MS\)/.test(PET),
+      'retryIdleTimer 收可选周期，默认仍是 2 秒（其余三条延后原因照旧）');
+    check(!/proactiveUnanswered\+\+[\s\S]{0,240}mediaPlaying/.test(PET), '被媒体拦下**不**计入退避');
+  }
+
+  /* 16) 只拦主动搭话，不拦用户自己找她 */
+  {
+    const send = PET.slice(PET.indexOf('async function sendMessage()'), PET.indexOf('sendBtn.addEventListener'));
+    check(!/mediaPlaying|refreshMediaPlaying/.test(send),
+      '🔴 用户自己发消息不看媒体状态 —— 插不插话由主人决定，不由我们');
+    check(read('src/main/preload.js').includes("media: () => ipcRenderer.invoke('media:get')"),
+      'preload 暴露了 media()（闸门唯一的取数口）');
+  }
+
+  console.log('\n──────────────────────────────');
+  if (failures) {
+    console.log(`❌ 失败 ${failures} 项`);
+    process.exit(1);
+  }
+  console.log('✅ 全部通过（主动搭话判据）');
+})();

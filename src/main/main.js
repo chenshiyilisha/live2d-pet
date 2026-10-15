@@ -44,6 +44,7 @@ const { startLocalServer } = require('./server');
 const { collectStats, formatStats, startSensorWatch, stopSensorWatch, waitForFirstGpu, HUD_FIELDS, FULL_FIELDS } = require('./sysinfo');
 const { recognizeWav } = require('./speech');
 const { streamLLM, createStreamFilter } = require('./llm');
+const { analyzeRepetition, REPEAT_WINDOW } = require('./repetition-guard');
 const {
   setReminderSink, addReminder, clearReminders, reminderCount,
   listReminders, startPomodoro, stopPomodoro, pomodoroStatus, disposeReminders
@@ -1643,6 +1644,41 @@ function injectMediaContext(messages, line) {
   return arr;
 }
 
+/**
+ * 复读护栏的提示（见 repetition-guard.js）。
+ *
+ * 🔴 数据不用另存一处 —— 历史本来就在这一轮要发的 `messages` 里，
+ *    从这里把最近的 assistant 回复挑出来就行（零状态、零额外 IO）。
+ *
+ * @param {Array} messages 这一轮要发的消息（persona system 在前、历史在后）
+ * @param {boolean} on 配置 chat.varietyGuard；显式传 false 才关
+ * @returns {string} 空串 = 没什么好说的（**不要**插空 system）
+ */
+function varietyHint(messages, on) {
+  if (on === false) return '';
+  const replies = (Array.isArray(messages) ? messages : [])
+    .filter((m) => m && m.role === 'assistant' && typeof m.content === 'string')
+    .map((m) => m.content)
+    .slice(-REPEAT_WINDOW);
+  const { findings, hint } = analyzeRepetition(replies);
+  /* 只记命中的类别（不是整段文本）：出问题时要一眼看出是哪一项在误报，
+   * 以后调阈值也就有据可依。 */
+  if (hint) console.log('[chat] 复读护栏:', findings.map((f) => f.kind).join('+'));
+  return hint;
+}
+
+/**
+ * 把复读提示也插进**第二位**（和 injectMediaContext 同一个约定：紧跟人设，
+ * 末尾是用户刚说的话，后面不能再追加 system，有的后端会 400）。
+ * 纯函数（hint 从外面给），verify-repetition.js 直接测。
+ */
+function injectVarietyHint(messages, hint) {
+  const arr = Array.isArray(messages) ? messages.slice() : [];
+  if (!hint) return arr;
+  arr.splice(Math.min(1, arr.length), 0, { role: 'system', content: hint });
+  return arr;
+}
+
 /* 主动搭话的"话头"按她此刻的表情给一点方向。
  *
  * 出处是竞品调研里 soullink 的 `messageByEmotion`（主动话术按当前情绪分 14 类，
@@ -1671,7 +1707,16 @@ function proactiveMoodHint(emotion) {
  * 可以脱离 Electron 单独 require 与测试。 */
 function chatStream(messages) {
   const cfg = loadConfig();
-  return streamLLM(injectMediaContext(messages, mediaContextLine()), {
+  /* 两条上下文都插进第二位（紧跟人设那条 system）。
+   * ⚠️ 顺序：两个都是 splice(1, 0)，**后插的在前**。这里让媒体在外层，
+   *    于是结果是 [人设, 媒体背景, 复读提示, ...历史] —— 媒体保持"紧跟人设"
+   *    的语义（verify-media 有断言）。它们之间其实没有语义先后，
+   *    共同点是**都必须在用户那句话之前**。 */
+  const withContext = injectMediaContext(
+    injectVarietyHint(messages, varietyHint(messages, cfg.chat?.varietyGuard !== false)),
+    mediaContextLine()
+  );
+  return streamLLM(withContext, {
     ...cfg.llm,
     send: emitChatChunk,
     sendEmotion: emitChatEmotion,

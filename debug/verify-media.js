@@ -135,8 +135,11 @@ console.log('\n══════ C. 主进程接线 ══════\n');
   check(/Array\.isArray\(messages\) \? messages\.slice\(\) : \[\]/.test(fn),
     '不原地改传入的数组（纯函数，好测）');
   check(/if \(!line\) return arr;/.test(fn), '没有背景信息时原样返回（不多塞一条空 system）');
-  check(/streamLLM\(injectMediaContext\(messages, mediaContextLine\(\)\)/.test(MAIN),
-    'chatStream 是唯一注入点 —— 对话和主动搭话两条路都吃到');
+  check(/streamLLM\(withContext,/.test(MAIN) &&
+    /injectMediaContext\(\s*injectVarietyHint\(messages, varietyHint\(messages, cfg\.chat\?\.varietyGuard !== false\)\),\s*mediaContextLine\(\)\s*\)/.test(MAIN),
+    'chatStream 是唯一注入点 —— 对话和主动搭话两条路都吃到（媒体在外层 = 仍紧跟人设）');
+  check((MAIN.match(/injectMediaContext\(/g) || []).length === 2,
+    '媒体注入只有一处调用（另一处是定义）');
   check(/MEDIA_REPEAT_MS\s*=\s*30 \* 60 \* 1000/.test(MAIN) && /mediaSaid/.test(MAIN),
     '同一首歌 30 分钟内只提一次（否则每轮都来一句"你也在听这首啊"）');
   check(/别推荐别的歌、别说教/.test(MAIN), 'prompt 里明确禁止变成音乐推荐机器人');

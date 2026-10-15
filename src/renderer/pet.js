@@ -2227,6 +2227,32 @@ function scheduleAfterQuietHours() {
   idleTimer = setTimeout(proactiveSpeak, Math.min(Math.max(ms, 60 * 1000), 30 * 60 * 1000));
 }
 
+/* 媒体播放中不插话（2026-10-15 加，调研第 7 轮思路级第 3 条）。
+ *
+ * 说的是我们自己的体感：主人正听着歌、看着剧，桌宠突然冒一句——
+ * 那不是陪伴，是打扰。判据只需要"此刻在 Playing"这一条。
+ *
+ * 状态来自主进程的媒体采样（media.js 读 GSMTC）。开关是 `media.enabled`：
+ * 关着时 `media()` 恒返回 null，这条闸门自动失效 —— 也就是"这个功能不存在"，
+ * 而不是"她哑了"。
+ *
+ * ⚠️ 只拦**主动搭话**。主人自己来找她说话（sendMessage）不拦 ——
+ *    那时候插不插话由主人决定，不是我们。
+ * 🔴 取不到状态一律**放行**（fail-open）：这只是锦上添花的一道闸，
+ *    读不到就当她没在放媒体。绝不能让一次读取失败把她永久哑掉。 */
+const MEDIA_RETRY_MS = 30 * 1000;
+
+let mediaPlaying = false;
+
+async function refreshMediaPlaying() {
+  try {
+    const m = await window.pet?.media?.();
+    mediaPlaying = !!(m && m.active && m.status === 'Playing');
+  } catch {
+    mediaPlaying = false;
+  }
+}
+
 function pokeIdleTimer() {
   clearTimeout(idleTimer);
   /* 全屏静默中不排新的主动搭话 —— 所有"人还在"的入口（点击、划过、提醒、
@@ -2253,18 +2279,21 @@ function pokeIdleTimer() {
  *    罚一个整周期的结果是：这次闲置里她基本不会再开口了 —— 功能看着像坏的。
  *    改成 2 秒后再看一眼，代价只是每秒半次布尔判断。
  * ⚠️ 只有"等等就好"那三条走这条路（busy / 不在空闲态 / 情绪没安定）。
- *    免打扰和"到上限"各有各的走法 —— 见下面 proactiveSpeak 里的分派。 */
+ *    免打扰、"到上限"和"正在放媒体"各有各的走法 —— 见下面 proactiveSpeak 里的分派。 */
 const PROACTIVE_RETRY_MS = 2000;
 
-function retryIdleTimer() {
+/* 放媒体时的重试周期：30 秒。2 秒探一次等于整部电影期间每 2 秒敲一次主进程，
+ * 而"歌放完了"这件事并不需要那么灵敏 —— 半分钟看一次足够。 */
+function retryIdleTimer(ms = PROACTIVE_RETRY_MS) {
   clearTimeout(idleTimer);
-  idleTimer = setTimeout(proactiveSpeak, PROACTIVE_RETRY_MS);
+  idleTimer = setTimeout(proactiveSpeak, ms);
 }
 
 /* 此刻能不能开口。返回 '' 表示可以，否则返回不能的原因（进日志）。
  *
- * ⚠️ 前三条只是"延后"，交给 retryIdleTimer 去看；后两条的语义**不同**
- *    （分派见 proactiveSpeak）：免打扰要排到时段结束，到上限要彻底停手。 */
+ * ⚠️ 前四条都只是"延后"，交给 retryIdleTimer 去看（media 用 30 秒的长周期）；
+ *    后两条的语义**不同**（分派见 proactiveSpeak）：
+ *    免打扰要排到时段结束，到上限要彻底停手。 */
 function proactiveBlockedBy() {
   if (busy) return 'busy';
   if (state !== State.IDLE) return 'state:' + state;
@@ -2272,6 +2301,9 @@ function proactiveBlockedBy() {
    * 她刚被打断一次、刚溜达回来、或手还在头上时，情绪参数都还在往目标走；
    * 这时候插话读起来是"抢拍"。 */
   if (emoSteadyMs < EMO_SETTLE_HOLD_MS) return 'unsettled';
+  /* 主人正在放东西听/看 → 别插嘴（见 refreshMediaPlaying）。
+   * 判据是 `status === 'Playing'`：暂停着的不算，那时候他多半就是在等她说话。 */
+  if (mediaPlaying) return 'media';
   /* 免打扰时段（配置 proactive.quietHours，形如 "23-8"，见 quiet-hours.js）。
    * 凌晨三点冒一句"起来动动"不是陪伴，是闹鬼 —— 调研里 astrbot 的
    * quiet_hours 默认值就是 1-7 点整段闭嘴。 */
@@ -2286,6 +2318,10 @@ function proactiveBlockedBy() {
 async function proactiveSpeak() {
   // 排好的定时器可能刚好落在"进入静默"那一刻之后，再挡一道
   if (quiet) return;
+  /* 先把媒体状态拉一次 —— 闸门里的 mediaPlaying 是**缓存**，
+   * 每轮闸门判断前刷一次，不另起轮询（规矩 16：周期任务要自调度，
+   * 而这里根本不需要周期任务）。 */
+  await refreshMediaPlaying();
   const why = proactiveBlockedBy();
   if (why) {
     console.log('[pet] proactive 延后', JSON.stringify({ why, steadyMs: Math.round(emoSteadyMs), unanswered: proactiveUnanswered }));
@@ -2295,6 +2331,8 @@ async function proactiveSpeak() {
      * 到点必被同一道闸门拦下的空转。她重新开口的时机是用户有反应
      * （noteUserResponse），那一下会把定时器重新武装上。 */
     if (why === 'unanswered') { clearTimeout(idleTimer); return; }
+    /* 正在放媒体：别用 2 秒的周期陪着他把整部片子放完。 */
+    if (why === 'media') { retryIdleTimer(MEDIA_RETRY_MS); return; }
     retryIdleTimer();
     return;
   }

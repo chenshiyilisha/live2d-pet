@@ -62,6 +62,17 @@ check(levelOf(2048, 1, TEX_LOD.maxLevel) === 1, '需求趋近 0 → 被 maxLevel
 /* maxLevel 是唯一闸门：改成 2 时 512 档可达（这条锁定"闸门真的接进公式了"） */
 check(levelOf(2048, 100, 2) === 2, 'maxLevel=2 时小需求可到 level 2（闸门参数真的生效）');
 
+/* 📌 2026-10-15 起源纹理已永久降为 1024（shrink-model-textures.js）。
+ * 这条锁定：**1024 的源在默认窗口（乃至放大 1.4×）绝不会被二次降半到 512** ——
+ * 将来有人把 maxLevel 调大或改公式，这里先红。 */
+{
+  const onScreen = INK_W * s * DPR * TEX_LOD.margin;
+  check(levelOf(1024, onScreen, TEX_LOD.maxLevel) === 0,
+    `1024 源在默认窗口（需求 ${onScreen.toFixed(0)}px）→ level 0（不二次降半）`);
+  const big = INK_W * s * 1.4 * DPR * TEX_LOD.margin;
+  check(levelOf(1024, big, TEX_LOD.maxLevel) === 0, '1024 源放大 1.4× 仍 level 0');
+}
+
 console.log('\n══════ B. 接线（源码级） ══════\n');
 
 check(/const TEX_LOD = \{ maxLevel: 1, margin: 2 \};/.test(pet),

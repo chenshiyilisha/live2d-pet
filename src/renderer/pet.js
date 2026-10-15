@@ -585,6 +585,11 @@ function setState(next) {
  * ⚠️ 只换 resource + update()（resize 会刷新 _resourceId 触发重传），
  *    采样样式（scaleMode / addressMode / alphaMode）都在原 source 上，
  *    一个都不用手抄 —— 另建 TextureSource 漏抄一个就是渲染异常。
+ *
+ * 📌 现状（2026-10-15）：源纹理已**永久**降采样为 1024（debug/shrink-model-textures.js，
+ *    省 ~170MB 运行内存，README 有说明）。默认窗口下 level 算出来是 0，本开关对
+ *    当前素材**自然不触发**；保留它是因为换大纹理素材时它立即生效，且
+ *    verify-texture-lod 断言「1024 源在默认窗口绝不会被二次降半」。
  * ⚠️ 屏幕宽用放宽的 INK_W（比真实墨迹大四成，穿透判定故意取的松值）——
  *    在这里方向正好是"少降"，偏保守。
  * ⚠️ 只在挂载时算一次：用户后来放大（≤1.4×）由 margin=2 覆盖；真要

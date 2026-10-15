@@ -12,7 +12,6 @@
  * 产出： dist/Ayan-Setup-<版本>.exe（+ .blockmap + latest.yml，三件套）
  */
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 
@@ -69,11 +68,13 @@ if (!fs.existsSync(path.join(STAGE, 'package.json'))) {
  * 解压 electron 这一步直接被打断（SAFE_DELETE_BULK_CONFIRM_REQUIRED），
  * 报错信息还停在 @electron/rebuild 附近，跟真正的原因隔着好几层。
  *
- * rename 不走删除路径，所以改用挪走而不是删除。挪到系统临时目录下带时间戳
- * 的名字，互不覆盖；这些目录可以直接删，系统也会自行清理。
+ * rename 不走删除路径，所以改用挪走而不是删除。挪到项目内 build/ 下带时间戳
+ * 的名字，互不覆盖，跑两轮构建也能各自留底。
+ * ⚠️ 必须**同盘**：rename 不能跨设备（EXDEV）。仓库在 E 盘、系统 temp 在
+ * C 盘，挪去 os.tmpdir() 直接崩 —— 固定放项目自己的 build/（2026-10-15 踩过）。
  */
 if (fs.existsSync(OUT)) {
-  const stale = path.join(os.tmpdir(), `ayan-build-stale-${Date.now()}`);
+  const stale = path.join(ROOT, 'build', `stale-dist-${Date.now()}`);
   fs.renameSync(OUT, stale);
   console.log(`上一轮产物已移至 ${stale}`);
 }

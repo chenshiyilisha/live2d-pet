@@ -51,6 +51,8 @@ build/
 # ⚠️ 2026-10-14 发现它此前**没有被忽略**（git status 里是 `?? .research-tmp/`），
 #    一旦 `git add -A` 就会把几十 MB 别人的代码提进库。
 .research-tmp/
+# 同理：调研用的探针 user-data 目录（含 Electron 缓存）+ tarball 解包副本。
+.tmp-dup*/
 
 # 编辑器与系统杂物
 .vscode/

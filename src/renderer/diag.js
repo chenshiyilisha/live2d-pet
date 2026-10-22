@@ -638,6 +638,24 @@ export function attachSnapProbes(live) {
           const rd = (id) => Number((live.readParam(id) ?? 0).toFixed(4));
           await wait(1200);
 
+          /* --- ⓪ 心境层快照：主进程 mood.js 的四轴真的推过来了吗 ---
+           * 点击事件会触发即时推送，先点一下再等快照到达（10s tick 太慢，
+           * 探针等不起）。没收到 = null，探针会明确说出来而不是含糊带过。 */
+          window.pet?.moodEvent?.('click');
+          await wait(600);
+          const ms = live.mood();
+          console.log('[pet] mood-axes', JSON.stringify({
+            received: !!ms,
+            axes: ms ? {
+              valence: Number(ms.valence.toFixed(3)),
+              social: Number(ms.social.toFixed(3)),
+              energy: Number(ms.energy.toFixed(3)),
+              pride: Number(ms.pride.toFixed(3))
+            } : null,
+            bias: ms ? ms.bias : null,
+            line: ms ? ms.line : '(no snapshot)'
+          }));
+
           // --- ① 错峰时间序列（必须从 calm 起跳，所以放在截图循环之前）---
           const trace = [];
           const t0 = performance.now();

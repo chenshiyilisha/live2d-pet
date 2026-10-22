@@ -65,6 +65,7 @@ const {
 const { startSynth, stopSynth, synthWav } = require('./tts');
 const { configureUpdater, checkForUpdates, updaterStatus } = require('./updater');
 const bubble = require('./bubble');
+const { createMoodEngine } = require('./mood');
 
 // 项目根目录，本地服务与托盘图标、诊断截图都以它为基准
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
@@ -1283,7 +1284,7 @@ function buildMenuTemplate() {
       patchConfig(section, { [key]: item.checked });
       if (section === 'monitor') refreshStatsTimer();
       if (section === 'motion') refreshWanderConfig();
-      if (section === 'appearance') syncAppearance();
+      if (section === 'appearance') { syncAppearance(); pushMoodSnapshot(); }
       // 关掉"全屏静默"要立刻退出静默状态，不能等她再切一次窗口
       if (section === 'quiet') refreshQuietWatcher();
       // 语音朗读：winrt 引擎要按需起停合成进程
@@ -1299,6 +1300,7 @@ function buildMenuTemplate() {
     { type: 'separator' },
     flag('appearance', 'jitter', '表情节奏抖动'),
     flag('appearance', 'emotionDecay', '情绪自然回落'),
+    flag('appearance', 'mood', '心境会慢慢变'),
     flag('appearance', 'textureLod', '纹理降档（省显存）'),
     flag('appearance', 'alwaysOnTop', '窗口置顶')
   ];
@@ -1541,6 +1543,52 @@ function fmtMinutes(mins) {
   return `${Math.round(mins * 60)} 秒`;
 }
 
+/* ============================================================
+ *  心境层（mood.js）的编排：什么时候走一步、什么时候落盘、什么时候推快照。
+ *
+ *  · tick 自调度（setTimeout 链，规矩 16）：10 秒一步漂移；每满 60 秒落一次盘。
+ *    没有异步等待，但同样不用 setInterval —— 停表只清一个句柄。
+ *  · 快照推给渲染层（表情偏置的权重在里面）；事件后即时推一次，
+ *    轴走得慢，10 秒粒度对表情完全够。
+ *  · 开关（appearance.mood）关掉时：不漂移、不推、prompt 不注入 ——
+ *    渲染层判据 `cfg?.appearance?.mood !== false` 兜底，行为与从前逐位一致。
+ * ========================================================== */
+const moodEngine = createMoodEngine();
+const moodFile = () => path.join(app.getPath('userData'), 'mood.json');
+let moodTimer = null;
+let moodSaveAt = 0;
+let moodDragging = false;   // drag-move 的边沿判定用（帧级事件 → 一次性事件）
+
+function pushMoodSnapshot() {
+  if (!isOn('appearance', 'mood')) return;
+  try { mainWindow?.webContents?.send?.('mood:snapshot', moodEngine.snapshot()); } catch { /* ignore */ }
+}
+
+function moodTick() {
+  moodTimer = null;
+  if (isOn('appearance', 'mood')) {
+    moodEngine.step(10, -1);
+    pushMoodSnapshot();
+    const now = Date.now();
+    if (now - moodSaveAt >= 60 * 1000) {
+      moodSaveAt = now;
+      moodEngine.save(moodFile());
+    }
+  }
+  moodTimer = setTimeout(moodTick, 10 * 1000);
+}
+
+function stopMoodTimer() {
+  if (moodTimer) { clearTimeout(moodTimer); moodTimer = null; }
+}
+
+/* 心境人话（进 prompt 用）。开关关 = 空串 = 调用方不注入（零侵入）。 */
+function moodLine() {
+  if (!isOn('appearance', 'mood')) return '';
+  const line = moodEngine.promptLine();
+  return line ? `（她此刻的心境，用来把握语气，别复述给用户：${line}。）` : '';
+}
+
 /* 聊天分片 / 情绪 / 想法的**唯一出口**：主窗渲染层拿它累积 replyBuffer
  * （驱动 TTS 朗读与历史保存），悬浮气泡窗拿它做流式显示。
  * 别绕开这几个函数直接 webContents.send —— 气泡窗会漏字。
@@ -1554,6 +1602,10 @@ function emitChatChunk(t) {
 
 function emitChatEmotion(e) {
   try { mainWindow?.webContents.send('chat:emotion', e); } catch { /* ignore */ }
+  /* 心境层回灌：她自己聊出的情绪让轴也动一点（正向情绪→心情好）。
+   * 挂在唯一出口上（规矩 27）—— 本地回复池 emitLocal 也走这里，天然全覆盖。 */
+  moodEngine.onAssistantEmotion(e);
+  pushMoodSnapshot();
 }
 
 function emitChatThink(t) {
@@ -1689,6 +1741,19 @@ function varietyHint(messages, on) {
 }
 
 /**
+ * 心境人话也插进**第二位**（与媒体/复读同一个约定：紧跟人设、在用户那句话之前）。
+ * 与另外两条同款纯函数（不原地改数组、空行不塞空 system）。
+ * chatStream 里它在**最外层**（最后套）→ 排最贴人设的位置：
+ * [人设, 心境, 媒体, 复读提示, ...历史]。
+ */
+function injectMoodContext(messages, line) {
+  const arr = Array.isArray(messages) ? messages.slice() : [];
+  if (!line) return arr;
+  arr.splice(Math.min(1, arr.length), 0, { role: 'system', content: line });
+  return arr;
+}
+
+/**
  * 把复读提示也插进**第二位**（和 injectMediaContext 同一个约定：紧跟人设，
  * 末尾是用户刚说的话，后面不能再追加 system，有的后端会 400）。
  * 纯函数（hint 从外面给），verify-repetition.js 直接测。
@@ -1728,14 +1793,17 @@ function proactiveMoodHint(emotion) {
  * 可以脱离 Electron 单独 require 与测试。 */
 function chatStream(messages, opts = {}) {
   const cfg = loadConfig();
-  /* 两条上下文都插进第二位（紧跟人设那条 system）。
-   * ⚠️ 顺序：两个都是 splice(1, 0)，**后插的在前**。这里让媒体在外层，
-   *    于是结果是 [人设, 媒体背景, 复读提示, ...历史] —— 媒体保持"紧跟人设"
-   *    的语义（verify-media 有断言）。它们之间其实没有语义先后，
-   *    共同点是**都必须在用户那句话之前**。 */
-  const withContext = injectMediaContext(
-    injectVarietyHint(messages, varietyHint(messages, cfg.chat?.varietyGuard !== false)),
-    mediaContextLine()
+  /* 三条上下文都插进第二位（紧跟人设那条 system）。
+   * ⚠️ 三个都是 splice(1, 0)，**后套的在前**。最外层是心境 → 最贴人设，
+   *    于是结果是 [人设, 心境, 媒体, 复读提示, ...历史]。它们之间没有
+   *    语义先后，共同点是**都必须在用户那句话之前**（verify-media 的
+   *    「媒体紧跟人设」断言测的是 media+复读那个内层组合，套心境不改它）。 */
+  const withContext = injectMoodContext(
+    injectMediaContext(
+      injectVarietyHint(messages, varietyHint(messages, cfg.chat?.varietyGuard !== false)),
+      mediaContextLine()
+    ),
+    moodLine()
   );
   return streamLLM(withContext, {
     ...cfg.llm,
@@ -1800,6 +1868,15 @@ function registerIpc() {
      * 修法：setBounds 显式带上尺寸，把宽高钉死；顺带把已经漂移的尺寸纠回设计值。
      *   位置用 getBounds 的坐标系（和 setBounds 同一套），不再多走一倍。
      *   代价：桌宠窗口本来就是固定尺寸（resizable:false），钉死没有任何副作用。 */
+
+    /* 心境层：drag-move 每帧都发，这里做**边沿判定**——第一帧算「被拎起来」
+     *（结账在 onDragBegin，引擎那边只认显式入口）。 */
+    if (!moodDragging) {
+      moodDragging = true;
+      moodEngine.onDragBegin();
+      pushMoodSnapshot();
+    }
+
     const b = mainWindow.getBounds();
     mainWindow.setBounds({
       x: Math.round(b.x + dx),
@@ -1846,6 +1923,9 @@ function registerIpc() {
    *      "动画期间不保存"那条会跳过贴边写进去的位置（见那边的注释），
    *      所以这里补一次，否则存下来的是松手瞬间、而不是贴边后的坐标。 */
   ipcMain.on('pet:drag-end', () => {
+    moodDragging = false;
+    moodEngine.onDragEnd();
+    pushMoodSnapshot();
     onUserDragEnd();
     edgeSnap();
     setTimeout(() => {
@@ -1858,6 +1938,18 @@ function registerIpc() {
   /* 渲染层节流后发来的"人还在"信号。
    * 系统级闲置检测 1 秒才巡检一次，这条路让她**立刻**反应，不用等下一拍。 */
   ipcMain.on('pet:activity', () => notifyUserActivity());
+
+  /* ---- 心境层的事件上报（渲染层侧才有的信号：点击 / 摸头）----
+   * 拖拽和聊天的事件主进程自己就有一手（drag-move/-end、chat:send），
+   * 不用渲染层转一手 —— 这条通道只收渲染层独有的那两个。 */
+  ipcMain.on('mood:event', (_e, ev) => {
+    const type = ev && ev.type;
+    if (type === 'click') moodEngine.onClick();
+    else if (type === 'patStart') moodEngine.onPatStart();
+    else if (type === 'patEnd') moodEngine.onPatEnd();
+    else return;
+    pushMoodSnapshot();
+  });
 
   /* ---- 在角色身上右键弹出的快捷菜单 ---- */
   ipcMain.on('pet:context-menu', () => {
@@ -1980,6 +2072,9 @@ function registerIpc() {
       proactiveAbort.abort();
       proactiveAbort = null;
     }
+    /* 用户开口 = 最强意义上的「被搭理」：想念轴归零（mood.js）。 */
+    moodEngine.onUserChat();
+    pushMoodSnapshot();
     // 悬浮气泡：这一轮对话从现在开始显示（浮窗关着时是 no-op）
     bubble.beginStream();
     try {
@@ -2356,6 +2451,12 @@ if (!gotLock) {
     refreshQuietWatcher();
     refreshTTS();
     refreshMediaWatcher();
+
+    /* 心境层：读档（含离线补漂 + 久别重逢），然后 10 秒一步自调度。
+     * 读档结果进日志 —— 坏档/首启这两种"不是错误但值得知道"的情况
+     * loadAndDrift 自己会说，不在这里再猜一遍。 */
+    console.log('[mood]', moodEngine.loadAndDrift(moodFile()));
+    moodTick();
     warnIfModelsMissing();
     initUpdater();
 
@@ -2452,6 +2553,8 @@ if (!gotLock) {
   app.on('will-quit', () => {
     if (cursorTimer) clearInterval(cursorTimer);
     if (statsTimer) clearTimeout(statsTimer);
+    stopMoodTimer();
+    moodEngine.save(moodFile());      // 时间戳落盘 → 下次启动按它离线补漂
     disposeMotion();
     disposeReminders();
     /* 常驻的采样进程必须显式杀掉：Windows 上父进程退出**不会**带走子进程，

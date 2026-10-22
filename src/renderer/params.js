@@ -246,3 +246,47 @@ export function mixEmoDecay(eff, amt) {
   for (const k in eff) eff[k] += (calm[k] - eff[k]) * w;
   return eff;
 }
+
+/* ============================================================
+ *  心境偏置 —— 主进程 mood.js 的四条轴落到脸上的这一步
+ *
+ *  w = { happy, serious, sleepy }，各是 0~1 的权重（主进程按轴穿过
+ *  阈值的程度算好推过来）。语义是**凸组合**：
+ *      eff' = eff + w·(EMOTION[dir] − EMOTION.calm)
+ *  在 calm 基线上它精确等于「w 成的 happy/serious/sleepy」（与
+ *  mixEmoDecay 同构 —— 那是向 calm 混，这是向三张姿态表混）；
+ *  在活跃情绪上是叠加，可能顶出界 —— 所以逐字段**再夹回 EMO_RANGE**
+ *  （这是它与 mixEmoDecay 的关键差别：凸组合向 calm 不越界，加性会）。
+ *
+ *  ⚠️ 权重全 0 时**逐字段不动**（连夹都不做）——「与没这功能时逐位
+ *     一致」是这层的验收线（verify-mood 断言）。
+ *  ⚠️ 方向键必须都是当前档案 EMOTION 里**真实存在**的情绪 —— 缺键
+ *     会静默少一半偏置，verify-mood 会拦。
+ *  ⚠️ 调用位置在 mixEmoDecay **之后**、插值循环之前（衰减先把这一股
+ *     情绪收干净，心境偏置再叠上去 —— 心境的时标是分钟级，不该被
+ *     秒级的情绪衰减稀释）。
+ * ========================================================== */
+export const MOOD_BIAS_DIRS = ['happy', 'serious', 'sleepy'];
+
+export function mixEmoMood(eff, w) {
+  let any = false;
+  for (const d of MOOD_BIAS_DIRS) if (w && w[d] > 0) { any = true; break; }
+  if (!any) return eff;                    // 零侵入：没快照 / 开关关 = 原样
+  const calm = EMOTION.calm;
+  for (const d of MOOD_BIAS_DIRS) {
+    const wd = w?.[d] ?? 0;
+    if (!(wd > 0)) continue;
+    const dir = EMOTION[d];
+    if (!dir) continue;                    // 档案没有这个情绪（verify 会拦）
+    for (const k in eff) {
+      if (!(k in dir) || !(k in calm)) continue;
+      eff[k] += (dir[k] - calm[k]) * wd;
+    }
+  }
+  /* 加性偏置可能顶出界 —— 统一夹回该字段的合法区间。 */
+  for (const k in eff) {
+    const r = EMO_RANGE[k];
+    if (r) { if (eff[k] < r[0]) eff[k] = r[0]; else if (eff[k] > r[1]) eff[k] = r[1]; }
+  }
+  return eff;
+}

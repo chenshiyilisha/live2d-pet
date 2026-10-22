@@ -278,10 +278,15 @@ const MAIN = read('src/main/main.js');
 }
 
 {
-  /* chatStream 的组合方式（源码级，防止有人把顺序写反） */
+  /* chatStream 的组合方式（源码级，防止有人把顺序写反）。
+   * 2026-10-22 心境层加进来后最外层多套一层 injectMoodContext ——
+   * 这条断言测的仍是**媒体与复读**的内层组合（媒体必须套着复读 =
+   * 媒体在两者中更靠外），mood 层的顺序归 verify-mood 管。 */
   const cs = MAIN.slice(MAIN.indexOf('function chatStream('), MAIN.indexOf('function registerIpc('));
-  ok(/const withContext = injectMediaContext\(\s*injectVarietyHint\(messages, varietyHint\(messages, cfg\.chat\?\.varietyGuard !== false\)\),\s*mediaContextLine\(\)\s*\)/.test(cs),
+  ok(/injectMediaContext\(\s*injectVarietyHint\(messages, varietyHint\(messages, cfg\.chat\?\.varietyGuard !== false\)\),\s*mediaContextLine\(\)\s*\)/.test(cs),
     'chatStream 里媒体在外层、复读在内层（顺序写反 → 媒体就不是"紧跟人设"了）');
+  ok(/injectMoodContext\(\s*injectMediaContext\(/.test(cs),
+    '心境人话套在最外层（verify-mood 的职责范围，这里顺带钉住别拆散）');
   ok(/streamLLM\(withContext,/.test(cs), 'streamLLM 收到的是拼好的上下文');
   ok((MAIN.match(/injectVarietyHint\(/g) || []).length === 2,
     '注入点**只有一处**（一次定义 + 一次调用）—— 对话和主动搭话两条路共用 chatStream');

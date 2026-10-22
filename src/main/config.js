@@ -181,6 +181,14 @@ const DEFAULT_CONFIG = {
      * 性格。默认开：不占资源也不打扰；关掉 = 情绪保持到底，
      * 行为与加这个功能之前逐位一致。 */
     emotionDecay: true,
+    /* 心境层 —— 四条缓慢漂移的标量（心情 valence / 想念 social / 活力
+     * energy / 端着 pride，见主进程 mood.js）：漂移到阈值会把脸往
+     * happy/serious/sleepy 偏一点、把「你有点想他」这类人话塞进她的
+     * prompt；关电脑一晚再开有一次「久别重逢」。蓝本 = 3D 版 PetMood
+     * + jiwen 积温（docs/open-source-reference.md 12.4）。
+     * 默认开：纯数学不占资源、不打扰；关掉 = 不漂移不注入不偏置，
+     * 行为与加这个功能之前逐位一致。 */
+    mood: true,
     /* 纹理 LOD —— 屏幕用不完的纹理分辨率就降一档（见渲染层 pet.js 的 TEX_LOD）。
      * 📌 2026-10-15 起源纹理已永久降为 1024（省 ~170MB 运行内存，README 有说明），
      * 本开关对当前素材自然不触发；保留给将来更大纹理的素材。

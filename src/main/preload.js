@@ -16,6 +16,7 @@ const MAIN_EVENTS = [
   'pet:quiet',          // 进入 / 退出全屏静默（渲染层据此降帧、闭嘴）
   'pet:visible',        // 窗口显示 / 隐藏了（隐藏时降到 1fps，别白烧）
   'pet:screen-locked',  // 锁屏 / 解锁了（渲染层据此拦主动搭话）
+  'mood:snapshot',      // 心境层的四轴快照（表情偏置权重在里面，10s/事件后推）
   'monitor:stats'       // 系统状态悬浮显示的数据
 ];
 
@@ -35,6 +36,9 @@ contextBridge.exposeInMainWorld('pet', {
   dragEnd: () => ipcRenderer.send('pet:drag-end'),
   // 「人还在」信号（点击 / 划过），用来推迟主进程的自主漫步
   activity: () => ipcRenderer.send('pet:activity'),
+
+  // 心境层事件（点击 / 摸头起止 —— 只收渲染层才有的信号，拖拽聊天主进程自有）
+  moodEvent: (type) => ipcRenderer.send('mood:event', { type }),
 
   // 在角色身上右键 → 主进程弹原生菜单（表情 / 动作 / 外观 / 退出）
   contextMenu: () => ipcRenderer.send('pet:context-menu'),

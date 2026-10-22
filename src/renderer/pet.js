@@ -8,7 +8,7 @@ import {
   MODELS, MODEL_NAME, INK_TOP_C_RATIO, P, State, EMOTION,
   EMO_SPEED, EMO_SPEED_DEFAULT, PAT, buildEmoTarget,
   EMO_SETTLE_EPS, EMO_SETTLE_HOLD_MS, emotionDeviation,
-  emoDecayAmt, mixEmoDecay
+  emoDecayAmt, mixEmoDecay, mixEmoMood
 } from './params.js';
 import { configureTTS, initTTS, speak, enqueueSpeech, takeSentences, stopSpeak, ttsVoiceInfo, ttsQueueState, setSpeechObserver, lipEnv, spokenText, resetSpoken, isSpeaking } from './tts.js';
 import { parseQuietHours, inQuietHours, msUntilQuietEnd } from './quiet-hours.js';
@@ -141,6 +141,12 @@ const emoApplied = {};
 
 // 配置（TTS / 主动搭话的开关都在里面）
 let cfg = null;
+
+/* ── 心境层（主进程 mood.js）的最新快照 ──
+ * 只取 bias（表情偏置权重）与四轴数值（诊断输出用）。主进程 10 秒推一次、
+ * 事件后即时推。**收不到快照 = 全 0 权重**，主循环里 mixEmoMood 直接原样
+ * 返回 —— 没有主进程配合（比如旧版配置文件、探针环境）也绝不炸、绝不偏。 */
+let moodSnap = null;
 // 有没有配 API Key。config:get 会把 key 遮成 '***'，非空即说明配了
 let hasApiKey = false;
 // 主动搭话计时器
@@ -1175,6 +1181,16 @@ async function boot() {
       decayActive = false;
     }
 
+    /* 心境偏置：主进程 mood.js 的四条轴（心情/想念/活力/端着）落到脸上。
+     * 权重由轴**穿过阈值**的程度决定，中段全 0 —— 阈值见 mood.js。
+     * ⚠️ 位置在情绪衰减**之后**：衰减先把这股情绪收干净，心境再叠 ——
+     *    心境的时标是分钟级，不该被秒级的情绪衰减稀释。
+     * ⚠️ 开关关（appearance.mood=false）或没收到过快照时权重全 0，
+     *    mixEmoMood 原样返回 —— 与没这功能逐位一致（verify-mood 断言）。 */
+    if (cfg?.appearance?.mood !== false) {
+      mixEmoMood(emoEff, moodSnap?.bias);
+    }
+
     /* 情绪插值：指数逼近（与帧率无关），但**每个字段一个速度** ——
      * 一张脸同时到位是木偶，错峰到位才像活人。速度表见 params.js 的 EMO_SPEED。
      * 用 1 − e^(−dt·s) 而不是乘一个固定 k，是为了不同帧率下轨迹一致。
@@ -1284,6 +1300,9 @@ async function boot() {
        * 看：标签永远是最后那个情绪，脸上的实际强度在这里 ——
        * PET_SNAPSHOT=mood 的衰减追踪靠它，不截一张图猜"她淡了没有"。 */
       decay: () => decayAmt,
+      /* 心境层快照（主进程推来的四轴 + 偏置权重）。?snap=mood 的 ④ 段
+       * 靠它读真实状态 —— 主进程不推时是 null，探针据此报"没收到"。 */
+      mood: () => moodSnap,
       /* 摸头（A-B-C）的状态机快照。露出来是为了让诊断脚本能**读真实状态**
        * 判断"按下到底有没有起手、按住期间在不在摆"，而不是靠盯截图猜。 */
       pat: () => ({
@@ -1848,7 +1867,10 @@ canvas.addEventListener('mousedown', (e) => {
   lastScreenY = e.screenY;
   /* 摸头起手：**按下就反应**（原来要等松手才播一次 TapBody）。
    * 只有"在头顶按下"才算 —— 身上其他地方仍然是原来的"点一下"。 */
-  if (isHeadPatTarget(e.clientX, e.clientY)) patStart();
+  if (isHeadPatTarget(e.clientX, e.clientY)) {
+    patStart();
+    window.pet?.moodEvent?.('patStart');   // 心境层：摸头计时从按下开始
+  }
   e.preventDefault();
 });
 
@@ -1893,6 +1915,7 @@ window.addEventListener('mouseup', () => {
      * 或者连着摸了三下（原来的规则，保留没删）。 */
     const annoyed = patNagged || clickStreak >= 3;
     patRelease();
+    window.pet?.moodEvent?.('patEnd');     // 心境层：按实际摸的时长结账（拖走/挣脱不算）
     if (annoyed) {
       setEmotion('shy');
       if (!patNagged) say('别摸啦，头发要乱了。');
@@ -1920,6 +1943,7 @@ window.addEventListener('mouseup', () => {
 function onPetClicked() {
   if (!model) return;
   window.pet?.activity?.();
+  window.pet?.moodEvent?.('click');        // 心境层：点一下 = 心情+ 想念归零
   noteUserResponse();          // 点她 = 明确搭理（proactive 退避归零）
   bumpClickStreak();
 
@@ -2099,6 +2123,11 @@ window.pet?.onThink?.((text) => {
   if (floatBubble()) return;          // 浮窗模式由气泡窗自己画那一行
   bubbleThink.textContent = text;
 });
+
+/* 心境层快照（主进程 10 秒 / 事件后推）：只缓存，主循环每帧从这取偏置权重。
+ * 走 preload 的事件白名单（pet.on），通道不在白名单里时静默无操作 ——
+ * moodSnap 保持 null，主循环的 mixEmoMood 收到 null 原样返回，零侵入。 */
+window.pet?.on?.('mood:snapshot', (s) => { if (s && typeof s === 'object') moodSnap = s; });
 
 // 托盘 / 右键菜单里改了开关，重新读一遍配置
 // （语音朗读、主动搭话、互动行为、系统状态显示等开关都在里面）

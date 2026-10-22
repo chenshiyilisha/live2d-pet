@@ -110,7 +110,9 @@ console.log('\n══════ C. 主进程接线 ══════\n');
   check(/process\.env\.PET_MEDIA/.test(ref), 'PET_MEDIA=1 时把采样打进日志（唯一能验"真实播放器上不上报歌名"的口子）');
   check(/if \(section === 'media'\) refreshMediaWatcher\(\);/.test(MAIN),
     '托盘勾选立刻生效（不用重启）');
-  check(/refreshMediaWatcher\(\);\s*\n\s*warnIfModelsMissing\(\)/.test(MAIN), '启动时按配置起进程');
+  /* 2026-10-22 起这两行之间还有心境层的启动（loadAndDrift + moodTick），
+   * 断言只钉「refreshMediaWatcher 在启动路径上被调过」，不钉紧邻关系。 */
+  check(/refreshMediaWatcher\(\);\s*\n[\s\S]{0,400}warnIfModelsMissing\(\)/.test(MAIN), '启动时按配置起进程');
   check(/stopMediaWatch\(\)/.test(MAIN.replace(/function stopMediaWatch[\s\S]*?\n}/, '')),
     '🔴 退出时显式杀进程（Windows 上父进程退出不带走子进程）');
   check(/ipcMain\.handle\('media:get'/.test(MAIN) && /isOn\('media', 'enabled'\) \? getMedia\(\) : null/.test(MAIN),

@@ -128,11 +128,33 @@
 | W13 | 连点/过摸生气档 | Vibe |
 | W14 | TTS→默认音→静音降级机 | Live2DPet |
 | W15 | 「看看」口令截屏 | AI-Desktop-Pet |
-| W16 | 连接真测一句才算就绪 | Nexus |
+| W16 | 连接真测一句才算就绪 | Nexus；**Coopanion Start 页同款** |
 | W17 | 外挂多 Agent hooks（可选） | CoPet |
+| W18 | 首次引导气泡向导 | Coopanion：称呼/人设/走动量/选模/下语音包 |
+| W19 | 触摸响应档 Quiet/Eager/Custom | Coopanion Habits；可并 X2 |
+| W20 | 活动态气泡（思考/读/写…）可点穿 | Coopanion Activity bubbles |
+| W21 | OBS 透明叠加导出 | Coopanion Habits |
+| W22 | 记忆 Markdown 工作区 + 版本 | Coopanion `PARTNER.md`+git；对照 G19，**勿整抄 AGPL 实现** |
 
-**网上已有、我们已有**：番茄 / 提醒 / 开机自启 / 锁屏静默 / 摸头 / 全屏闸门 / 低电降帧 / 工作状态。  
-**不抄主线**：亲密度养成、多宠交友、径向技能轮当主 UI、内置捆小模型、会议 Join、打字蒸汽特效。
+**网上已有、我们已有**：番茄 / 提醒 / 开机自启 / 锁屏静默 / 摸头 / 全屏闸门 / 低电降帧 / 工作状态；甩抛/摸头交互形态与 Coopanion 同类。  
+**不抄主线**：亲密度养成、多宠交友、径向技能轮当主 UI、内置捆小模型、会议 Join、打字蒸汽特效；**Computer use 控键鼠当产品主线**（与安静搭子冲突）。
+
+### E.1 竞品备忘 · Coopanion（2026-10-27）
+
+> https://github.com/Pal-AI-Lab/Coopanion · 站点 https://coo.palailab.org  
+> Electron + **Cortico**（Core + Persona + desktop-pet World）。  
+> **形象澄清**：鲸鱼娘**看起来像 Live2D**，实为自研 **WebGL sprite rig**（`kit/rig.js` 网格蒙皮 + 形变器 + 弹簧），官方称「Live2D **风格**实现、**不含 Cubism SDK**」；形象以 **figure pack**（`figure.json` + 代码/贴图）导入。内置 Coo 甚至是 SVG path。真·Cubism 鲸鱼是生态里另一插件（如 `dsh-whale-live2d`），不是 Coopanion 本体。  
+> 许可：**AGPL-3.0-or-later**（≤0.1.10 曾 MIT）；**只抄机制/产品点子，不搬代码**。鲸鱼素材另见其 THIRD_PARTY。
+
+| 维度 | Coopanion | 阿岩 |
+|---|---|---|
+| 壳 | Electron 三端 | Electron；远期 Tauri 2 |
+| 角色 | 自研 rig / figure pack（类 Live2D 观感，非 Cubism） | **Cubism Web** + profiles |
+| 模型 UX | 十多家预设 + ChatGPT 登录 + **Test** | 兼容协议已有 → **对齐 M2/M4/M5** |
+| 记忆 | `PARTNER.md` + git | `memory.js` 事实 |
+| 重心 | Agent / computer use / Worlds / 本地 ASR | 安静陪伴、系统静默、程序化表情物理 |
+
+**对本仓的结论**：对齐 **接模型体验（M 线）** 与 W18–W21 可选体验；**不**改定位成可操控电脑的代理桌宠；**不**因它改迁壳优先级。
 
 ---
 
@@ -157,10 +179,10 @@
 | ID | 项 | 做法草案 |
 |---|---|---|
 | M1 | **本地允许空 Key** | `localhost` / `127.0.0.1` 时：无 key 也走网络；可选占位 `ollama` / `lm-studio`。修 `streamLLM` + `memory.extractViaLlm` + 渲染层 `hasApiKey` 判定 |
-| M2 | **连接预设一键填** | 托盘/小面板：DeepSeek · 魔搭 · Ollama(`:11434/v1`) · LM Studio(`:1234/v1`) · 自定义；只写配置，不绑死一家 |
+| M2 | **连接预设一键填** | 托盘/小面板：DeepSeek · 魔搭 · Ollama(`:11434/v1`) · LM Studio(`:1234/v1`) · 自定义；产品形态对照 **Coopanion Start 页厂商表**（机制参考，AGPL 不抄码） |
 | M3 | **拉模型列表** | `GET …/v1/models` → 下拉选；失败可手填（Ollama/LM Studio 官方兼容端均有） |
-| M4 | **真测一句** | 不只通 `/models`：发极短 chat，成功才标「已就绪」（W16）；区分：连不上 / 无模型 / 401 / 超时 |
-| M5 | **设置页露出来** | 勿再只靠「打开 JSON」：Base URL、Key（可空提示）、Model、超时、extraBody 高级折叠 |
+| M4 | **真测一句** | 不只通 `/models`：发极短 chat，成功才标「已就绪」（W16 / Coopanion Test）；区分：连不上 / 无模型 / 401 / 超时 |
+| M5 | **设置页露出来** | 勿再只靠「打开 JSON」：Base URL、Key（可空提示）、Model、超时、extraBody 高级折叠；引导可叠 W18 |
 
 ### G-LLM 中期
 
@@ -225,3 +247,4 @@
 | 2026-10-27 | **归类重排**为 A–H；对齐 v0.3 发版 |
 | 2026-10-27 | 增 **G 大模型对接 M1–M9**；开干顺序改为先 M 再人格 |
 | 2026-10-27 | **定路线** Tauri 2+TS+Cubism Web：§J + `tauri-migration.md` |
+| 2026-10-27 | 记 **Coopanion**（§E.1 + W18–W22）；M 线对齐其接模型 UX；AGPL 不抄码、不跟 computer use |

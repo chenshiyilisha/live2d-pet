@@ -177,9 +177,10 @@ const mainSrc = fs
   .replace(/\r\n/g, '\n');
 
 ok('params.js 的 MODEL_NAME 取自档案（不另写字面量）',
-  /^export const MODEL_NAME = HIYORI\.name;/m.test(paramsSrc));
-ok('params.js 的 MODELS 注册用档案键',
-  /\[\s*HIYORI\.name\s*\]:\s*HIYORI\.model/.test(paramsSrc));
+  /^export const MODEL_NAME = [A-Z][A-Z0-9_]*\.name;/m.test(paramsSrc));
+ok('params.js 的 MODELS 注册用档案键（每个档案一条）',
+  /\[\s*HIYORI\.name\s*\]:\s*HIYORI\.model/.test(paramsSrc) &&
+  /\[\s*WHALE\.name\s*\]:\s*WHALE\.model/.test(paramsSrc));
 const mName = profileSrc.match(/^\s*name:\s*'([^']+)',\s*$/m);
 ok('档案里有 name', !!mName);
 const modelKey = mName ? mName[1] : '';

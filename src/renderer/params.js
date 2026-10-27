@@ -15,6 +15,7 @@
  */
 
 import { HIYORI } from './profiles/hiyori.js';
+import { WHALE } from './profiles/whale.js';
 
 /* ============================================================
  *  模型注册表 + 当前模型
@@ -23,19 +24,20 @@ import { HIYORI } from './profiles/hiyori.js';
  *  注册进 MODELS。MODEL_NAME 只在这里写一次当前用的档案键。
  * ========================================================== */
 
-export const MODELS = { [HIYORI.name]: HIYORI.model };
+export const MODELS = { [HIYORI.name]: HIYORI.model, [WHALE.name]: WHALE.model };
 
 /* 当前模型的档案键 —— 全项目只在这里写一次这个字符串。
  * 主进程、渲染层、诊断脚本都引用它，免得再出现「配置里写一个名字、
- * 代码里比对另一个名字」这种两边不一致。 */
-export const MODEL_NAME = HIYORI.name;
+ * 代码里比对另一个名字」这种两边不一致。
+ * ⚠️ 切模型目前是**改这一行**（whale 接入验证中，还没做运行时切换）。 */
+export const MODEL_NAME = WHALE.name;
 
 /* 当前档案的数据表（以旧名字导出 —— pet.js / diag.js / verify 的进口）。 */
-export const PARAM = HIYORI.param;
-export const EMOTION = HIYORI.emotion;
-export const EMO_RANGE = HIYORI.emoRange;
-export const PAT_DELTA = HIYORI.patDelta;
-export const EMO_SPEED = HIYORI.emoSpeed;
+export const PARAM = WHALE.param;
+export const EMOTION = WHALE.emotion;
+export const EMO_RANGE = WHALE.emoRange;
+export const PAT_DELTA = WHALE.patDelta;
+export const EMO_SPEED = WHALE.emoSpeed;
 
 /* 当前生效的参数表。
  *
@@ -54,11 +56,19 @@ export const State = {
   SLEEP: 'sleep'
 };
 
-/* 墨水顶部相对画布高 vh 的比例项（C = vh × 这个值）。
- * 实测：vh=1211.2 → C=242.2（两点拟合 242）；vh=1623.2 → C≈326.8。
- * 1/5 与两档数据都吻合（残差 <3px，那是 hiyori 呆毛太细、像素判定吃掉的）。
- * 它来自插件把模型的局部原点放在画布高约 20% 处，与模型本身无关 ——
- * 所以留在引擎层而不是各模型的档案里。 */
+/* 墨水顶部相对画布高 vh 的比例项（C = vh × 这个值）—— **只是回退默认值**。
+ * 实际取值在 **模型档案的 inkTopCRatio**（pet.js: `?? INK_TOP_C_RATIO`），
+ * 换模型时以档案为准；这个值只在档案没写该键时兜底。
+ *
+ * 0.2 的来历（hiyori）：vh=1211.2 → C=242.2、vh=1623.2 → C≈326.8，1/5 与
+ * 两档都吻合（残差 <3px，那是 hiyori 呆毛太细、像素判定吃掉的）。
+ *
+ * 🔴 **旧注释写的「与模型本身无关」已被证伪（2026-10-25）—— 别再信。**
+ * 鲸鱼娘实测是 **0.328**（写死在 profiles/whale.js 里，hiyori 的 0.2 差了
+ * 64%）。当时是靠 hiyori 一档就下了"模型无关"的结论，之后拿 0.2 去标定
+ * 第二个模型，拟合时被"三档窗口高全用同一个 petScale"的共线数据骗了，
+ * 直到换一组 petScale 复验才暴露（残差 81css）。
+ * → 取景常数一律**逐模型实测**，至少两组不同的 petScale（规矩 2）。 */
 export const INK_TOP_C_RATIO = 0.2;
 
 /* ============================================================

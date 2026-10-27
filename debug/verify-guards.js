@@ -68,10 +68,15 @@ console.log('\n═══ A. 自主漫步的循环写法没被改回老样子 ═
   check(!/snapGuard/.test(motionSrc),
     '老的 snapGuard 写法没有回流（它是上面那个漏发的根因）');
 
-  /* A3. 用户一上手必须**整体**收手（当前这趟 + 循环），不能只停动画。 */
+  /* A3. 用户一上手必须**整体**收手（当前这趟 + 循环），不能只停动画。
+   * 甩抛接入后 onUserDragMove 改成内联 GEN++/mode=idle/cancelMoveAnim
+   * （不能走 cancelAutoMotion —— 那条会清 throwSamples，估不出初速）。
+   * 两种写法等价，只要 ++GEN 且退出溜达态就算过。 */
   const dragMove = sliceFn(motionSrc, 'function onUserDragMove(');
-  check(/cancelAutoMotion\(\)/.test(dragMove),
-    'onUserDragMove 用的是 cancelAutoMotion（连循环一起停），不是只 cancelMoveAnim');
+  const dragStopsLoop = /cancelAutoMotion\(\)/.test(dragMove) ||
+    (/GEN\+\+/.test(dragMove) && /mode = 'idle'/.test(dragMove) && /cancelMoveAnim\(\)/.test(dragMove));
+  check(dragStopsLoop,
+    'onUserDragMove 会停溜达循环（cancelAutoMotion 或内联 GEN++/idle/cancelMoveAnim）');
   const cam = sliceFn(motionSrc, 'function cancelAutoMotion(');
   check(/GEN\+\+/.test(cam) && /mode = 'idle'/.test(cam),
     'cancelAutoMotion 同时 ++GEN 并退出溜达态（否则循环会接着排下一步）');

@@ -50,10 +50,12 @@ const {
   listReminders, startPomodoro, stopPomodoro, pomodoroStatus, disposeReminders
 } = require('./reminder');
 const {
-  configureMotion, cancelMoveAnim, cancelAutoMotion, isMoveAnimRunning, setMotionPaused,
+  configureMotion, configureThrowHooks, cancelMoveAnim, cancelAutoMotion,
+  isMoveAnimRunning, setMotionPaused,
   edgeSnap, setHome, startIdleWatcher, refreshWanderConfig, startWander, wanderState,
   setIdleOverride,
   onUserDragMove, onUserDragEnd, notifyUserActivity,
+  recordDragSample, tryStartThrow,
   disposeMotion, currentDisplay
 } = require('./motion');
 const {
@@ -66,6 +68,7 @@ const { startSynth, stopSynth, synthWav } = require('./tts');
 const { configureUpdater, checkForUpdates, updaterStatus } = require('./updater');
 const bubble = require('./bubble');
 const { createMoodEngine } = require('./mood');
+const memory = require('./memory');
 
 // 项目根目录，本地服务与托盘图标、诊断截图都以它为基准
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
@@ -155,6 +158,28 @@ let serverPort = 0;
  * reminder 到点了要弹气泡、必要时还得把窗口唤出来 —— 那部分是窗口的活，
  * 留在这一层做，并通过 setReminderSink 注进去。 */
 configureMotion(() => mainWindow);
+configureThrowHooks({
+  onSquash: (intensity) => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('pet:squash', { intensity });
+      }
+    } catch { /* ignore */ }
+  },
+  onSettled: () => {
+    /* 甩抛停稳 = 用户明确甩到的位置 → 可落盘（规矩 25 只管自动移动）。
+     * 可选再贴边（配置开了才）。 */
+    edgeSnap();
+    setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      const { x, y } = mainWindow.getBounds();
+      saveConfig({ ...loadConfig(), window: { x, y } });
+    }, 500);
+  }
+});
+memory.configureMemory({
+  getPath: () => path.join(app.getPath('userData'), 'memory-facts.json')
+});
 
 setReminderSink((payload) => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -1316,7 +1341,11 @@ function buildMenuTemplate() {
     flag('interaction', 'rightMenu', '在角色身上右键出菜单'),
     flag('interaction', 'headPat', '按住头顶会一直蹭'),
     flag('interaction', 'dragReact', '拖着走会挣扎'),
-    flag('interaction', 'pokeReact', '连戳有递进反应')
+    flag('interaction', 'pokeReact', '连戳有递进反应'),
+    flag('interaction', 'throw', '甩出去会抛物线飞行', false),
+    flag('interaction', 'bounce', '落地会弹一下'),
+    flag('interaction', 'squash', '点击/落地会 Q 弹'),
+    flag('interaction', 'workState', '对话时脸上跟着干活')
   ];
 
   /* ---------- 功能开关 ---------- */
@@ -1324,6 +1353,7 @@ function buildMenuTemplate() {
    * （她本来就是安静的），"到底有没有在静默"只能从菜单里读出来。 */
   const quietItem = flag('quiet', 'enabled', '全屏时自动静默');
   if (quiet) quietItem.label += '（静默中）';
+  const lowPowerItem = flag('quiet', 'lowPower', '低配降帧（省电）', false);
 
   /* 语音朗读：开关和引擎两件事收进一个子菜单，当前值写进标题 ——
    * 引擎切换只影响"说话时嘴怎么动"，单独平铺一行会让功能组变长
@@ -1362,6 +1392,8 @@ function buildMenuTemplate() {
     ttsItem,
     flag('proactive', 'enabled', '主动搭话'),
     quietItem,
+    lowPowerItem,
+    flag('memory', 'enabled', '长期记忆（记住关于你的事）'),
     flag('monitor', 'floating', '系统状态悬浮显示', false),
     flag('reminder', 'enabled', '定时提醒'),
     flag('asr', 'enabled', '语音输入（离线识别）', false),
@@ -1470,6 +1502,13 @@ function buildMenuTemplate() {
           fs.rmSync(path.join(app.getPath('userData'), 'chat-history.json'), { force: true });
         } catch { /* ignore */ }
         mainWindow?.webContents.send('history:cleared');
+      }
+    },
+    {
+      label: '清空长期记忆',
+      click: () => {
+        try { memory.clearFacts(); } catch { /* ignore */ }
+        toast('长期记忆已清空');
       }
     }
   ];
@@ -1589,6 +1628,77 @@ function moodLine() {
   return line ? `（她此刻的心境，用来把握语气，别复述给用户：${line}。）` : '';
 }
 
+/* 长期记忆注入行。从本轮 messages 里取最后一条 user 做召回 query。 */
+function memoryLine(messages) {
+  if (!isOn('memory', 'enabled', true)) return '';
+  const cfg = loadConfig();
+  const lastUser = [...(Array.isArray(messages) ? messages : [])]
+    .reverse()
+    .find((m) => m && m.role === 'user' && typeof m.content === 'string');
+  const q = lastUser?.content || '';
+  const facts = memory.recall(q, {
+    injectMax: cfg.memory?.injectMax,
+    forceExpand: false
+  });
+  return memory.formatMemoryLine(facts, cfg.memory?.injectChars);
+}
+
+/* 回合结束后异步记一笔（不挡回复）。启发式必跑；有 key 且开着才 LLM 补抽。 */
+function rememberAfterTurn(messages, assistantText) {
+  if (!isOn('memory', 'enabled', true)) return;
+  const cfg = loadConfig();
+  const lastUser = [...(Array.isArray(messages) ? messages : [])]
+    .reverse()
+    .find((m) => m && m.role === 'user' && typeof m.content === 'string');
+  const userText = lastUser?.content || '';
+  if (!userText) return;
+
+  const opts = { maxFacts: cfg.memory?.maxFacts };
+  const heur = memory.extractHeuristic(userText);
+  if (heur.length) {
+    const r = memory.upsertFacts(heur, opts);
+    if (r.added || r.updated) {
+      console.log('[memory] heuristic', JSON.stringify({ added: r.added, updated: r.updated }));
+    }
+  }
+
+  if (cfg.memory?.llmExtract === false) return;
+  if (!cfg.llm?.apiKey) return;
+
+  /* 已经有启发式命中时仍可补抽，但跳过明显无信息的短句 */
+  if (userText.trim().length < 4) return;
+
+  setImmediate(() => {
+    memory.extractViaLlm(userText, assistantText || '', cfg.llm)
+      .then((drafts) => {
+        if (!drafts.length) return;
+        const r = memory.upsertFacts(drafts, opts);
+        console.log('[memory] llm-extract', JSON.stringify({
+          n: drafts.length, added: r.added, updated: r.updated
+        }));
+      })
+      .catch(() => { /* 记忆失败绝不能影响聊天 */ });
+  });
+}
+
+/* 工作状态镜像（DSH 桌宠长处）：thinking / working / success / error / idle。
+ * 渲染层按 profiles.motionSlots 播动作 + 切表情；status 气泡低优先级不抢对话。 */
+let workPhase = 'idle';
+let workChunkSeen = false;
+
+function emitWorkState(phase, extra = {}) {
+  if (!isOn('interaction', 'workState', true)) return;
+  if (phase === workPhase && phase !== 'working') return;
+  workPhase = phase;
+  if (phase === 'thinking') workChunkSeen = false;
+  try {
+    mainWindow?.webContents.send('pet:work-state', { phase, ...extra });
+  } catch { /* ignore */ }
+  /* status 气泡：只在非对话流时露短句（stream 占用时 arbiter 会拒） */
+  if (phase === 'success') bubble.showStatus('搞定啦 ✓', 2200);
+  else if (phase === 'error') bubble.showStatus('出了点问题…', 2800);
+}
+
 /* 聊天分片 / 情绪 / 想法的**唯一出口**：主窗渲染层拿它累积 replyBuffer
  * （驱动 TTS 朗读与历史保存），悬浮气泡窗拿它做流式显示。
  * 别绕开这几个函数直接 webContents.send —— 气泡窗会漏字。
@@ -1596,6 +1706,10 @@ function moodLine() {
  * ⚠️ 想法（think）走**独立一条**：它不进 replyBuffer、不进历史、不被 TTS 念。
  *    所以这个函数只发给气泡窗和主窗的显示元素，不碰任何"说出口"的累积。 */
 function emitChatChunk(t) {
+  if (!workChunkSeen) {
+    workChunkSeen = true;
+    emitWorkState('working');
+  }
   try { mainWindow?.webContents.send('chat:chunk', t); } catch { /* 窗口在销毁 */ }
   bubble.appendChunk(t);
 }
@@ -1793,21 +1907,25 @@ function proactiveMoodHint(emotion) {
  * 可以脱离 Electron 单独 require 与测试。 */
 function chatStream(messages, opts = {}) {
   const cfg = loadConfig();
-  /* 三条上下文都插进第二位（紧跟人设那条 system）。
-   * ⚠️ 三个都是 splice(1, 0)，**后套的在前**。最外层是心境 → 最贴人设，
-   *    于是结果是 [人设, 心境, 媒体, 复读提示, ...历史]。它们之间没有
-   *    语义先后，共同点是**都必须在用户那句话之前**（verify-media 的
-   *    「媒体紧跟人设」断言测的是 media+复读那个内层组合，套心境不改它）。 */
-  const withContext = injectMoodContext(
-    injectMediaContext(
-      injectVarietyHint(messages, varietyHint(messages, cfg.chat?.varietyGuard !== false)),
-      mediaContextLine()
+  /* 上下文都插进第二位（紧跟人设那条 system）。
+   * ⚠️ 都是 splice(1, 0)，**后套的在前**。最外层是记忆 → 最贴人设：
+   *    [人设, 记忆, 心境, 媒体, 复读提示, ...历史]。
+   *    共同点是**都必须在用户那句话之前**。 */
+  const withContext = memory.injectMemoryContext(
+    injectMoodContext(
+      injectMediaContext(
+        injectVarietyHint(messages, varietyHint(messages, cfg.chat?.varietyGuard !== false)),
+        mediaContextLine()
+      ),
+      moodLine()
     ),
-    moodLine()
+    memoryLine(messages)
   );
+  /* 累积说出口的正文，给回合后记忆抽取用（streamLLM 返回值不含全文）。 */
+  let spoken = '';
   return streamLLM(withContext, {
     ...cfg.llm,
-    send: emitChatChunk,
+    send: (t) => { spoken += t; emitChatChunk(t); },
     sendEmotion: emitChatEmotion,
     sendThink: emitChatThink,
     /* 外部中止信号（在途作废）：不传时 streamLLM 的行为与从前逐位一致 */
@@ -1818,6 +1936,9 @@ function chatStream(messages, opts = {}) {
      * 日志里频繁出现就说明该把禁用语写得更狠，或者升级成"边收边扣"的硬拦。 */
     if (res && Array.isArray(res.tone) && res.tone.length) {
       console.warn('[chat] 助手腔命中（提示词没管住）:', res.tone.join(' / '));
+    }
+    if (res?.ok && !res.silent) {
+      rememberAfterTurn(messages, spoken);
     }
     return res;
   });
@@ -1884,6 +2005,7 @@ function registerIpc() {
       width: SIZE.w,
       height: SIZE.h
     });
+    recordDragSample();
   });
 
   /* 诊断：把窗口的真实尺寸打出来。
@@ -1927,6 +2049,8 @@ function registerIpc() {
     moodEngine.onDragEnd();
     pushMoodSnapshot();
     onUserDragEnd();
+    /* 甩得够快 → 抛物线；否则走原来的贴边。起飞后由 onThrowSettled 落盘。 */
+    if (tryStartThrow()) return;
     edgeSnap();
     setTimeout(() => {
       if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -2075,6 +2199,7 @@ function registerIpc() {
     /* 用户开口 = 最强意义上的「被搭理」：想念轴归零（mood.js）。 */
     moodEngine.onUserChat();
     pushMoodSnapshot();
+    emitWorkState('thinking');
     // 悬浮气泡：这一轮对话从现在开始显示（浮窗关着时是 no-op）
     bubble.beginStream();
     try {
@@ -2082,16 +2207,27 @@ function registerIpc() {
       const last = [...(messages || [])].reverse().find((m) => m && m.role === 'user');
       try {
         const local = await tryLocalIntent(last?.content);
-        if (local) { bubble.endStream(); return local; }
+        if (local) {
+          bubble.endStream();
+          emitWorkState(local?.ok === false ? 'error' : 'success');
+          return local;
+        }
       } catch (err) {
         console.warn('[intent] 本地意图处理失败:', String(err?.message || err));
       }
       const cfg = loadConfig();
       const res = await chatStream([{ role: 'system', content: resolvePersona(cfg) }, ...messages]);
-      if (res?.ok) bubble.endStream(); else bubble.abortStream();
+      if (res?.ok) {
+        bubble.endStream();
+        emitWorkState('success');
+      } else {
+        bubble.abortStream();
+        emitWorkState('error');
+      }
       return res;
     } catch (err) {
       bubble.abortStream();
+      emitWorkState('error');
       throw err;
     }
   });

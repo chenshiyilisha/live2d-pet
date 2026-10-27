@@ -30,8 +30,14 @@ const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 const stripEsm = (s) => s.replace(/^import[^\n]*$/gm, '').replace(/^export\s+/gm, '');
 const pSandbox = { console, Math };
 vm.createContext(pSandbox);
+/* profiles/ 整个目录拼进来（stripEsm 会剥掉 import/export 前缀）——
+ * params.js 引哪个档案都得在，加新模型不用改这里。 */
+const profilesSrc = fs.readdirSync(path.join(ROOT, 'src', 'renderer', 'profiles'))
+  .filter((f) => f.endsWith('.js'))
+  .map((f) => stripEsm(read(path.join('src', 'renderer', 'profiles', f))))
+  .join('\n');
 vm.runInContext(
-  stripEsm(read('src/renderer/profiles/hiyori.js')) + '\n' +
+  profilesSrc + '\n' +
   stripEsm(read('src/renderer/params.js')) +
   '\n;globalThis.__api = { EMOTION, EMO_SETTLE_EPS, EMO_SETTLE_HOLD_MS, emotionDeviation };',
   pSandbox

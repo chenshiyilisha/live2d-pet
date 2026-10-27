@@ -36,8 +36,11 @@ export const HIYORI = {
    *  取多个缩放点拟合出「顶部 = C + K·s」（s 见 layout）。
    *
    *  🔴 坑（2026-10-11 才彻底搞清，别再走弯路）：
-   *     C 不是常数，也不取决于模型 —— 它正比于**画布高 vh**：
-   *     C = vh × INK_TOP_C_RATIO（该常数在 params.js，与模型无关）。
+   *     C 不是常数 —— 它正比于**画布高 vh**：
+   *     C = vh × inkTopCRatio（比例系数**在本档案里**，params.js 的
+   *     INK_TOP_C_RATIO 只是缺省回退值）。
+   *     ⚠️ 这个系数**逐模型不同**，别拿 hiyori 的 0.2 去套别的模型 ——
+   *     鲸鱼娘实测是 0.328（差 64%），详见 profiles/whale.js 的注释。
    *     两个模型当初各测出一模一样的 242，是因为**标定时用的是同一个窗口**，
    *     不是「画布尺寸相同」（它俩画布根本不同）。按常数写死的结果是：
    *     当前窗口下严丝合缝，一旦换显示器/改 WIN_H_RATIO，头顶立刻跑偏 ——
@@ -70,7 +73,17 @@ export const HIYORI = {
     /* 组级淡化覆盖（秒）。Drag 是"被拎起来"的反应，0.5s 的淡入太钝 ——
      * 抓上来半秒她才肯挣扎。pet.js 的 retime() 以这里为准。
      * （只在定义了非默认值时才需要列进来，没列的组用 pet.js 的 0.5s。） */
-    fadeOverride: { Drag: { in: 0.12, out: 0.3 } }
+    fadeOverride: { Drag: { in: 0.12, out: 0.3 } },
+    /* 工作状态 → 动作组（DSH live2d-pets 槽位思路）。
+     * 空串 / 缺键 = 只切表情不播动作。hiyori 有 Drag/Walk，成功用 Walk 示意。 */
+    motionSlots: {
+      thinking: '',
+      working: '',
+      success: 'Walk',
+      error: 'Drag',
+      drag: 'Drag',
+      walk: 'Walk'
+    }
   },
 
   /* 桃濑日和（Hiyori Momose）的参数表。它没有 exp3 表情文件，

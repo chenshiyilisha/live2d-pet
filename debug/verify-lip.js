@@ -268,13 +268,15 @@ globalThis.SpeechSynthesisUtterance = class {
   {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-lip-'));
     fs.mkdirSync(path.join(dir, 'profiles'), { recursive: true });
-    fs.copyFileSync(
-      path.join(SRC, 'renderer', 'profiles', 'hiyori.js'),
-      path.join(dir, 'profiles', 'hiyori.mjs'));
+    for (const f of fs.readdirSync(path.join(SRC, 'renderer', 'profiles'))) {
+      if (f.endsWith('.js')) fs.copyFileSync(
+        path.join(SRC, 'renderer', 'profiles', f),
+        path.join(dir, 'profiles', f.replace(/\.js$/, '.mjs')));
+    }
     fs.writeFileSync(
       path.join(dir, 'params.mjs'),
       fs.readFileSync(path.join(SRC, 'renderer', 'params.js'), 'utf8')
-        .replace("'./profiles/hiyori.js'", "'./profiles/hiyori.mjs'"));
+        .replace(/'\.\/profiles\/([A-Za-z0-9_-]+)\.js'/g, "'./profiles/$1.mjs'"));
     fs.writeFileSync(
       path.join(dir, 'tts.mjs'),
       tts.replace(/from '\.\/params\.js'/, "from './params.mjs'")

@@ -16,6 +16,8 @@ const MAIN_EVENTS = [
   'pet:quiet',          // 进入 / 退出全屏静默（渲染层据此降帧、闭嘴）
   'pet:visible',        // 窗口显示 / 隐藏了（隐藏时降到 1fps，别白烧）
   'pet:screen-locked',  // 锁屏 / 解锁了（渲染层据此拦主动搭话）
+  'pet:work-state',     // 对话工作状态（thinking/working/success/error）
+  'pet:squash',         // 落地 / 甩抛 Q 弹挤压
   'mood:snapshot',      // 心境层的四轴快照（表情偏置权重在里面，10s/事件后推）
   'monitor:stats'       // 系统状态悬浮显示的数据
 ];

@@ -4,6 +4,9 @@ const { screen, powerMonitor } = require('electron');
 const { loadConfig } = require('./config');
 const { clamp, cornerPos } = require('./util');
 const { SIZE, MARGIN } = require('./win-size');
+const {
+  estimateVelocity, shouldThrow, step: throwStep
+} = require('./throw-physics');
 
 /* ============================================================
  *  窗口移动：平滑动画 / 边缘吸附 / 自主漫步 / 回位
@@ -32,6 +35,15 @@ const win = () => {
 };
 
 let moveAnim = null;
+let throwAnim = null;          // 甩抛飞行定时器（与 moveAnim 互斥）
+let throwSamples = [];         // 拖拽采样 [{t,x,y}]
+let onThrowSquash = () => {};  // (intensity) => void —— 落地 Q 弹回调
+let onThrowSettled = () => {}; // () => void —— 停稳后（落盘 / 贴边）
+
+function configureThrowHooks({ onSquash, onSettled } = {}) {
+  if (typeof onSquash === 'function') onThrowSquash = onSquash;
+  if (typeof onSettled === 'function') onThrowSettled = onSettled;
+}
 
 /* 「暂停」= 全屏 / 游戏静默期间冻结一切自动移动（见 main.js 的 setQuiet）。
  *
@@ -67,12 +79,26 @@ function cancelMoveAnim() {
   if (moveAnim) { clearInterval(moveAnim); moveAnim = null; }
 }
 
-/* 用户上手 / 静默 / 销毁时用的**彻底**收手：当前这一趟 + 溜达循环 + 回位，
+function cancelThrowFlight() {
+  if (throwAnim) { clearInterval(throwAnim); throwAnim = null; }
+}
+
+function clearThrowSamples() { throwSamples = []; }
+
+function cancelThrow() {
+  cancelThrowFlight();
+  clearThrowSamples();
+}
+
+function isThrowRunning() { return !!throwAnim; }
+
+/* 用户上手 / 静默 / 销毁时用的**彻底**收手：当前这一趟 + 溜达循环 + 回位 + 甩抛，
  * 一起停掉。凡是从"外部"打断自动移动的都该用这个。 */
 function cancelAutoMotion() {
   GEN++;
   mode = 'idle';
   cancelMoveAnim();
+  cancelThrow();
 }
 
 /* 给诊断通道用：判断「拖拽有没有把溜达的平滑移动掐掉」，
@@ -424,13 +450,101 @@ function refreshWanderConfig() {
  *   （她之后再溜达跑远了，下一次用户操作照样会把她收回来。） */
 function onUserDragMove() {
   lastUserDragAt = Date.now();
-  cancelAutoMotion();
+  /* 拖拽中：停溜达/回位/飞行，但**保留采样**给松手估速。 */
+  GEN++;
+  mode = 'idle';
+  cancelMoveAnim();
+  cancelThrowFlight();
 }
 
 function onUserDragEnd() {
   lastUserDragAt = Date.now();
   wanderMoved = false;
-  cancelAutoMotion();
+  GEN++;
+  mode = 'idle';
+  cancelMoveAnim();
+  cancelThrowFlight();
+  /* throwSamples 留给紧跟着的 tryStartThrow */
+}
+
+/* ---- 甩抛：拖拽采样 + 松手起飞 ----
+ *
+ * 主进程在 pet:drag-move 里调 recordDragSample；松手时 tryStartThrow。
+ * 飞出期间**不写 window 配置**（规矩 25）—— 停稳后由 onThrowSettled
+ * 回调去落盘 + 可选贴边（那是用户甩出去的最终位置，算明确指定）。
+ * 静默 / 再拖 / 销毁都会 cancelThrow。 */
+
+function recordDragSample() {
+  const w = win();
+  if (!w) return;
+  const b = w.getBounds();
+  const now = Date.now();
+  throwSamples.push({ t: now, x: b.x, y: b.y });
+  /* 只留最近 ~120ms，估速够用又省内存 */
+  while (throwSamples.length > 1 && now - throwSamples[0].t > 120) {
+    throwSamples.shift();
+  }
+}
+
+/**
+ * @returns {boolean} 是否真的起飞了（没起飞时调用方应走原来的 edgeSnap）
+ */
+function tryStartThrow() {
+  const w = win();
+  if (!w || paused) { throwSamples = []; return false; }
+  const cfg = loadConfig();
+  if (cfg.motion?.enabled === false || cfg.interaction?.throw !== true) {
+    throwSamples = [];
+    return false;
+  }
+
+  const { vx, vy, speed } = estimateVelocity(throwSamples);
+  throwSamples = [];
+  if (!shouldThrow(speed, true)) return false;
+
+  cancelMoveAnim();
+  cancelThrow();
+
+  const bounce = cfg.interaction?.bounce !== false;
+  const wa = currentDisplay().workArea;
+  let state = {
+    x: w.getBounds().x,
+    y: w.getBounds().y,
+    vx, vy,
+    w: SIZE.w,
+    h: SIZE.h
+  };
+  let lastT = Date.now();
+  let settledOnce = false;
+
+  throwAnim = setInterval(() => {
+    const cur = win();
+    if (!cur || paused) {
+      cancelThrow();
+      return;
+    }
+    const now = Date.now();
+    const dt = (now - lastT) / 1000;
+    lastT = now;
+    const next = throwStep(state, wa, dt, { bounce });
+    state = { ...state, x: next.x, y: next.y, vx: next.vx, vy: next.vy };
+    try {
+      cur.setBounds({ x: next.x, y: next.y, width: SIZE.w, height: SIZE.h });
+    } catch {
+      cancelThrow();
+      return;
+    }
+    if (next.squash > 0.05) {
+      try { onThrowSquash(next.squash); } catch { /* ignore */ }
+    }
+    if (next.stopped && !settledOnce) {
+      settledOnce = true;
+      cancelThrow();
+      try { onThrowSettled(); } catch { /* ignore */ }
+    }
+  }, 16);
+
+  return true;
 }
 
 /* 渲染层发来的"人还在"信号（点她 / 划过窗口 / 打字）。
@@ -449,9 +563,12 @@ function disposeMotion() {
 
 module.exports = {
   configureMotion,
+  configureThrowHooks,
   cancelMoveAnim,
+  cancelThrow,
   cancelAutoMotion,
   isMoveAnimRunning,
+  isThrowRunning,
   setMotionPaused,
   isMotionPaused,
   animateTo,
@@ -461,6 +578,8 @@ module.exports = {
   refreshWanderConfig,
   onUserDragMove,
   onUserDragEnd,
+  recordDragSample,
+  tryStartThrow,
   notifyUserActivity,
   startWander,
   stopWander,

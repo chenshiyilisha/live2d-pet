@@ -297,13 +297,15 @@ const {
   const tmp = path.join(os.tmpdir(), `wb-params-mood-${process.pid}`);
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.mkdirSync(path.join(tmp, 'profiles'), { recursive: true });
-  fs.copyFileSync(
-    path.join(SRC, 'renderer', 'profiles', 'hiyori.js'),
-    path.join(tmp, 'profiles', 'hiyori.mjs'));
+  for (const f of fs.readdirSync(path.join(SRC, 'renderer', 'profiles'))) {
+    if (f.endsWith('.js')) fs.copyFileSync(
+      path.join(SRC, 'renderer', 'profiles', f),
+      path.join(tmp, 'profiles', f.replace(/\.js$/, '.mjs')));
+  }
   fs.writeFileSync(
     path.join(tmp, 'params.mjs'),
     fs.readFileSync(path.join(SRC, 'renderer', 'params.js'), 'utf8')
-      .replace("'./profiles/hiyori.js'", "'./profiles/hiyori.mjs'"));
+      .replace(/'\.\/profiles\/([A-Za-z0-9_-]+)\.js'/g, "'./profiles/$1.mjs'"));
   let M;
   try {
     M = await import(pathToFileURL(path.join(tmp, 'params.mjs')).href);

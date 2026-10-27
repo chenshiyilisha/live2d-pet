@@ -40,6 +40,11 @@
 const { BrowserWindow, ipcMain, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { createArbiter } = require('./bubble-priority');
+
+/* 气泡优先级：stream / alert / status，低级不抢高级（见 bubble-priority.js）。 */
+const arbiter = createArbiter();
+let streamToken = null;
 
 const WIDTH = 272;        // 气泡窗宽（主窗 308，左右各收一点）
 const TIP_GAP = 10;       // **尾巴尖**与人物头顶的间隙（决定"离人远近"的就是它）
@@ -233,6 +238,9 @@ function snapshotSelf() {
 
 function beginStream() {
   clearHideTimer();
+  const gate = arbiter.acquire('stream');
+  if (!gate.ok) return;           // 被更高优先级占着（极少见）
+  streamToken = gate.token;
   if (!enabled()) return;
   try {
     const w = ensureWin();
@@ -247,6 +255,7 @@ function beginStream() {
 
 function appendChunk(text) {
   if (!enabled()) return;
+  if (streamToken != null && !arbiter.allowsAppend(streamToken)) return;
   try {
     if (!win || win.isDestroyed()) return;
     if (!win.isVisible()) { curH = MIN_H; place(); win.showInactive(); }
@@ -260,6 +269,7 @@ function appendChunk(text) {
  * 与前缀无关的另一个通道，故单独一个函数。 */
 function appendThink(text) {
   if (!enabled()) return;
+  if (streamToken != null && !arbiter.allowsAppend(streamToken)) return;
   try {
     if (!win || win.isDestroyed()) return;
     if (!win.isVisible()) { curH = MIN_H; place(); win.showInactive(); }
@@ -268,6 +278,8 @@ function appendThink(text) {
 }
 
 function endStream() {
+  arbiter.release(streamToken);
+  streamToken = null;
   try {
     if (win && !win.isDestroyed()) win.webContents.send('bubble:end');
   } catch { /* ignore */ }
@@ -276,16 +288,25 @@ function endStream() {
 }
 
 function abortStream() {
+  arbiter.release(streamToken);
+  streamToken = null;
   clearHideTimer();
   try {
     if (win && !win.isDestroyed()) win.webContents.send('bubble:abort');
   } catch { /* ignore */ }
 }
 
-/* say() 类整段播报（提醒 / 番茄钟 / 主动搭话的离线分支）。 */
+/* say() 类整段播报（提醒 / 番茄钟 / 主动搭话的离线分支）—— alert 级，可盖住 status。 */
 function showFull(text, autoHideMs = AUTO_HIDE_MS) {
   clearHideTimer();
-  if (!enabled()) return;
+  const gate = arbiter.acquire('alert');
+  if (!gate.ok) return;
+  /* alert 占位后 stream 被挤掉 —— 清掉旧 token，避免迟到的 endStream 误清 alert */
+  streamToken = null;
+  if (!enabled()) {
+    arbiter.release(gate.token);
+    return;
+  }
   try {
     const w = ensureWin();
     w.webContents.send('bubble:full', String(text));
@@ -293,14 +314,47 @@ function showFull(text, autoHideMs = AUTO_HIDE_MS) {
     place();
     w.showInactive();
     snapshotSelf();
-    hideTimer = setTimeout(() => { hideNow(); }, Math.max(2000, autoHideMs));
+    hideTimer = setTimeout(() => {
+      arbiter.release(gate.token);
+      hideNow();
+    }, Math.max(2000, autoHideMs));
   } catch (err) {
+    arbiter.release(gate.token);
     console.warn('[bubble] showFull failed:', String(err?.message || err));
+  }
+}
+
+/* 工作状态短句（status 级）—— 对话流进行中时不抢气泡。 */
+function showStatus(text, autoHideMs = 2800) {
+  clearHideTimer();
+  const gate = arbiter.acquire('status');
+  if (!gate.ok) return false;
+  if (!enabled()) {
+    arbiter.release(gate.token);
+    return false;
+  }
+  try {
+    const w = ensureWin();
+    w.webContents.send('bubble:full', String(text));
+    curH = MIN_H;
+    place();
+    w.showInactive();
+    hideTimer = setTimeout(() => {
+      arbiter.release(gate.token);
+      hideNow();
+    }, Math.max(1200, autoHideMs));
+    return true;
+  } catch (err) {
+    arbiter.release(gate.token);
+    console.warn('[bubble] showStatus failed:', String(err?.message || err));
+    return false;
   }
 }
 
 function hideNow() {
   clearHideTimer();
+  arbiter.reset();
+  streamToken = null;
   try {
     if (win && !win.isDestroyed() && win.isVisible()) win.hide();
   } catch { /* ignore */ }
@@ -337,6 +391,8 @@ function setQuiet(on) {
 
 function dispose() {
   clearHideTimer();
+  arbiter.reset();
+  streamToken = null;
   if (followTimer) { clearTimeout(followTimer); followTimer = null; }
   if (measureTimer) { clearTimeout(measureTimer); measureTimer = null; }
   try { if (win && !win.isDestroyed()) win.destroy(); } catch { /* ignore */ }
@@ -361,11 +417,20 @@ module.exports = {
   endStream,
   abortStream,
   showFull,
+  showStatus,
   hideNow,
   syncPosition,
   refreshConfig,
   setQuiet,
   dispose,
   /* 测试与诊断用 */
-  _state: () => ({ alive: !!(win && !win.isDestroyed()), visible: !!(win && !win.isDestroyed() && win.isVisible()), h: curH, inside: insideMode, headTop })
+  _state: () => ({
+    alive: !!(win && !win.isDestroyed()),
+    visible: !!(win && !win.isDestroyed() && win.isVisible()),
+    h: curH,
+    inside: insideMode,
+    headTop,
+    priority: arbiter.peek()
+  }),
+  _arbiter: arbiter
 };

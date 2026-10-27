@@ -38,18 +38,20 @@ const stripComments = (s) =>
 
 (async () => {
   /* ---- 复制 params.mjs + profiles/*.mjs 到临时目录再 import ----
-   * params.js 现在从 profiles/hiyori.js import 档案数据 —— 单文件复制
-   * 会断 import，必须带上档案一起搬（目录结构保持相对路径）。 */
+   * params.js 从 profiles/<name>.js import 档案数据 —— 单文件复制会断
+   * import，必须把 profiles/ **整个目录**搬上（加新模型不用改这里）。 */
   const tmp = path.join(os.tmpdir(), `wb-params-${process.pid}`);
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.mkdirSync(path.join(tmp, 'profiles'), { recursive: true });
-  fs.copyFileSync(
-    path.join(SRC, 'renderer', 'profiles', 'hiyori.js'),
-    path.join(tmp, 'profiles', 'hiyori.mjs'));
+  for (const f of fs.readdirSync(path.join(SRC, 'renderer', 'profiles'))) {
+    if (f.endsWith('.js')) fs.copyFileSync(
+      path.join(SRC, 'renderer', 'profiles', f),
+      path.join(tmp, 'profiles', f.replace(/\.js$/, '.mjs')));
+  }
   fs.writeFileSync(
     path.join(tmp, 'params.mjs'),
     fs.readFileSync(path.join(SRC, 'renderer', 'params.js'), 'utf8')
-      .replace("'./profiles/hiyori.js'", "'./profiles/hiyori.mjs'"));
+      .replace(/'\.\/profiles\/([A-Za-z0-9_-]+)\.js'/g, "'./profiles/$1.mjs'"));
   let M;
   try {
     M = await import(pathToFileURL(path.join(tmp, 'params.mjs')).href);
@@ -101,16 +103,39 @@ const stripComments = (s) =>
 
   console.log('[C] params.js —— 参数 ID 拿模型自己的 CDI 清单回查');
   {
+    /* CDI 路径不写死：从当前生效档案的 url（model3.json）读它自报的
+     * DisplayInfo —— 加新模型这里自动跟上，不用改。 */
+    const cur = M.MODELS[M.MODEL_NAME];
+    const rel = cur.url.replace(/^\/src\/assets\/models\//, '');
+    const m3 = JSON.parse(fs.readFileSync(
+      path.join(SRC, 'assets/models', rel), 'utf8'));
     const cdi = JSON.parse(fs.readFileSync(
-      path.join(SRC, 'assets/models/hiyori/Hiyori.cdi3.json'), 'utf8'));
+      path.join(SRC, 'assets/models', path.dirname(rel), m3.FileReferences.DisplayInfo), 'utf8'));
     const ids = new Set((cdi.Parameters || []).map((p) => p.Id));
-    ok(ids.size >= 70, `CDI 清单可读（${ids.size} 个参数）`);
+    ok(ids.size >= 50, `CDI 清单可读（${ids.size} 个参数）`);
     for (const [k, v] of Object.entries(PARAM)) {
       ok(ids.has(v), `PARAM.${k} = ${v}`);
     }
-    // 本版新增的五个（漏接一个就等于这个功能没做）
+    /* 本版新增的五个（漏接一个就等于这个功能没做）。
+     *
+     * ⚠️ 但「没登记」有两种，不能一律判死：
+     *   ① 真漏了 —— 必须报错；
+     *   ② **有理由地不接** —— 某些模型上这些参数根本不能写。鲸鱼娘就是：
+     *      ParamBodyAngleX/Y/Z 和呆毛是 physics3.json 的**输出**，我们叠加
+     *      的情绪 delta 会被物理冲掉（身体参数还是物理的自反馈输入，会被
+     *      吃进积分里放大）。见 profiles/whale.js 的注释与 verify-whale [A]。
+     * 所以判据是：**要么登记了 ID，要么档案里写清楚了为什么不填**。 */
+    const profileSrc = fs.readFileSync(
+      path.join(SRC, 'renderer', 'profiles', `${M.MODEL_NAME}.js`), 'utf8');
     for (const k of ['BROW_L_X', 'BROW_R_X', 'AHOGE', 'BODY_Y', 'BODY_Z']) {
-      ok(typeof PARAM[k] === 'string', `本版新增参数 PARAM.${k} 已登记`);
+      if (typeof PARAM[k] === 'string') {
+        ok(true, `本版新增参数 PARAM.${k} 已登记`);
+        continue;
+      }
+      const reasoned = new RegExp(`${k}[\\s\\S]{0,600}?(?:不填|置空)[\\s\\S]{0,600}?物理`)
+        .test(profileSrc);
+      ok(reasoned,
+        `PARAM.${k} 当前模型未登记 —— 档案里必须写明「不填 + 物理」的理由（防漏接）`);
     }
   }
 

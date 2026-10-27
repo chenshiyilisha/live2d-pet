@@ -140,6 +140,16 @@ const DEFAULT_CONFIG = {
   media: {
     enabled: false
   },
+  /* 轻量长期记忆（见 memory.js）：只存稳定事实，本地 JSON，无向量库。
+   * 默认开 —— 不打扰、不占常驻进程；关着就完全不读不写不注入。
+   * llmExtract：回合结束后用模型再抽 0~3 条（要 apiKey）；启发式抽取始终免费。 */
+  memory: {
+    enabled: true,
+    llmExtract: true,
+    maxFacts: 60,
+    injectMax: 6,
+    injectChars: 400
+  },
   /* ══════════════════════════════════════════════════════════
    *  以下每一段都对应托盘菜单里的一个分组，**每个功能都是独立开关**，
    *  改完立刻生效（外观类是实时改窗口/渲染，行为类是下次触发时读配置）。
@@ -224,7 +234,17 @@ const DEFAULT_CONFIG = {
     rightMenu: true,      // 在角色身上右键弹出快捷菜单
     headPat: true,        // 在头顶按住 = 一直蹭（A-B-C 三段，松手才收尾）
     dragReact: true,      // 拖着走的时候挣扎 / 不满
-    pokeReact: true       // 连戳给出递进反应
+    pokeReact: true,      // 连戳给出递进反应
+    /* 甩抛物理（DSH 桌宠 / XT-nya 互证，见 throw-physics.js）。
+     * 默认关：不打招呼就飞出去属于打扰；想玩再开。bounce 是落地弹跳，
+     * throw 关着时 bounce 无意义，但仍独立成键方便细调。 */
+    throw: false,
+    bounce: true,
+    /* 点击 / 落地 Q 弹挤压（渲染层 holder 缩放）。默认开：不占资源不打扰。 */
+    squash: true,
+    /* 工作状态镜像：对话生命周期切表情/动作（思考→成功/出错）。
+     * 默认开：纯确定性、零额外 token，不算打扰。 */
+    workState: true
   },
   /* 系统状态 */
   monitor: {
@@ -238,7 +258,11 @@ const DEFAULT_CONFIG = {
    * 判定与迟滞见 fullscreen.js。 */
   quiet: {
     enabled: true,        // 检测到前台全屏应用时自动静默
-    fps: 12               // 静默时的渲染帧率上限（12 够看出她还活着，又几乎不耗 GPU）
+    fps: 12,              // 静默时的渲染帧率上限（12 够看出她还活着，又几乎不耗 GPU）
+    /* 低配降帧：平时也把上限压到 lowFps（高刷屏白烧）。默认关 ——
+     * 用户觉得烫/卡再开；开着时 applyFrameCap 取 min(平时, lowFps)。 */
+    lowPower: false,
+    lowFps: 30
   },
   /* 定时提醒（默认关，见上面的默认值取舍）。
    * ⚠️ 关掉时 `addReminder()` 直接返回 null，所以托盘的「小工具 → 定时提醒」

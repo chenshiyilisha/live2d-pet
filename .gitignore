@@ -57,6 +57,7 @@ build/
 # 编辑器与系统杂物
 .vscode/
 .idea/
+.codebuddy/
 *.swp
 Thumbs.db
 Desktop.ini

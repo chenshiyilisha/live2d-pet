@@ -214,8 +214,20 @@ function readParam(id) {
  *
  * 停止必须显式调 stopAllMotions()：这俩是 Loop:true 的持续动作，永远不
  * finish，不停它就永远交不回给 idle 调度（画面会一直定格在挣扎/走路）。 */
+/* 解析档案 motionSlots：slot 名（thinking/drag…）或直接组名。空串 = 不播。 */
+function resolveMotionSlot(slotOrGroup) {
+  if (!slotOrGroup) return '';
+  const slots = MODELS[MODEL_NAME]?.motionSlots;
+  if (slots && Object.prototype.hasOwnProperty.call(slots, slotOrGroup)) {
+    return String(slots[slotOrGroup] || '');
+  }
+  return String(slotOrGroup);
+}
+
 function playEventMotion(group) {
-  try { model?.motion?.(group, undefined, MotionPriority.FORCE); }
+  const g = resolveMotionSlot(group);
+  if (!g) return;
+  try { model?.motion?.(g, undefined, MotionPriority.FORCE); }
   catch { /* 模型没这个组就算了 */ }
 }
 
@@ -1022,6 +1034,7 @@ async function boot() {
   try {
     cfg = await window.pet?.getConfig?.();
     hasApiKey = !!cfg?.llm?.apiKey;
+    applyFrameCap();   // 低配降帧等开关即时生效
     // 用户调的人物大小（托盘 / 右键菜单），必须在 mountModel 之前生效 ——
     // mountModel 里的 applyModelGeometry() 会把它乘进 PET_SCALE
     setUserScale(cfg?.appearance?.scale);
@@ -1566,30 +1579,46 @@ function layout() {
 
   // ---- 2) 缩放：整张 Cubism 画布恰好等于画布高度，再乘人物缩放系数 ----
   const s = (vh / CANVAS_H) * PET_SCALE;
-  holder.scale.set(s);
+  layoutBaseScale = s;
+  holder.scale.set(s * squashMul);
 
   // ---- 3) 平移：把**模型墨水的真实顶部**对到 HEAD_PAD、身体中心对到窗口中心 ----
   // 关系式是 window = canvas内坐标 + CANVAS_OFF（CANVAS_OFF 就是 canvas 的 left/top，
   // 1:1 生效，实测斜率 1.0）。而「canvas 内坐标」由上面那组实测几何给出：
   //     墨水顶部 canvas内 y = vh×INK_TOP_C_RATIO + INK_TOP_K × s   ← 第一项随画布高走
   //     身体中心 canvas内 x = INK_CX_K × s                          ← 水平方向是纯比例
-  // 于是：
+  // 于是（顶部锚定，站姿模型 hiyori）：
   //     y: HEAD_PAD     = (vh×INK_TOP_C_RATIO + INK_TOP_K×s) + CANVAS_OFF.y
   //     x: W/2 + 2      = INK_CX_K×s + CANVAS_OFF.x
   // 末尾那个 +2 是标定时量到的光学修正（人物实际中心比窗口中心右偏 2px），沿用它。
   // holder/model 的 position 对 Cubism 绘制无效、别去调，平移只走 canvas 的 left/top。
   //
+  // 🔴 **底部锚定**（anchorY: 'bottom'，趴姿模型 whale）：站姿"显示到腰际 =
+  //    顶部对齐+裁下半身"的语义对趴姿是反的 —— 趴姿必须**桌布贴舞台底**才像
+  //    "趴在你桌上"，顶部锚定会让她悬浮在窗口中间、底下空一截。墨水底部
+  //    canvas内 y = INK_TOP_C + (INK_TOP_K + INK_H)×s，于是：
+  //     y: H = (vh×INK_TOP_C_RATIO + (INK_TOP_K+INK_H)×s) + CANVAS_OFF.y
+  //    （H 已减过 STATS_GAP —— "桌布摆在底座上沿、留一线呼吸位"的语义不变。）
+  //    此模式下 HEAD_PAD 不参与（头顶位置由墨水高倒推，摸头/气泡都走实量）。
+  //
   // ⚠️ INK_CX_K 是**身体中心线**，不是墨水包围盒中心（2026-10-12 修）。
   //    原先用的是包围盒中心，而日和的长发偏在一侧、包围盒中心 ≠ 视觉中心，
   //    结果人物整体偏左约 37px（底座居中、人物不居中）。详见 params.js 的模型表。
+  //    （whale 同坑：包围盒中心被圣代+鲸鱼尾拉偏 40css，档案里锚的是头部中心。）
   const HEAD_PAD = headPadPx(H);
-  const INK_TOP_C = vh * INK_TOP_C_RATIO;   // 随画布高现算，不能写死（见模型表的坑）
+  /* C 项比例**在档案里**（inkTopCRatio）——曾以为它"来自插件放原点的位置、
+   * 与模型无关"（0.2），whale 标定证伪（真实 0.328，见档案注释的三层共线
+   * 教训）。缺省回落 0.2 = hiyori 的实测值，hiyori 档案不用为此改动。 */
+  const INK_TOP_C = vh * (MODELS[curModelName].inkTopCRatio ?? INK_TOP_C_RATIO);
   /* 人物**恒居中**（2026-10-12 定稿，用户："人物要居中"+"按对话框固定大小，
    * 不需要点击后再调整"）：身体中心锚在窗口中线（+2 是标定时的光学修正）。
    * 底座牌与气泡小尖角在 CSS 里也各居中，大家天然对齐，不再有右靠量。
    * （曾经的「内容右靠」机制随窗口宽度固定而移除，别再往回加。） */
+  const anchorBottom = MODELS[curModelName].anchorY === 'bottom';
   CANVAS_OFF.x = (W / 2 + 2) - INK_CX_K * s;
-  CANVAS_OFF.y = HEAD_PAD - (INK_TOP_C + INK_TOP_K * s);
+  CANVAS_OFF.y = anchorBottom
+    ? H - (INK_TOP_C + (INK_TOP_K + INK_H) * s)
+    : HEAD_PAD - (INK_TOP_C + INK_TOP_K * s);
   canvas.style.left = `${CANVAS_OFF.x}px`;
   canvas.style.top = `${CANVAS_OFF.y}px`;
 
@@ -1604,11 +1633,14 @@ function layout() {
   //    若沿用字面 W/2+2 会让人怀疑矩形没跟着动。用同一条式子的两面表达，
   //    就永远不会脱节。
   const bodyCx = INK_CX_K * s + CANVAS_OFF.x;    // 身体中心在窗口里的 x（≡ W/2+2）
+  /* 底部锚定：墨水顶 = H − 墨水高（从底倒推），矩形上沿随之；裁切发生在
+   * 顶部（人物比窗口高时裁头 —— 趴姿下petScale 定得完整可见，走不到裁切）。 */
+  const inkTopWin = anchorBottom ? H - INK_H * s : HEAD_PAD;
   petRect = {
     x: bodyCx - (INK_W / 2) * s,
-    y: HEAD_PAD,
+    y: inkTopWin,
     w: INK_W * s,
-    h: Math.min(H - HEAD_PAD, INK_H * s)
+    h: Math.min(H - inkTopWin, INK_H * s)
   };
 
   /* 人物几何算完了 → 窗口宽度可能要跟着变（换模型 / 改缩放 / 开关底座都会走这里）。 */
@@ -1621,13 +1653,22 @@ function layout() {
 
   if (new URLSearchParams(location.search).has('snap')) {
     const r = (n) => Math.round(n);
+    /* 模型自己报的包围盒（canvas 内单位，已含 holder.scale 与 localTransform）。
+     * 这是**实量**——取景的正确答案，所有 INK_* 常数只是它的离线近似。 */
+    const gb = model.getBounds();
     console.log('[pet] layout', JSON.stringify({
       stage: [W, H], canvas: [vw, vh], scale: Number(s.toFixed(5)),
       cubism: [CANVAS_W, CANVAS_H], zoom: ZOOM, off: [CANVAS_OFF.x, CANVAS_OFF.y],
       bodyCx: r(bodyCx),                                                 // 身体中心落点
       inkTopC: Number(INK_TOP_C.toFixed(2)),                             // = vh×0.2
       inkTopEst: r(petRect.y),                                           // 推算的墨水顶（**不是实量**，真头顶见 measureHeadTop）
-      waistY: Math.round(HEAD_PAD + SHOW_FRACTION * INK_H * s),          // 腰际落点
+      rawBounds: [r(gb.x), r(gb.y), r(gb.width), r(gb.height)],          // canvas 内
+      boundsWin: [r(gb.x + CANVAS_OFF.x), r(gb.y + CANVAS_OFF.y),
+                  r(gb.width), r(gb.height)],                             // 窗口 css
+      /* 站姿 = 腰际落点（SHOW_FRACTION 取景线）；趴姿 = 墨水底落点（恒 ≈ H）。 */
+      waistY: Math.round(anchorBottom
+        ? inkTopWin + INK_H * s
+        : HEAD_PAD + SHOW_FRACTION * INK_H * s),
       petRect: [r(petRect.x), r(petRect.y), r(petRect.w), r(petRect.h)]
     }));
   }
@@ -1948,6 +1989,7 @@ function onPetClicked() {
   bumpClickStreak();
 
   try { model.motion('TapBody'); } catch { /* 模型没这个组就算了 */ }
+  playSquash(0.55);            // 点击 Q 弹（可关 interaction.squash）
 
   if (cfg?.interaction?.pokeReact !== false && clickStreak >= 4) {
     setEmotion('surprised');
@@ -2136,6 +2178,7 @@ window.pet?.onConfigChanged?.(async () => {
   try {
     cfg = await window.pet.getConfig();
     hasApiKey = !!cfg?.llm?.apiKey;
+    applyFrameCap();   // 低配降帧等开关即时生效
     // 大小也可能是在配置里改的，跟着同步一次
     setUserScale(cfg?.appearance?.scale);
     /* 关掉悬浮显示时，除了藏底座还得把让出去的那条高度还回来 ——
@@ -2751,7 +2794,13 @@ const HIDDEN_FPS = 1;
 
 function applyFrameCap() {
   // pixi v8 的语义：0 = 不限帧
-  const fps = hiddenByUser ? HIDDEN_FPS : (quiet ? quietFps : IDLE_FPS);
+  let fps = hiddenByUser ? HIDDEN_FPS : (quiet ? quietFps : IDLE_FPS);
+  /* 低配档：平时也压到 lowFps（默认 30）。静默/隐藏更严的那个赢。 */
+  if (!hiddenByUser && cfg?.quiet?.lowPower) {
+    const low = Number(cfg.quiet.lowFps);
+    const cap = Number.isFinite(low) && low >= 1 ? low : 30;
+    fps = Math.min(fps, cap);
+  }
   try { if (app?.ticker) app.ticker.maxFPS = fps; } catch { /* ignore */ }
   /* ⚠️ 必须**两个 ticker 一起降**，只降 app.ticker 会漏掉一半开销。
    *    这里是本文件里最容易看漏的一处：上面的 `Live2DModel.registerTicker(PIXI.Ticker)`
@@ -2762,6 +2811,68 @@ function applyFrameCap() {
    *    CPU 一点没省。两个都降才是真的"睡过去"。 */
   try { PIXI.Ticker.shared.maxFPS = fps; } catch { /* ignore */ }
 }
+
+/* ---- Q 弹挤压（点击 / 落地）----
+ * 只动 holder.scale 的瞬时倍率，layout() 的基准 s 不动；动画结束归 1。
+ * prefers-reduced-motion 或开关关 → 直接跳过（dsh-pet 无障碍同款）。 */
+let squashMul = 1;
+let squashTimer = 0;
+let layoutBaseScale = 1;
+
+function playSquash(intensity = 0.5) {
+  if (cfg?.interaction?.squash === false) return;
+  try {
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) return;
+  } catch { /* ignore */ }
+  if (!holder) return;
+  const amp = Math.max(0.08, Math.min(0.35, Number(intensity) * 0.35));
+  clearTimeout(squashTimer);
+  squashMul = 1 - amp;
+  holder.scale.set(layoutBaseScale * squashMul);
+  /* 压扁 → 回弹过头 → 回正 */
+  squashTimer = setTimeout(() => {
+    if (!holder) return;
+    squashMul = 1 + amp * 0.45;
+    holder.scale.set(layoutBaseScale * squashMul);
+    squashTimer = setTimeout(() => {
+      squashMul = 1;
+      if (holder) holder.scale.set(layoutBaseScale);
+    }, 90);
+  }, 70);
+}
+
+window.pet?.on?.('pet:squash', (d) => {
+  playSquash(Number(d?.intensity) || 0.5);
+});
+
+/* 工作状态镜像：thinking / working / success / error → 表情 + 槽位动作 */
+let workStateTimer = 0;
+window.pet?.on?.('pet:work-state', (d) => {
+  if (cfg?.interaction?.workState === false) return;
+  const phase = d?.phase;
+  clearTimeout(workStateTimer);
+  if (phase === 'thinking') {
+    setState(State.THINKING);
+    playEventMotion('thinking');
+  } else if (phase === 'working') {
+    /* SPEAKING 由首字 chunk 路径也会设；这里只补动作槽 */
+    playEventMotion('working');
+  } else if (phase === 'success') {
+    setEmotion('happy');
+    playEventMotion('success');
+    workStateTimer = setTimeout(() => {
+      if (!busy && state !== State.SPEAKING) setState(State.IDLE);
+      stopEventMotions();
+    }, 1400);
+  } else if (phase === 'error') {
+    setEmotion('serious');
+    playEventMotion('error');
+    workStateTimer = setTimeout(() => {
+      if (!busy) setState(State.IDLE);
+      stopEventMotions();
+    }, 1600);
+  }
+});
 
 window.pet?.on?.('pet:quiet', (d) => {
   const on = !!d?.quiet;

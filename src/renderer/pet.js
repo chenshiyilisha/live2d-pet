@@ -1587,8 +1587,10 @@ function layout() {
   // 整块画布糊成一片白（实测过：s=0.244 而画布只有窗口大时，ink 恒为空）。
   const vw = Math.round(W * ZOOM);
   const vh = Math.round(H * ZOOM);
+  let resized = false;
   if (app.screen.width !== vw || app.screen.height !== vh) {
     app.renderer.resize(vw, vh);   // autoDensity 会同步写 canvas 的 style 尺寸
+    resized = true;                // 见函数末尾：改过尺寸就必须**立刻重画一帧**
   }
 
   // ---- 2) 缩放：整张 Cubism 画布恰好等于画布高度，再乘人物缩放系数 ----
@@ -1685,6 +1687,28 @@ function layout() {
         : HEAD_PAD + SHOW_FRACTION * INK_H * s),
       petRect: [r(petRect.x), r(petRect.y), r(petRect.w), r(petRect.h)]
     }));
+  }
+
+  /* 🔴 画布刚改过尺寸 → **立刻清掉并重画一帧**（2026-10-28「两个她」的修复）
+   *
+   * 现象：用户报「底座出现时出现一大一小两个她，底座消失大模型也消失」。
+   * 链路正好落在这里：底座出现 → --stats-h 0→N → #stage 变矮 → layout() →
+   * 画布 resize → 人物整体缩放变化。而我们开着 `preserveDrawingBuffer: true`
+   * （命中测试 / 实量头顶要 readPixels，见 app.init 那条注释），**画布尺寸变化
+   * 时浏览器可能保留旧帧并按新尺寸拉伸**，于是屏幕上同时出现"旧的大人物（底座
+   * 出现前那一帧）+ 新的小人物"—— 且**只有一个底座**，与用户观察一致。
+   * 这类残留**截图抓不到**（capturePage 拿的是新内容），只能肉眼看到，
+   * 所以之前埋日志 + 截图都没能抓住它。
+   *
+   * ⚠️ 只 clear() 不够：全屏静默时帧率被压到 1fps（applyFrameCap），
+   *    清完可能挂整整一秒空白 —— 所以 clear 之后**立刻画一帧**。
+   * ⚠️ 放在 layout() **末尾**：此刻 scale / 平移都已更新，画出来的是新几何，
+   *    而不是"清完再画一个旧位置"。 */
+  if (resized) {
+    try {
+      app.renderer.clear();
+      app.renderer.render({ container: app.stage, clear: true });
+    } catch { /* 渲染器还没就绪（首帧前）：ticker 会照常画上去，只是没有这次补画 */ }
   }
 }
 
@@ -3163,10 +3187,31 @@ let statsReserve = 0;
 function setStatsReserve(px) {
   const v = Math.max(0, Math.round(px));
   if (v === statsReserve) return;
+  const before = statsReserve;
   statsReserve = v;
   document.body.style.setProperty('--stats-h', `${v}px`);
   // 舞台变矮 → canvas 尺寸变 → 必须让 layout() 重算取景（否则人物还按旧窗口排）
   layout();
+
+  /* 「屏幕上一大一小两个她」的取证（2026-10-28，未解 bug）：
+   * 用户报「底座出现时出现一大一小两个模型，底座消失大模型也消失」——
+   * 这正好是**这条路径**被触发的时刻：--stats-h 一变 → layout() → canvas
+   * resize → 人物缩放跟着变。所以嫌疑从"两个进程"挪回了"同一块画布上出现了
+   * 两帧内容"（透明窗 + preserveDrawingBuffer 的合成残留）。
+   * 判据就看这一个数：**canvas 永远只有 1 个、stage 永远只有 1 个孩子**。
+   *   打印 1 / 1 → 单进程单画布，那"两个她"只能是**合成层残留**（截图抓不到、
+   *   只有肉眼可见）；打印 2 → 真的画了两份，去查为什么。 */
+  console.log('[pet] statsReserve', JSON.stringify({
+    from: before, to: v,
+    canvases: document.querySelectorAll('canvas').length,
+    stageChildren: app?.stage?.children?.length ?? null,
+    screen: app ? [app.screen.width, app.screen.height] : null,
+    modelScale: model ? Number(holder.scale.x.toFixed(4)) : null,
+    canvasCss: (() => {
+      const c = document.querySelector('canvas');
+      return c ? [c.style.width, c.style.height, c.width, c.height] : null;
+    })()
+  }));
 }
 
 /* ============================================================

@@ -148,6 +148,12 @@
 | W33 | **`emotionAlias` 未知情绪回退**：8 个 `[emo:xxx]` 协议标签**一个不删**、llm prompt 不动，档案缺失的情绪映射到近似档 | 防「切 A→B 眉毛卡住」静默故障（缺字段=停旧值） |
 | W34 | **`mouthOpenMax`** 口型幅度夹取（档案声明、写参前夹、默认 1.0） | 降档后口腔只需一张张嘴图；psd2live 规范 `either as one image` |
 | W35 | **半身模型档案 L0**（4 情绪 / 8~10 字段 / 无腿）+ 全 AI 链路 PoC（生图→See-Through→manifest→psd2live→Cubism 5） | `custom-model-plan.md` §11；**腿非刚需**（漫步=窗口位移，Walk 是自制的增强） |
+| W36 | ~~气泡**避免窄高盒**：宽度多档自适应~~ **✅ 2026-10-28**：`WIDTH_STEPS=[272,320,368]`，`wantWidth(h,cur,avail)` 按 `h×1.2` 升档；🔴 **一次发言内单调不减**（加宽→变矮→不许收窄，否则流式打字时来回抖）；每句开头重置回 272；只卡**下限**不卡上限（短句横条是自然的）。真机：长回复 272→320（比例 1.33），落定后 700ms 不再变 | tiny-roommate「prefer landscape, avoid narrow tall boxes」；dsh-pet 把 1.65 调到 **1.20** |
+| W37 | ~~气泡位置**轻微有界随机化**（稳定散列，同句同位）+ **间距随高度**（矮近高远）~~ **✅ 2026-10-28**：±8px 确定性散列（每句一次、`place()` 不重算）+ `tipGap` 8→14 随高度插值；尾巴恒回正指人（`bubble:tail`） | tiny-roommate「bounded and subtle」「short closer, taller more breathing room」 |
+| W38 | ~~气泡**淡出动画** + 入场加 `scale` 展开~~ **✅ 2026-10-28**：出场 `bubble:fade`→`.fading` 160ms 后真 hide（与入场对称）；入场由主进程 `bubble:show` 驱动（常驻动画只有第一句有）+ `scale .96→1`；实测淡出中 alpha 132/255 | 现行为不对称；OpenAlice 留白正是为 scale 动画准备的 |
+| W39 | ~~气泡描边**用 drop-shadow 不用 border** + 两层阴影~~ **✅ 2026-10-28**：两层阴影（1/2 + 3/8）+ 描边 `chat.floatBubbleOutline`（**默认关**，用户曾两轮减描边）；强度实测定 1px/0.65，尾巴根部无内部边线 | dsh-pet 气泡二次修复「根因一」；**直接加 border 会重现该 bug** |
+| W40 | ~~气泡**上方弧线三候选** + 回退顺序 + 零相交优先 + 尾巴随位转向~~ **✅ 2026-10-28**：`pickAnchor()` 纯函数；**常规恒 top**（正上方最自然），只在 ① top 被屏幕边 clamp ② 头顶上方放不下退回窗内 时才用 left/right（inside 时偏一侧 = 盖肩膀不是盖脸）；可用判据 =「想要的 x 不被 clamp」（不需要人物宽度实量）；尾巴回正上限改随宽度算 `w/2−26` | tiny-roommate「allowed family = top-left/top/top-right，side 不参与」；dsh-pet 安全布局器「优先零相交」 |
+| W41 | 多套**气泡皮肤**可切换（外观下拉） | dsh-pet 已有 5 套；Live2DPet `selectBubbleImage`。**最大项，最后做** |
 
 **网上已有、我们已有**：番茄 / 提醒 / 开机自启 / 锁屏静默 / 摸头 / 全屏闸门 / 低电降帧 / 工作状态；甩抛/摸头交互形态与 Coopanion 同类。  
 **不抄主线**：亲密度养成、多宠交友、径向技能轮当主 UI、内置捆小模型、会议 Join、打字蒸汽特效；**Computer use 控键鼠当产品主线**（与安静搭子冲突）。
@@ -300,3 +306,5 @@
 | 2026-10-27 | 记 **Coopanion**（§E.1 + W18–W22）；M 线对齐其接模型 UX；AGPL 不抄码、不跟 computer use |
 | 2026-10-28 | 记 **surfcore / dsh-pet**（§E.2 + W23–W31）：surfcore 为 NOASSERTION，**只借机制不搬代码** |
 | 2026-10-28 | **Live2D 降档**（用户拍板）：记 W32–W35。腿/口腔两条硬伤降级、全 AI 链路可作交付路线；见 `custom-model-plan.md` §11 |
+| 2026-10-28 | 记 **气泡美化 W36–W41**（tiny-roommate 交互规范 / dsh-pet 气泡二次修复 / OpenAlice 素材验证）；专文 `docs/bubble-polish-plan.md` |
+| 2026-10-28 | 气泡第一批 **C1/C2/A1/A2/B2/B3 已实施**；第二批 **W36 宽高比多档 + W40 三候选**已实施（含真机验证 + 五条负对照）；🔴 顺手抓出 `hashJitter` 越界 bug（`^` 转回有符号 int32，实测吐 −18/−21/−23 而约定是 ±8） |

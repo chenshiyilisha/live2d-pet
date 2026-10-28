@@ -12,6 +12,14 @@ contextBridge.exposeInMainWorld('bubbleHost', {
   onEnd: (cb) => ipcRenderer.on('bubble:end', () => cb()),
   onAbort: (cb) => ipcRenderer.on('bubble:abort', () => cb()),
   onFull: (cb) => ipcRenderer.on('bubble:full', (_e, t) => cb(t)),
+  /* 入场动画：主进程 showInactive() **之后**才发（先发的话动画会在窗口还藏着
+   * 时就被消耗掉）。带一个 style 包，告诉页面这一句要不要描边。 */
+  onShow: (cb) => ipcRenderer.on('bubble:show', (_e, s) => cb(s || {})),
+  /* 出场动画：主进程等 FADE_MS 播完才真 hide。 */
+  onFade: (cb) => ipcRenderer.on('bubble:fade', () => cb()),
+  /* 尾巴回正量（px）：泡体被随机偏移/被屏幕边 clamp 后，尾巴要往回挪多少才
+   * 仍然指着她。只在变化时下发。 */
+  onTail: (cb) => ipcRenderer.on('bubble:tail', (_e, v) => cb(Number(v) || 0)),
   /* 内容尺寸变化时把"想要的窗口高度"报给主进程（主进程锚定底边往上长） */
   reportHeight: (h) => ipcRenderer.send('bubble:height', h)
 });

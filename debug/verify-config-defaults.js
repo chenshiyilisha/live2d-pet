@@ -185,6 +185,20 @@ console.log('\n══════ 6. 新增的"参数型"键必须有默认值�
   check(c2.proactive.enabled === true, '补键的同时不顶掉用户写的 enabled');
   check(c2.proactive.muteOnLock === true && c2.proactive.cooldownMinutes === 10 &&
     c2.proactive.allowSilent === true, '四闸门三键在老配置里也按默认补上');
+
+  /* 气泡四个外观键（2026-10-28 第一批两个 + 第二批两个）：同样不进托盘，
+   * 默认值是唯一守门人。描边**默认关**（用户在 2026-10-13 两轮把描边减到 0），
+   * 其余都是纯美化、不打扰不占资源 → 默认开（规矩 24 只管打扰/占资源类）。 */
+  check(cfg.chat.floatBubbleOutline === false, '气泡描边默认关（改观感，交回用户决定）');
+  check(cfg.chat.floatBubbleJitter === true, '气泡位置随机化默认开（纯去机械感）');
+  check(cfg.chat.floatBubbleWiden === true, '气泡宽高比多档默认开（治窄高盒）');
+  check(cfg.chat.floatBubbleAside === true, '气泡左右候选默认开（仅在贴边/退回窗内时启用）');
+  writeCfg({ chat: { floatBubble: false } });   // 老配置：只有 floatBubble 这一个键
+  const c4 = config.loadConfig();
+  check(c4.chat.floatBubbleOutline === false && c4.chat.floatBubbleJitter === true &&
+    c4.chat.floatBubbleWiden === true && c4.chat.floatBubbleAside === true,
+    '老配置里缺这四个键时按默认值补上（逐段逐键合并，规矩 1）');
+  check(c4.chat.floatBubble === false, '补键的同时不顶掉用户写的 floatBubble');
 }
 
 /* 清理：临时目录 + 撤销 require 劫持 */

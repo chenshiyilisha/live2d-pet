@@ -72,6 +72,9 @@ app.whenReady().then(async () => {
 
   await win.loadFile(path.join(__dirname, '..', 'src', 'main', 'bubble.html'));
   win.showInactive();
+  /* 入场动画是主进程 show 之后才发的（先发会被耗在窗口还藏着的那一截里），
+   * 这里照抄真实顺序，免得截图和线上长得不一样。 */
+  win.webContents.send('bubble:show', { outline: false });
   await sleep(300);
 
   /* 顺序就是真实链路里的顺序：begin → think（整段）→ chunk（逐字）→ end */

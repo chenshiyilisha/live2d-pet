@@ -27,7 +27,10 @@ const stripComments = (s) =>
 console.log('[A] config.js —— 开关默认值');
 {
   const c = stripComments(read('main/config.js'));
+  /* ⚠️ [^}]* 只能匹配到 chat 段里"没有嵌套 {} "的部分 —— 这两个键是布尔字面量，够用。 */
   ok(/chat:\s*\{[^}]*floatBubble:\s*true/.test(c), 'chat.floatBubble 默认开');
+  ok(/floatBubbleOutline:\s*false/.test(c), '描边默认关（用户两轮把描边减到 0，改观感的事交回给他）');
+  ok(/floatBubbleJitter:\s*true/.test(c), '位置随机化默认开（纯去机械感，不打扰不占资源）');
 }
 
 console.log('[B] main.js —— 分片路由收拢 + 生命周期接线');
@@ -40,7 +43,10 @@ console.log('[B] main.js —— 分片路由收拢 + 生命周期接线');
   ok(direct === 1, `chat:chunk 直发只许出现 1 次（emitChatChunk 内），实际 ${direct}`);
   ok(/createStreamFilter\(emitChatChunk,\s*emitChatEmotion,\s*emitChatThink\)/.test(m),
     'emitLocal 走收拢出口（正文 / 情绪 / 想法三路都走）');
-  ok(/send:\s*emitChatChunk/.test(m), 'chatStream 走收拢出口');
+  /* ⚠️ send 是包了一层的箭头函数：它要顺带把念出去的字累加进 spoken（TTS 被打断时
+   * 按"实际念出的部分"截历史用）。断言得认这个包裹，但**里面必须还是 emitChatChunk**
+   * —— 换成裸 webContents.send 浮窗就会漏字。 */
+  ok(/send:\s*\(t\)\s*=>\s*\{[^}]*emitChatChunk\(t\)/.test(m), 'chatStream 走收拢出口');
 
   /* 想法通道（2026-10-14 加的 [think:…]）—— 和 chat:chunk 完全同款的收拢要求：
    * 有人图省事直接 webContents.send('chat:think') 绕过去，浮窗那一行就永远不亮；
@@ -113,8 +119,10 @@ console.log('[F] 头顶锚点 —— 气泡锚人物头顶而非窗顶（2026-10
   const b = stripComments(read('main/bubble.js'));
   ok(/let headTop = null;/.test(b), 'headTop 状态存在（null = 还没量到）');
   ok(/const anchorY = b\.y \+ \(headTop \?\? 0\);/.test(b), 'place() 锚头顶（没量到退回窗顶）');
-  ok(/const bottomY = anchorY - TIP_GAP - TAIL_TIP_INSET;/.test(b),
-    '底边 = 头顶 − TIP_GAP − TAIL_TIP_INSET（决定"离人远近"的是尾巴尖不是窗底）');
+  ok(/const bottomY = anchorY - tipGap\(curH\) - TAIL_TIP_INSET;/.test(b),
+    '底边 = 头顶 − tipGap(curH) − TAIL_TIP_INSET（决定"离人远近"的是尾巴尖不是窗底）');
+  ok(/function tipGap\(h\)/.test(b) && /const TIP_GAP_MIN = 8;/.test(b) && /const TIP_GAP_MAX = 14;/.test(b),
+    '间隙随气泡高度插值：矮的贴更近、高的多留呼吸（B3）');
   ok(/insideMode = bottomY - curH < wa\.y \+ 4;/.test(b), '贴顶兜底判据跟着 bottomY 走');
   ok(/async function measureHead\(\)/.test(b), 'measureHead 实量存在');
   ok(/getBitmap\(\)/.test(b), '用 nativeImage.getBitmap 逐行扫 alpha');
@@ -150,6 +158,19 @@ console.log('[G] 造型 —— 无描边 + 单层柔影挂在 #wrap（2026-10-13
   ok(/filter:\s*drop-shadow\(/.test(wrap), 'drop-shadow 挂在 #wrap 上（按合成轮廓算 → 泡体和尾巴共用一条影）');
   ok(/position:\s*absolute/.test(tail), '尾巴 absolute 挂 #wrap（#wrap 有 filter → 是它的 containing block）');
   ok(/position:\s*relative/.test(wrap), '#wrap 是定位父级');
+
+  /* 两层投影（A1）：近景"贴桌面" + 远景"轻浮起"，出处 dsh-pet 修完的形态。 */
+  const layers = (wrap.match(/drop-shadow\(/g) || []).length;
+  ok(layers >= 2, `投影至少两层（近景 + 远景），实际 ${layers} 层`);
+
+  /* 描边（A2）：🔴 必须是"零偏移 drop-shadow"，用 border 就踩 dsh-pet 的"根因一"
+   * —— border 画在矩形上，那条底边会横穿尾巴根部，尾巴立刻露出错层级。 */
+  const outline = (css.match(/\n  body\.outline #wrap \{[\s\S]*?\n  \}/) || [''])[0];
+  ok(outline !== '', '描边是独立的一条 body.outline #wrap 规则（可开关）');
+  ok(/drop-shadow\(0 0 /.test(outline), '描边用零偏移 drop-shadow 模拟（不是 border）');
+  ok(!/border(?!-radius)/.test(outline), '描边规则里没有 border');
+  ok(css.indexOf('body.outline #wrap') > css.indexOf('#wrap {'),
+    '描边写在 filter 链最前（先描边再投影，投影才不会被压住）');
 }
 
 console.log('[H] 几何联动 —— 三个文件里的数字必须对得上（规矩 9 / 22）');
@@ -189,6 +210,176 @@ console.log('[H] 几何联动 —— 三个文件里的数字必须对得上（�
   const shellOuter = shellMax + padV + padV2;
   ok(maxH >= topPad + shellOuter + botPad,
     `MAX_H(${maxH}) ≥ 顶部${topPad} + 泡体上限${shellOuter} + 底部${botPad} = ${topPad + shellOuter + botPad}（否则长回复裁尾巴和末行）`);
+
+  /* 动画时长联动：主进程等 FADE_MS 才真 hide，所以 CSS 里 pop / fade 两个动画
+   * 也必须播满这么久 —— 短了被截断、长了气泡已经透明还占着窗口。
+   * ⚠️ 必须剥注释：注释里会提到 FADE_MS 和 0.16s 这些词，不剥会假绿/假红。 */
+  const css2 = h.replace(/\/\*[\s\S]*?\*\//g, '');
+  const popMs = Number((css2.match(/animation:\s*pop\s*([\d.]+)s/) || [])[1]);
+  const fadeMs = Number((css2.match(/animation:\s*fade\s*([\d.]+)s/) || [])[1]);
+  const fadeConst = num(/const FADE_MS = (\d+);/);
+  ok(popMs * 1000 === fadeConst, `入场 pop(${popMs}s) = FADE_MS(${fadeConst}ms)`);
+  ok(fadeMs * 1000 === fadeConst, `出场 fade(${fadeMs}s) = FADE_MS(${fadeConst}ms)`);
+}
+
+console.log('[I] 动效 + 尾巴回正 + 位置去机械感（2026-10-28，方案第一批）');
+{
+  const b = stripComments(read('main/bubble.js'));
+  const h = read('main/bubble.html');
+  const p = stripComments(read('main/bubble-preload.js'));
+
+  /* ---- C1 出场淡出：入场有、出场没有是最容易被感知的不对称 ---- */
+  ok(/send\('bubble:fade'\)/.test(b), '主进程 hide 前先发 bubble:fade');
+  ok(/onFade/.test(p), 'preload 暴露 onFade');
+  ok(/body\.fading \{ animation: fade/.test(h), '页面有 .fading 淡出动画');
+  ok(/}, FADE_MS\);/.test(b), '等 FADE_MS 播完才真 hide（不是立刻 hide）');
+  ok(/function clearFadeTimer\(\)/.test(b) && /clearFadeTimer\(\);/.test(b),
+    '淡出计时可取消（淡出中途又开口 → reveal 取消那次 hide）');
+  ok(/if \(on\) hideNow\(true\);/.test(b), '全屏静默立刻收，不等淡出的 160ms');
+  ok(/dispose\(\)[\s\S]*?clearFadeTimer\(\)/.test(b), 'dispose 清掉淡出计时');
+
+  /* ---- 入场必须由主进程驱动：窗口是复用的，body 上挂死动画只有第一句话有 ---- */
+  const css3 = h.replace(/\/\*[\s\S]*?\*\//g, '');
+  const bodyBlock = (css3.match(/\n  body \{[\s\S]*?\n  \}/) || [''])[0];
+  ok(!/animation/.test(bodyBlock), 'body 上不挂常驻动画（窗口复用，那样第二句起就没有入场）');
+  ok(/body\.pop \{ animation: pop/.test(h), '入场挂在 body.pop 上（由 onShow 驱动）');
+  const reveal = (b.match(/function reveal\(w\) \{[\s\S]*?\n\}/) || [''])[0];
+  ok(reveal !== '', 'reveal() 存在（show + 起动画是一件事）');
+  ok(reveal.indexOf('showInactive') >= 0 &&
+     reveal.indexOf('showInactive') < reveal.indexOf("send('bubble:show'"),
+    'showInactive 先于 bubble:show（反了的话动画有一截在窗口还藏着时就耗掉）');
+  ok(/document\.body\.classList\.remove\('pop', 'fading'\);[\s\S]{0,80}void document\.body\.offsetWidth/.test(h),
+    '重播动画前强制重排（不重排同名动画不会重播 → "代码有动画、屏幕没有"）');
+
+  /* ---- 尾巴回正：位置一变尾巴必须跟着变（否则就是 dsh-pet 那个"尾巴方向错"）---- */
+  ok(/send\('bubble:tail'/.test(b), '主进程下发尾巴回正量');
+  ok(/onTail/.test(p), 'preload 暴露 onTail');
+  ok(/translateX\(\$\{v\}px\) rotate\(45deg\)/.test(h),
+    '尾巴按回正量平移（translateX 在 rotate 之前 → 父坐标系里是纯水平）');
+  ok(/const want = Math\.round\(cx - \(pick\.x \+ curW \/ 2\)\);/.test(b),
+    '回正量 = 人物中线 − 泡体中线（被屏幕边 clamp / 挪到侧候选之后也算得对）');
+  ok(/const maxOff = tailOffsetMax\(curW\);/.test(b) &&
+     /applyTailOffset\([\s\S]{0,80}maxOff/.test(b),
+    '回正量有上限且**随宽度算**（固定 40 装不下侧候选的偏移）');
+
+  /* ---- B2 位置随机化：有界、且同一句里恒定 ---- */
+  ok(/const JITTER_X = 8;/.test(b), '随机幅度有界（±8px，"看得出不一样、看不出是随机"）');
+  ok(/function hashJitter\(/.test(b) && !/Math\.random/.test(b),
+    '用确定性散列而非 Math.random（可复现，回归才断言得了）');
+  ok(/function newUtterance\(\)/.test(b), '每句话开头算一次');
+  const placeFn = (b.match(/function place\(\) \{[\s\S]*?\n\}/) || [''])[0];
+  ok(placeFn !== '', 'place() 能切出来');
+  ok(!/hashJitter|Math\.random/.test(placeFn),
+    'place() 里**不**重算偏移（它被高度变化/拖拽高频调用，重算就会左右抖）');
+
+  /* ---- 规矩 4：两个外观开关都要现读配置 ---- */
+  ok(/chatOpt\('floatBubbleOutline'/.test(b) && /chatOpt\('floatBubbleJitter'/.test(b),
+    '描边 / 随机化都走配置现读（规矩 4，改完下一句就生效）');
+}
+
+console.log('[J] 宽高比多档 + 上方三候选（2026-10-28，方案第二批：A3 / B1 / B4 / B5）');
+{
+  /* 这一段**直接调用** bubble.js 导出的纯函数（不是正则查源码）：
+   * 摆位规则是"规则"不是"文本"，照 tiny-roommate 的「bubble placement logic
+   * should live in pure layout helpers」「assert the intended constraints directly」。
+   * ⚠️ require('electron') 在 node 下只返回路径字符串、不解构出真对象，
+   *    但 bubble.js 顶层只解构不调用，所以能安全 require（不起 Electron）。 */
+  const B = require(path.join(__dirname, '..', 'src', 'main', 'bubble.js'));
+  const C = B._const;
+  const WA = { x: 0, y: 0, width: 1920, height: 1040 };
+  const base = { cx: 960, w: C.WIDTH_MIN, jitter: 0, wa: WA, inside: false, aside: true };
+
+  /* ---- A3 宽度多档 ---- */
+  ok(Array.isArray(C.WIDTH_STEPS) && C.WIDTH_STEPS.length >= 3, `宽度是**多档**不是单个常量（${C.WIDTH_STEPS.length} 档）`);
+  ok(C.WIDTH_MIN === C.WIDTH_STEPS[0] && C.WIDTH_MAX === C.WIDTH_STEPS[C.WIDTH_STEPS.length - 1],
+    'WIDTH_MIN / MAX 从档位数组派生（规矩 9：同一个数只在一处定义）');
+
+  /* 收敛：模拟流式打字把气泡从 MIN_H 一路撑到 MAX_H，宽度逐档上浮后必须**停下**。 */
+  let bad = [];
+  for (let h = C.MIN_H; h <= C.MAX_H; h += 4) {
+    let w = C.WIDTH_MIN;
+    for (let i = 0; i < 8; i++) { const n = B._wantWidth(h, w, WA.width - 8); if (n === w) break; w = n; }
+    if (w / h < C.ASPECT_MIN - 1e-9 && w < C.WIDTH_MAX) bad.push(`${h}→${w}`);
+  }
+  ok(bad.length === 0, `每个高度最终宽高比都 ≥ ${C.ASPECT_MIN}（治"窄高盒"，反例 ${bad.slice(0, 3).join(',') || '无'}）`);
+
+  let mono = true;
+  for (const cur of C.WIDTH_STEPS) {
+    for (let h = C.MIN_H; h <= C.MAX_H; h += 4) if (B._wantWidth(h, cur, WA.width - 8) < cur) mono = false;
+  }
+  ok(mono, '宽度单调不减（A3 防回路的兜底：need 至少不小于当前宽）');
+
+  /* 🔴 最重要的一条：加宽 → 文本行数变少 → 高度回落 → **不许把宽度收回去**。
+   * 漏了它就是"加宽→变矮→收窄→变高→再加宽"的无限抖动，且只在流式打字时发作。 */
+  const wTall = B._wantWidth(C.MAX_H, C.WIDTH_MIN, WA.width - 8);
+  const wAfter = B._wantWidth(200, wTall, WA.width - 8);
+  ok(wTall > C.WIDTH_MIN && wAfter === wTall,
+    `加宽后内容变矮不再收窄（h ${C.MAX_H}→200：${C.WIDTH_MIN}→${wTall} 后仍 ${wAfter}）`);
+
+  /* 死档检查：档位表里不能有一个永远够不到的档（"看着像多档、其实只有一档"）。 */
+  const reached = new Set();
+  for (let h = C.MIN_H; h <= C.MAX_H; h += 2) {
+    let w = C.WIDTH_MIN;
+    for (let i = 0; i < 8; i++) { const n = B._wantWidth(h, w, WA.width - 8); if (n === w) break; w = n; }
+    reached.add(w);
+  }
+  const dead = C.WIDTH_STEPS.filter((w) => !reached.has(w));
+  ok(dead.length === 0, `每一档在 h∈[${C.MIN_H},${C.MAX_H}] 都够得到（死档 ${dead.join(',') || '无'}）`);
+
+  /* 有界：再窄的屏幕也不能算出比 WIDTH_MIN 还小、比可用宽度还大的值。 */
+  const narrow = B._wantWidth(C.MAX_H, C.WIDTH_MIN, 300);
+  ok(narrow >= C.WIDTH_MIN && narrow <= 300, `窄屏(300)下宽度夹在 [${C.WIDTH_MIN}, 300]（实际 ${narrow}）`);
+  ok(B._wantWidth(C.MAX_H, C.WIDTH_MAX, WA.width - 8) <= C.WIDTH_MAX, '宽度不超过最大档');
+
+  /* ---- B1 / B4 / B5 候选位 ---- */
+  const mid = B._pickAnchor(base);
+  ok(mid.name === 'top' && mid.x === Math.round(base.cx - C.WIDTH_MIN / 2),
+    '空间充足时恒 **top**（正上方指着她最自然，左右候选不是常规随机）');
+
+  const edgeL = B._pickAnchor({ ...base, cx: 60 });
+  ok(edgeL.name !== 'top', `她贴屏幕左边缘、top 被夹时改用侧候选（实际 ${edgeL.name}）`);
+  ok(edgeL.x >= WA.x + 4 && edgeL.x + C.WIDTH_MIN <= WA.x + WA.width - 4,
+    '侧候选的 x 仍在 workArea 内（贴边正是要治的）');
+  /* 负对照：关掉左右候选开关 → 必须退回 top，哪怕被夹。 */
+  const offAside = B._pickAnchor({ ...base, cx: 60, aside: false });
+  ok(offAside.name === 'top' && offAside.x === WA.x + 4, '关掉 floatBubbleAside → 恒 top（被夹到 wa.x+4 也认）');
+
+  const inside = B._pickAnchor({ ...base, inside: true });
+  ok(inside.name !== 'top', `退回主窗内（头顶上方放不下）时优先偏一侧少挡脸（实际 ${inside.name}）`);
+  ok(['top', 'top-left', 'top-right'].includes(inside.name) &&
+     ['top', 'top-left', 'top-right'].includes(edgeL.name),
+    '候选**只在上方弧线里**（tiny-roommate：allowed family = top-left / top / top-right，side 不参与）');
+
+  /* 尾巴回正的容量必须装得下最大的候选偏移 —— 装不下尾巴就挪出泡体、像后贴的方块。 */
+  const maxOffRatio = Math.max(...Object.values(C.CAND_OFF).map((v) => Math.abs(v)));
+  const fits = C.WIDTH_STEPS.every((w) => maxOffRatio * w + 8 <= B._tailOffsetMax(w));
+  ok(fits, `每一档下「最大候选偏移 + jitter8」都 ≤ 尾巴回正上限（最窄档 ${(maxOffRatio * C.WIDTH_MIN).toFixed(1)}+8 ≤ ${B._tailOffsetMax(C.WIDTH_MIN)}）`);
+
+  /* ---- B2 的范围：确定性散列必须真的落在 ±JITTER_X 里 ----
+   * 🔴 这条是**真机抓出来的**（2026-10-28 第二批）：hashJitter 最后一步 `x ^= x >>> 13`
+   *    在 JS 里会转回有符号 int32，取模跟着变负 → 实测吐出过 −18 / −21 / −23，
+   *    而 JITTER_X 写的是 8。光断言"用了散列、常量是 8"根本拦不住它 ——
+   *    "输出看起来就是个合理偏移"，只是比承诺的大三倍。所以这里**直接调它**。 */
+  let jmin = 0, jmax = 0;
+  for (let n = 1; n <= 300; n++) {
+    const v = B._hashJitter(n, 8);
+    if (v < jmin) jmin = v;
+    if (v > jmax) jmax = v;
+  }
+  ok(jmin >= -8 && jmax <= 8, `散列输出真的落在 ±8 里（实测 ${jmin} … ${jmax}）`);
+  ok(jmin < 0 && jmax > 0, '左右两个方向都会出现（不是恒 0、也不是单向）');
+
+  /* ---- 源码接线：新能力必须有开关（规矩 4）、且不再有写死的宽度 ---- */
+  const s = stripComments(read('main/bubble.js'));
+  ok(/chatOpt\('floatBubbleWiden'/.test(s) && /chatOpt\('floatBubbleAside'/.test(s),
+    '两个新开关都走配置现读（规矩 4，改完下一句就生效）');
+  ok(/curW = widenOn\(\) \? wantWidth\(curH, curW, wa\.width - 8\) : WIDTH_MIN;/.test(s),
+    'place() 按**当前可用宽度**决定档位（开关关掉 → 恒最窄档）');
+  ok(/width: curW, height: curH/.test(s), 'setBounds 用当前档宽（不是写死的 272）');
+  ok(!/\bWIDTH\b(?!_)/.test(s), '源码里不再有裸的 WIDTH 常量（全走 curW / WIDTH_MIN）');
+  const nu = (s.match(/function newUtterance\(\) \{[\s\S]*?\n\}/) || [''])[0];
+  ok(nu !== '' && /curW = WIDTH_MIN;/.test(nu),
+    '每句话开头把宽度重置回最窄档（上一句的长回复不能把宽气泡留给下一句短话）');
 }
 
 console.log(fails === 0 ? '\n全部通过' : `\n${fails} 项失败`);

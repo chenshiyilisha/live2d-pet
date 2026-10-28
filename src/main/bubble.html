@@ -34,11 +34,31 @@
    *    （防意外滚动条），谁悬在 body 盒子外谁就被整条裁掉 —— 第一版尾巴
    *    就这么消失的。把它包进 wrap 的 padding 里就绝对安全。
    *    ⚠️ 这个 21 必须和下面 report() 里的底部留白是同一个数（规矩 9）。 */
+  /* 两层投影（2026-10-28）：近景 1px/2px 让它"贴着桌面"，远景 3px/8px 是原来
+   * 那层柔和浮起。出处 dsh-pet 修完之后正是"两层低透明度、最大 2px 偏移"。
+   * ⚠️ 描边那层见下面 body.outline —— 它必须写在**最前面**（filter 按书写顺序
+   *    叠加，先描边再投影，投影才不会被描边压住）。 */
   #wrap {
     position: relative;
     margin: 8px 10px 0;      /* ⚠️ 顶部 8 与下面 report() 里的常量是同一条，改要一起改 */
     padding-bottom: 21px;
-    filter: drop-shadow(0 3px 8px rgba(25, 25, 28, 0.15));
+    filter:
+      drop-shadow(0 1px 2px rgba(25, 25, 28, 0.10))
+      drop-shadow(0 3px 8px rgba(25, 25, 28, 0.15));
+  }
+  /* 浅色壁纸下白气泡会糊在背景里 —— 这时才开（chat.floatBubbleOutline，默认关：
+   * 用户 2026-10-13 连着两轮把描边减到 0，描边是改观感的事，交回给他决定）。
+   *
+   * 🔴 描边**绝不能用 border**：border 画在**矩形**上，那条底边会横穿尾巴根部，
+   *   尾巴立刻露出"后贴上去"的层级（dsh-pet 记录的"根因一"，我们当前看不见
+   *   只是因为泡体和尾巴同为纯白）。
+   *   正解是再叠一层**零偏移** drop-shadow 模拟描边：drop-shadow 按**合成后
+   *   轮廓**算，天然跨泡体 + 尾巴连续，接缝处不会出现内部边线。 */
+  body.outline #wrap {
+    filter:
+      drop-shadow(0 0 1px rgba(20, 22, 28, 0.65))
+      drop-shadow(0 1px 2px rgba(25, 25, 28, 0.10))
+      drop-shadow(0 3px 8px rgba(25, 25, 28, 0.15));
   }
   #shell {
     padding: 12px 16px 14px;
@@ -56,7 +76,12 @@
    * 不描边、不加 box-shadow —— 轮廓阴影统一交给 #wrap 的 drop-shadow。
    * bottom: 15 是相对 #wrap 的 **padding box** 底边（= shell 底 + padding-bottom 21），
    * 即方块底边在 shell 底下方 6px、旋转后最低点约 9.1px —— 正好躺在
-   * padding-bottom 那条容身处，不会被 body 的 overflow:hidden 裁掉。 */
+   * padding-bottom 那条容身处，不会被 body 的 overflow:hidden 裁掉。
+   *
+   * ⚠️ transform 由 JS 覆写（onTail）：气泡被随机偏移或被屏幕边 clamp 之后，
+   *    泡体中线不再压在人物中线上，尾巴要往回挪同样的距离才仍然指着她。
+   *    translateX 写在 rotate **之前** —— 复合矩阵是 T·R，平移发生在父坐标系里，
+   *    所以视觉上是纯水平移动，不会变成斜着挪。 */
   #tail {
     position: absolute;
     left: 50%;
@@ -94,9 +119,19 @@
     border-bottom: 1px dashed #e6e6e9;
   }
   @keyframes blink { 0%, 60% { opacity: 1; } 61%, 100% { opacity: 0.2; } }
-  /* 淡出（主进程 hide 前来不及做动画，这里只做 show 的入场） */
-  body { animation: pop 0.16s ease-out; }
-  @keyframes pop { from { opacity: 0; transform: translateY(4px); } }
+  /* 入场 / 出场：两个方向对称（出场是 2026-10-28 补的 —— 之前入场有 pop，
+   * 出场直接 win.hide()，收得比出现得突兀）。
+   *
+   * ⚠️ 这两个动画由主进程通过 class 驱动，写成 body 上的常驻 animation 是错的：
+   *    气泡窗是**复用**的（懒创建一次、之后靠 show/hide 反复出现），常驻动画
+   *    只在页面加载时播一次 —— 第二句话起就没有入场了。
+   *    重播同名动画必须先把 class 摘掉再强制一次重排（见下面 setPhase）。
+   * scale 从 0.96 展开 —— #wrap 的 margin:8 10 0 就是给"展开时不被裁"留的白。
+   * ⚠️ 两个时长都必须等于主进程 bubble.js 的 FADE_MS（verify-bubble [H] 校验）。 */
+  body.pop { animation: pop 0.16s ease-out; }
+  body.fading { animation: fade 0.16s ease-in forwards; }
+  @keyframes pop { from { opacity: 0; transform: translateY(4px) scale(0.96); } }
+  @keyframes fade { to { opacity: 0; transform: translateY(2px) scale(0.98); } }
 </style>
 </head>
 <body>
@@ -108,6 +143,16 @@
   const shell = document.getElementById('shell');
   const think = document.getElementById('think');
   const text = document.getElementById('text');
+  const tail = document.getElementById('tail');
+
+  /* 动画重播：同名 animation 不会因为再挂一次 class 就重新播 —— 必须先摘掉
+   * class、再强制一次重排（读 offsetWidth 就够），然后才挂回去。
+   * ⚠️ 漏掉中间那步重排，就是最典型的"代码里写了动画、屏幕上看不到"。 */
+  const setPhase = (cls) => {
+    document.body.classList.remove('pop', 'fading');
+    void document.body.offsetWidth;
+    if (cls) document.body.classList.add(cls);
+  };
 
   /* 内容高度变化（流式打字 / 换行）→ 把整页高度报给主进程。
    * 整页 = 顶部留白 8 + 泡体高 + 底部 21（= #wrap 的 padding-bottom，
@@ -118,7 +163,25 @@
   };
   new ResizeObserver(report).observe(shell);
 
+  /* 入场动画：主进程 showInactive() 之后才发（先发的话 0.16s 里有一截在窗口
+   * 还藏着的时候就耗掉了，用户看到的是"淡到一半突然全亮"）。 */
+  window.bubbleHost.onShow((s) => {
+    document.body.classList.toggle('outline', !!s.outline);
+    setPhase('pop');
+  });
+  /* 出场动画：主进程等 FADE_MS 播完才真 hide（FADE_MS 与这里的 0.16s 是同一条）。 */
+  window.bubbleHost.onFade(() => setPhase('fading'));
+  /* 尾巴回正：泡体中线不再压在人物中线上时，尾巴往回挪（见 #tail 的注释）。 */
+  window.bubbleHost.onTail((v) => {
+    tail.style.transform = `translateX(${v}px) rotate(45deg)`;
+  });
+
   window.bubbleHost.onBegin(() => {
+    /* 上一句还在淡出（body.fading 带 opacity:0 forwards）就被叫回来说话：
+     * 先把"透明"摘掉，否则这一句根本看不见。真正的入场由 onShow 起。
+     * ⚠️ 这里**只摘 fading、不动 pop** —— 摘完立刻是可见状态，哪怕后面
+     *    bubble:show 没送到（极端时序），气泡也照常显示（fail-open）。 */
+    document.body.classList.remove('fading');
     text.textContent = '';
     think.textContent = '';        // 上一轮的想法不能留到这一轮
     shell.classList.add('waiting');

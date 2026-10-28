@@ -1889,3 +1889,179 @@ https://github.com/ClaraShafiq/jiwen                                 （mood 蓝
 （同节收录、值得单列：revive-companion 泊松时机 / ears 语气基线 / gaze 屏幕感知 /  
 voice-familiarity 说话人 / OptMem 二叉树 / DuduLove 防重复 / pilulier 药盒 /  
 character-card-spec-v3 角色卡 / Hindsight 四路检索 / moraine-home 双方确认）
+
+---
+
+# 第 16 轮：surfcore / dsh-pet-indesktop 定向复盘（2026-10-28）
+
+> 起因：用户点名两个仓库「有值得借鉴的吗」。本轮**只调研不执行**。
+>
+> 方法：`api.github.com/repos/<o>/<r>` 核元数据与 `default_branch` → `git/trees/main?recursive=1`
+> 列全量文件树 → `raw.githubusercontent.com` 拉 README 与指定 guide（**不 clone、不读第三方源码**，
+> 只读文档与协议）。两个仓库均核过存在、非 fork、未归档。
+
+## 16.1 先纠正两个预期
+
+1. **surfcore 不是桌宠**。它是 QQ ↔ DeepSeek Harness 的桥（原 `Derpyu520/qq-bridge`，3104★，仍在更），
+   另带 B站 与一个**桌宠子系统**——但那子系统是「给外部桌宠用的胶水」（`host.json` 发现 +
+   `host-token` + 回环 pet-api + `since`/`bootId` 长轮询），不是形象与渲染。21★、38 commits、
+   2026-10-26 见库。
+2. **dsh-pet-indesktop 是 11.3「不采用」的修正认知**。11.3 判 dsh-pet 族不采用的理由（序列帧/WebM
+   路线）依然成立；但 MerZlin 这个 fork 已长到 **2549★ / v4.3.1（2026-10-17）**，工程纪律与几个
+   具体机制**值得单记**——「用不用它的技术路线」与「抄不抄它的机制」是两件事。
+
+## 16.2 🔴 surfcore：记忆卡（对我们 G19 最有用的一节）
+
+`docs/guides/MEMORY_CARD.md` + `lib/pet-purpose.js`。两张卡分工：**衰减卡**（`memory-card.*`，唯一
+注入提示词）与**全量档**（`memory-card-full.*`，永久保真、永不注入，只供检索/回忆）。
+
+**A. 重要度 = 纯函数打分，不调模型**
+
+`scoreMemory()`：基础 +8；主人私聊 **+42**、主人在群里 **+32**；直接对她说 +8；情绪浓度 +0~24
+（强词 8/个、普通情绪词 3/个、感叹号 1）；「第一次/最早」**+30**（且与主人相关直接 100 并置顶）；
+约定/承诺 +16；矛盾/道歉/和好 +14；关于自己 +5；太短 −12；夹 1~100。
+`minOwnerImportance`（默认 65）以上的主人记忆**永不忘**，最差保持「清楚」。
+
+→ 价值不在权重数字，在于**确定性**：可单测、可解释、可回滚，跟我们 mood 的 `step()` 同一路数。
+
+**B. 四档清晰度，每天最多降一档**
+
+```
+vivid 清晰 → clear 清楚 → fuzzy 模糊 → trace 只剩印象 → 遗忘（删正文，只留 stats.forgotten 计数）
+```
+
+`targetClarity()`：`retention = importance + min(12, recallCount×2) + 最近加成(7 天内 +18 / 2 天内
+被提到 +8) − 时间惩罚(过 fuzzyAfterDays 后每天 −0.35；主人重要记忆每天只 −0.12)`。
+`pinned` / 第一次永远「清晰」；主人重要记忆 retention 有 55 下限。被再次提到会更新 `lastSeenAt` /
+`recallCount`，次日可能回升一档（复习效应）。
+
+🔴 **`forgetAfterDays`（默认 60 天）到期也不直接删**：目标设为「遗忘」，但仍每天走一档，
+走完才真删。**离线多天会补跑连降，上限 30 天**，不会因为停机就停止遗忘。
+
+→ 与规矩 34「离线补漂与实时 tick 同一个 step()」是同一类坑的同一套解法（别人独立验证过）。
+
+**C. 「最初 / 初次相遇」是独立于「重要」的第二条轴**
+
+只算与主人的互动，窗口 = 首次主人互动起 30 天，概率 `0–9 天 0.90 / 10–19 天 0.55 / 20–29 天 0.30 /
+≥30 天 0.03`，且用记录 id 做**稳定散列**（不是每次随机）；命中者最差保持「清楚」，不参与容量压缩
+与淘汰；渲染时单独成区（`## 初次相遇` / `## 最初的日子`），不与「重要」混排。
+
+**D. 容量告警 80/90/100% + 一键压缩**，只作用于衰减卡；全量档软上限、永不自动删。
+
+## 16.3 🔴 surfcore：主动搭话的两个工程细节
+
+**A. 先记账，后生成**（`lib/pet-purpose.js:491-493`）
+
+```
+选完目的 → markPurposeDelivered 写「已投递计划」→ saveState
+        → 调模型（几秒）→ 成功 applyPurposeOutcome('sent') / 失败 'failed' / 空 'silent' → 落盘
+```
+
+顺序是**刻意反直觉**的：先登记再花 token。进程在生成中途被杀，状态文件留下
+`lastOutcome='pending'`，下次 `loadState()` 把它改判 `interrupted` 并把 `nextFireAt` 归零 ——
+**不会出现「以为发了其实没发」**。我们现在是「成功才记账」，kill/断电会丢一次统计口径。
+
+**B. 零副作用 preview**：`preview()` 真读素材、真算驱动、真选目的、真拼提示词，但**不投递、不写
+状态、不调模型**。调闸门顺序时最省事。
+
+**C. 载体（carrier）在包装层、引擎纯逻辑**：`purpose-engine.js` 全文不含 `carrier`/`modality`/`pet`
+字样，QQ 与桌宠两侧各自 `return`；切换载体靠配置 + 各自 tick，不用重启进程。
+→ 与我们的「依赖单向、注入 getter」同源，已符合。
+
+**D. 具名 reason 表**：`busy / chat-disabled / carrier-qq / disabled / focus / llm / pet-offline /
+no-material / no-purpose / llm-failed / silent / deliver-failed / error` —— 每个早退都有稳定名字。
+我们 proactive 早退目前只写日志字符串，**具名 reason** 便于 verify 断言与用户可见解释。
+
+## 16.4 dsh-pet-indesktop：主动识屏的完整参数（→ G2）
+
+README「主动识屏陪伴」（Windows + Chat 版，**默认关闭**）＋「看看屏幕」：
+
+- 触发：**白名单应用切换**（不是轮询屏幕内容）；闸门 = 停留时长门限 / 闲置判定 / 冷却间隔 /
+  每日上限 / 免费模型优先 / **dry-run 验证模式**。
+- 截图：**只在内存中压缩处理、直接发给视觉模型、不写本地文件、不保留副本**；最长边 **768px**、
+  JPEG **70**；4 秒冷却防连点。
+- 上下文：前台窗口「程序名 | 标题」一并送；结果用桌宠口吻一句话冒泡，**并回写一条
+  `[看看屏幕] 前台窗口：…` 进当前会话**（可继续追问；聊天窗未开则只冒泡不写）。
+- 计费口径：界面明写「每次都会按一次视觉模型请求计费，像素折算 + 输出 token」。
+- Privacy 承诺可借的措辞：OCR **在本机子进程离线跑、用完即退，图片与识别结果不出本机**。
+
+⚠️ 与 15.4 的 `gaze`（滚动 JSON 上下文）不是一个路子：它只做「切应用」这一个事件源，更省，
+也更贴我们（`fullscreen.js` 已经在前台窗口上了，缺的正是这套闸门）。
+
+## 16.5 dsh-pet-indesktop：只读 JSONL 的 agent 事件协议（→ 工作状态外扩）
+
+`docs/AGENT_LINK_PROTOCOL.md`。纯本地文件追加写 + 增量读，**全程不访问外网**：
+
+```
+<config.dir>/agent-events/<agent>.jsonl
+{"ts": 1750000000.0, "agent": "myagent", "event": "PreToolUse", "tool": "bash"}
+{"ts": 1750000000.0, "agent": "myagent", "state": "working"}     // state 优先于 event
+```
+
+六态统一词汇：`thinking / working / attention / error / idle / sleeping`。
+事件名映射兼容 Claude Code hooks：`SessionStart|SessionEnd→idle`、`UserPromptSubmit→thinking`、
+`PreToolUse|PostToolUse→working`、`PostToolUseFailure|StopFailure→error`、`Stop|SubagentStop→attention`。
+
+四条读方保证（review 时该问的就是这些）：
+1. **byte-offset tail，不回放历史事件**；文件不存在时静默空转；半行缓冲不丢事件；单次读取有界 64KB。
+2. **表外事件名一律忽略**（绝不默认当 working，防 transcript 类密集写入过度触发）。
+3. 写方纪律：连续相同状态**不重复落盘**（重复行会占住换帧节流位）；>1MB **轮转只留一代**；
+   写失败**静默放弃**（联动不能影响 Agent 本体）。
+4. 隐私红线：只写状态/事件名/工具名，**不写代码内容、命令全文、文件内容、屏幕信息**。
+
+→ 我们的「工作状态」已有同一层意思，但事件源是自己家的；补这条 = **任何能往文件追加一行的
+Agent 都能驱动她**（零代码接入、默认关、天然 fail-open），正好接上 11.11 的 WorkBuddy 钩子情报。
+
+## 16.6 dsh-pet-indesktop：三个小件
+
+- 🔴 **置顶看门狗**：Windows 上 explorer 重启、分辨率/DPI 变更、休眠唤醒**会偶发丢置顶**，它每
+  **30 秒**自检、丢了就重置。我们的开发窗口没出过，但用户机器上「她突然被别的窗口盖住」很可能
+  就是这个 —— **成本半天，先量再决定**。
+- **入口不可用就置灰 + 行内写明原因**：找不到的播放器条目置灰并写「未找到，可在此手填路径」；
+  「自动检测」每点一次都重搜、本次没扫完的行显示「未完成」而不是「没找到」；手填路径**以它为准**，
+  文件不存在就如实报错、**不偷偷回退自动搜索**。→ 规矩 24「开关关掉不许点了没反应」的实现细则。
+- **隐藏时 CPU≈0**：隐藏即暂停动画解码与活动定时器。我们全屏静默已降到 1fps，思路一致。
+
+## 16.7 明确不搬（定位冲突，不是质量问题）
+
+可编排右键菜单 + 实时预览、多宠孵化（单进程多窗 + 共享解码链）、四个音乐播放器入口、DeepSeek
+余额、每日一签、歌词对齐、节日提醒、抓帧率（presentmon）。它在一只桌宠上堆了 7 个以上功能域，
+与「安静陪伴 + 两个菜单都要短」（规矩 5）正面冲突。
+
+工程纪律层面可对照补的只有一条：它把**行数预算做成 `tests/test_architecture.py` 机器守卫**
+（`window.py` 处于「只许瘦不许胖」公约下）。我们的 `verify-*.js` 已是同类，可考虑补一条
+**main.js 体量断言**。
+
+## 16.8 许可与可信度备注
+
+| 仓库 | 许可 | 备注 |
+|---|---|---|
+| Mieksido/surfcore | **`NOASSERTION`**（非标准开源协议；另有 RULES.md 谈第三方 EULA） | **只看文档、不搬代码**，引用思路也要注明来源 |
+| MerZlin/dsh-pet-indesktop | **MIT**（代码）＋ `THIRD_PARTY_NOTICES.md`（素材/二进制） | 代码可参考，**素材不可搬**（WebM 来自上游项目） |
+
+两个都**不影响主线**：不改 Electron → Tauri 迁壳优先级，也不改「单模型 + 安静陪伴」定位。
+
+## 16.9 本轮结论（按性价比）
+
+1. **G19 记忆 Phase2**：抄「四档清晰度 + 每天一档 + 离线补跑 + 重要度纯函数 + 初遇独立轴」这一整套
+   —— 本轮最大收获，且与我们既有的 mood/衰减层同构，不引入新范式。
+2. **proactive「先记账后生成」+ 具名 reason + 零副作用 preview**（半天到一天，改动在搭话路径，
+   不动渲染层）。
+3. **G2 屏幕上下文**：拿它的闸门与隐私口径（768 / JPEG70 / 内存不落盘 / 4s 冷却 / 每日上限 / dry-run）。
+4. **工作状态外扩**：只读 JSONL（六态 + 表外忽略 + 静默失败 + 轮转）。
+5. **置顶看门狗**：先量有没有丢置顶，再决定要不要那 30 秒自检。
+
+## 第 16 轮来源清单（全部经 api.github.com 核实存在）
+
+```
+https://github.com/Mieksido/surfcore                            21★  NOASSERTION（QQ↔DSH 桥 + 桌宠胶水）
+  docs/guides/MEMORY_CARD.md           记忆卡：评分 / 四档清晰度 / 遗忘 / 容量
+  docs/guides/SUBSYSTEM-PET.md         桌宠子系统：闸门顺序 / 先记账后生成 / preview
+  docs/guides/BOUNDARIES.md            能力边界与不承诺清单
+https://github.com/MerZlin/dsh-pet-indesktop                  2549★ MIT（PySide6 + WebM，v4.3.1）
+  README.md                            主动识屏参数 / 看看屏幕 / 已知限制 / 性能与内存
+  docs/AGENT_LINK_PROTOCOL.md          只读 JSONL 六态事件协议
+上游（仅核对存在）：
+https://github.com/Derpyu520/qq-bridge                        3104★（surfcore 的桥代码来源）
+https://github.com/PC2005-cloud/dsh-pet                       4523★（dsh-pet-indesktop 的上游）
+```

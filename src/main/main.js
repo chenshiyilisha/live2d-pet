@@ -1716,6 +1716,8 @@ function emitChatChunk(t) {
 
 function emitChatEmotion(e) {
   try { mainWindow?.webContents.send('chat:emotion', e); } catch { /* ignore */ }
+  /* 悬浮气泡的情绪角标也走这条唯一出口（规矩 27）—— 绕开它气泡会挂着上一句的情绪。 */
+  bubble.setEmotion(e);
   /* 心境层回灌：她自己聊出的情绪让轴也动一点（正向情绪→心情好）。
    * 挂在唯一出口上（规矩 27）—— 本地回复池 emitLocal 也走这里，天然全覆盖。 */
   moodEngine.onAssistantEmotion(e);

@@ -304,6 +304,7 @@ https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js
 | `src/assets/models/`（Hiyori） | 角色版权归 **Live2D Inc.**，受 Free Material License 约束（见上一节）。**不在本仓库内**，从 Release 下载 |
 | `live2dcubismcore.min.js` | Live2D Inc. 的**专有软件**，本仓库不收录，运行时从官方 CDN 取回 |
 | `pixi.js`、`@naari3/pixi-live2d-display`、`electron-updater` | 各自作者的开源许可证（多为 MIT），**不在本仓库内**，随 `pnpm install` 获取 |
+| `src/main/bubble.html` 内联的情绪角标图形 | 取自 **[Lucide Icons](https://lucide.dev)**（lucide-static v1.62.0，**ISC 许可**，Copyright (c) Lucide Icons and Contributors）。路径数据内联在源码中；ISC 要求保留版权与许可声明，`bubble.html` 内已注明 |
 
 之所以单独说明，是因为仓库根目录放一个 `LICENSE` 的默认含义是"对整个仓库授权"——
 而模型素材的版权不在本项目作者手里，无法由本项目授权。第三方素材如需再分发，

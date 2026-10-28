@@ -144,6 +144,10 @@
 | W29 | Agent 事件**只读 JSONL**（六态、兼容 Claude hooks 事件名、表外忽略、失败静默、>1MB 轮转） | dsh-pet `AGENT_LINK_PROTOCOL.md`；→ 工作状态外扩 |
 | W30 | **置顶看门狗**（explorer 重启/休眠/改 DPI 会丢置顶 → 30s 自检重置） | dsh-pet「已知限制」；先量再决定 |
 | W31 | 不可用入口**置灰 + 行内写明原因**；手填值以它为准、**不偷偷回退** | dsh-pet 菜单/播放器；规矩 24 的实现细则 |
+| W32 | **档案自证**：`verify-expressive` 的「情绪数=8 / 字段数=16」硬断言改为**由档案自证**（键集一致 / emoSpeed 键集 / param 有 ID 三条规则一条不减） | 降档前置；引擎本就按字段集遍历，8·16 是断言不是限制；规矩 9 同路数 |
+| W33 | **`emotionAlias` 未知情绪回退**：8 个 `[emo:xxx]` 协议标签**一个不删**、llm prompt 不动，档案缺失的情绪映射到近似档 | 防「切 A→B 眉毛卡住」静默故障（缺字段=停旧值） |
+| W34 | **`mouthOpenMax`** 口型幅度夹取（档案声明、写参前夹、默认 1.0） | 降档后口腔只需一张张嘴图；psd2live 规范 `either as one image` |
+| W35 | **半身模型档案 L0**（4 情绪 / 8~10 字段 / 无腿）+ 全 AI 链路 PoC（生图→See-Through→manifest→psd2live→Cubism 5） | `custom-model-plan.md` §11；**腿非刚需**（漫步=窗口位移，Walk 是自制的增强） |
 
 **网上已有、我们已有**：番茄 / 提醒 / 开机自启 / 锁屏静默 / 摸头 / 全屏闸门 / 低电降帧 / 工作状态；甩抛/摸头交互形态与 Coopanion 同类。  
 **不抄主线**：亲密度养成、多宠交友、径向技能轮当主 UI、内置捆小模型、会议 Join、打字蒸汽特效；**Computer use 控键鼠当产品主线**（与安静搭子冲突）。
@@ -294,3 +298,5 @@
 | 2026-10-27 | 增 **G 大模型对接 M1–M9**；开干顺序改为先 M 再人格 |
 | 2026-10-27 | **定路线** Tauri 2+TS+Cubism Web：§J + `tauri-migration.md` |
 | 2026-10-27 | 记 **Coopanion**（§E.1 + W18–W22）；M 线对齐其接模型 UX；AGPL 不抄码、不跟 computer use |
+| 2026-10-28 | 记 **surfcore / dsh-pet**（§E.2 + W23–W31）：surfcore 为 NOASSERTION，**只借机制不搬代码** |
+| 2026-10-28 | **Live2D 降档**（用户拍板）：记 W32–W35。腿/口腔两条硬伤降级、全 AI 链路可作交付路线；见 `custom-model-plan.md` §11 |

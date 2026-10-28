@@ -1137,6 +1137,20 @@ async function boot() {
     ready: model.internalModel?.ready
   }));
 
+  /* 「两个她」的取证口子（2026-10-28）：一个页面里只该有 **1 个 canvas**、
+   * stage 上只该有 **1 个 holder**（模型的容器，pet.js 里只有 mountModel 那一处
+   * addChild，且 mountModel 只在 boot 调一次）。
+   *   这里打出 2  → 是**同一个页面画了两份**，去查 mountModel 为什么被跑了两次；
+   *   这里是 1 而屏幕上仍有两个 → 是**两个进程**，去看主进程日志里 [boot] 有几行。 */
+  console.log('[pet] stage', JSON.stringify({
+    canvases: document.querySelectorAll('canvas').length,
+    stageChildren: app.stage.children.length,
+    dpr: window.devicePixelRatio,
+    resolution: app.renderer.resolution,
+    screen: [app.screen.width, app.screen.height],
+    model: [Math.round(model.width), Math.round(model.height)]
+  }));
+
   // 主循环：情绪 + 口型 + 视线
   //
   // 用低优先级注册，确保在模型自身的 update（motion / 物理演算）之后执行 ——

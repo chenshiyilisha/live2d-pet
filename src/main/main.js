@@ -2437,6 +2437,23 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
+  /* 「屏幕上出现两个她」的取证口子（2026-10-28，未解 bug 的排查起点）。
+   *
+   * 单实例锁 requestSingleInstanceLock 是**按 userData 目录**互斥的：dev 实例
+   * （--user-data-dir 隔离）、打包版、以及那些不起锁的调试脚本，全都能绕过去 ——
+   * 于是会有两个进程各开一个透明窗、各画一份模型。它们还常常**一大一小**：
+   * 窗口尺寸是启动时按当时那块屏算出来的（win-size.js），两个进程算的 SIZE
+   * 未必一样。
+   * 这一行把「我是谁」钉进日志：下次复现只要数 [boot] 有几行、userData 是不是
+   * 同一个目录，就能立刻分清「两个进程」还是「一个进程画了两份」（后者去看
+   * 渲染层那条 [pet] stage 日志）。 */
+  console.log('[boot]', JSON.stringify({
+    pid: process.pid,
+    userData: app.getPath('userData'),
+    software: softwareMode,
+    argv: process.argv.slice(1)
+  }));
+
   const bootedAt = Date.now();
 
   // GPU 进程崩溃会在同一秒内被连续上报多次（Chromium 自己重启 GPU 子进程又立刻失败，

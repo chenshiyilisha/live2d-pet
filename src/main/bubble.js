@@ -82,7 +82,16 @@ const MIN_H = 56;         // 窗口最小高（兜底下限；实际一句短话
  * 而 shell 的内部滚动（overflow-y:auto）根本轮不到生效。
  * debug/verify-bubble.js 的 [H] 段从两个文件里切常量做这个校验。 */
 const MAX_H = 292;
-const AUTO_HIDE_MS = 9000; // 说完保留多久，与渲染层 say() 的 9000 对齐
+const AUTO_HIDE_MS = 9000; // 说完保留多久的**固定值**（与渲染层 say() 的 9000 对齐）
+/* 停留时长随字数（D1，2026-10-28）：一句"好"和一段 150 字的解释都固定 9s，
+ * 前者久得像卡住、后者不够读完。开 floatBubbleReadTime 时按字数在两端点间插值。
+ * ⚠️ 这两个端点是**估的**（中文默读约 5~7 字/秒 + 起手反应时间），没有资料支撑，
+ *    方案里标为可选 —— 所以留了开关，不喜欢就关掉回到固定 AUTO_HIDE_MS。
+ * ⚠️ 只管悬浮气泡窗；主窗回退布局（#bubble）仍是固定 9000（回退路径不跟进美化）。 */
+const READ_MS_MIN = 6000;
+const READ_MS_MAX = 14000;
+const READ_CHARS_MIN = 20;    // ≤ 这个字数 = 最短（一句话就能读完）
+const READ_CHARS_MAX = 160;   // ≥ 这个字数 = 最长（再长也按最长算，别无限涨）
 const FOLLOW_MS = 33;     // 主窗移动时的跟随节流
 /* 出场淡出时长。**与 bubble.html 里 pop / fade 两个动画的时长是同一个数**
  * （那里写 0.16s）—— 主进程等它播完才真 hide，写短了动画被截断、写长了
@@ -127,6 +136,13 @@ let measureTimer = null;
 let shotSeq = 0;
 let fadeTimer = null;     // 出场淡出中（播完才真 hide）
 let utterSeq = 0;         // 第几句话（位置随机化的种子，递增 → 可复现）
+/* 这一句已经吐出去多少字（D1：决定说完之后停留多久）。⚠️ 只统计**正文**
+ * （appendChunk），想法那一行不算 —— 那是她没打算说出口的，不算"要读的字"。 */
+let utterChars = 0;
+/* 这句话的情绪标签（情绪角标的信号源）。来自 [emo:xxx]，流式末尾整段到达；
+ * **跟标签走、不跟脸上的衰减走**（规矩 33：情绪标签本来就不随衰减改 ——
+ * 角标要是跟着衰减变淡消失，看起来像坏了）。null = 没挂牌（calm / 整段播报）。 */
+let curEmotion = null;
 let jitterX = 0;          // 本句话的水平偏移（place() 里只读，不重算）
 let tailOffset = null;    // 已下发给渲染层的尾巴回正量（null = 还没发过）
 
@@ -158,6 +174,18 @@ const outlineOn = () => chatOpt('floatBubbleOutline', false);
 const jitterOn = () => chatOpt('floatBubbleJitter', true);
 const widenOn = () => chatOpt('floatBubbleWiden', true);
 const asideOn = () => chatOpt('floatBubbleAside', true);
+const caretOn = () => chatOpt('floatBubbleCaret', true);
+const readTimeOn = () => chatOpt('floatBubbleReadTime', true);
+const moodBadgeOn = () => chatOpt('floatBubbleMoodBadge', true);
+
+/* 字数 → 停留多久（纯函数，回归直接断言，见 verify-bubble [K]）。
+ * 短话取 READ_MS_MIN、长话取 READ_MS_MAX，中间线性插值。 */
+function readTimeMs(chars) {
+  const c = Number(chars) || 0;
+  const t = (c - READ_CHARS_MIN) / (READ_CHARS_MAX - READ_CHARS_MIN);
+  const k = Math.max(0, Math.min(1, Number.isFinite(t) ? t : 0));
+  return Math.round(READ_MS_MIN + (READ_MS_MAX - READ_MS_MIN) * k);
+}
 
 /* 尾巴尖 ↔ 头顶的间隙（纯函数，便于断言）。 */
 function tipGap(h) {
@@ -235,6 +263,20 @@ function newUtterance() {
   utterSeq += 1;
   jitterX = jitterOn() ? hashJitter(utterSeq, JITTER_X) : 0;
   curW = WIDTH_MIN;
+  utterChars = 0;
+  curEmotion = null;
+}
+
+/* 情绪角标的信号（主进程唯一出口 emitChatEmotion 调到这里，规矩 27）。
+ * ⚠️ 不在这里校验"合法情绪集"—— 集合是**模型档案**的属性（鲸鱼娘跟 hiyori
+ *   不必相同），主进程不该写死。原样透传，渲染层的映射表把 8 个写全、
+ *   认不出的**藏掉**（回退），谁来都能工作。
+ * ⚠️ 开关关掉 → 直接发 null 清牌（现读，下一句话生效，不用重启）。 */
+function setEmotion(e) {
+  curEmotion = moodBadgeOn() && typeof e === 'string' && e ? e : null;
+  try {
+    if (win && !win.isDestroyed()) win.webContents.send('bubble:emotion', curEmotion);
+  } catch { /* 气泡窗刚关：下一句 reveal 时会补发 */ }
 }
 
 /* 内容高度 → 窗口高度（渲染层报的是它量出的整页高度）。 */
@@ -407,13 +449,22 @@ function reveal(w) {
   clearFadeTimer();          // 正在淡出又被叫回来说话：取消那次 hide
   w.showInactive();          // 不抢焦点
   try {
-    w.webContents.send('bubble:show', { outline: outlineOn() });
+    w.webContents.send('bubble:show', {
+      outline: outlineOn(), caret: caretOn(), badge: moodBadgeOn()
+    });
+    /* 情绪跟上（showFull / begin 都把 curEmotion 清了，正常是 null；
+     * 万一情绪先到、窗口后建，这里补发一次，角标不丢）。 */
+    if (curEmotion) w.webContents.send('bubble:emotion', curEmotion);
   } catch { /* 页面还没好：这一句没有入场动画，气泡照常显示（fail-open） */ }
 }
 
+/* 说完之后停留多久（D1）。字数在 endStream 时已经累计完，这里只读。
+ * ⚠️ 关掉 floatBubbleReadTime 就回到固定 AUTO_HIDE_MS —— 那条"估出来的"区间
+ *    必须能一键退出，否则不喜欢的人只能改代码。 */
 function scheduleAutoHide() {
   clearHideTimer();
-  hideTimer = setTimeout(() => { hideNow(); }, AUTO_HIDE_MS);
+  const ms = readTimeOn() ? readTimeMs(utterChars) : AUTO_HIDE_MS;
+  hideTimer = setTimeout(() => { hideNow(); }, ms);
 }
 
 /* 诊断口子：PET_SNAPSHOT 含 "bubble" 时，气泡落定后给自己拍个照。 */
@@ -461,6 +512,7 @@ function appendChunk(text) {
   try {
     if (!win || win.isDestroyed()) return;
     if (!win.isVisible()) { newUtterance(); curH = MIN_H; place(); reveal(win); }
+    utterChars += String(text).length;   // 停留时长的输入（D1）
     win.webContents.send('bubble:chunk', String(text));
   } catch { /* 气泡窗刚关：主窗照常收 chunk，气泡这一轮缺席 */ }
 }
@@ -658,6 +710,11 @@ module.exports = {
     jitter: jitterX,
     tailOffset,
     gap: tipGap(curH),
+    /* 诊断：这一句已累计的正文字数、以及说完之后会停多久（D1）。
+     * 只读，产品逻辑不依赖它 —— 停留时长是 scheduleAutoHide() 里算的。 */
+    chars: utterChars,
+    hideMs: readTimeOn() ? readTimeMs(utterChars) : AUTO_HIDE_MS,
+    emotion: curEmotion,
     priority: arbiter.peek()
   }),
   _arbiter: arbiter,
@@ -670,8 +727,13 @@ module.exports = {
   _wantWidth: wantWidth,
   _pickAnchor: pickAnchor,
   _tailOffsetMax: tailOffsetMax,
+  /* 情绪角标的信号入口（main.js 的 emitChatEmotion 调，规矩 27 唯一出口） */
+  setEmotion,
+  /* 停留时长的纯函数（D1，回归直接调，见 verify-bubble [K]） */
+  _readTimeMs: readTimeMs,
   _const: {
     WIDTH_STEPS, WIDTH_MIN, WIDTH_MAX, ASPECT_MIN, MIN_H, MAX_H,
-    CAND_OFF, CAND_ORDER, CAND_ORDER_INSIDE
+    CAND_OFF, CAND_ORDER, CAND_ORDER_INSIDE,
+    AUTO_HIDE_MS, READ_MS_MIN, READ_MS_MAX, READ_CHARS_MIN, READ_CHARS_MAX
   }
 };

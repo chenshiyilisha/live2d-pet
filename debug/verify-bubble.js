@@ -382,5 +382,142 @@ console.log('[J] 宽高比多档 + 上方三候选（2026-10-28，方案第二�
     '每句话开头把宽度重置回最窄档（上一句的长回复不能把宽气泡留给下一句短话）');
 }
 
+console.log('[K] C3 打字光标 + D1 停留时长随字数（2026-10-28 第三批）');
+{
+  const s = stripComments(read('main/bubble.js'));
+  const h = stripComments(read('main/bubble.html'));
+  const B = require('../src/main/bubble.js');
+  const C = B._const;
+
+  /* ---- D1：纯函数的值域 ----
+   * ⚠️ 和 [J] 里 hashJitter 那条一个道理：**光断言"有这个函数、常量写着 6/14"
+   *    拦不住任何东西** —— 必须真的调它、看数字落在哪。 */
+  ok(B._readTimeMs(0) === C.READ_MS_MIN, `空/超短回复取下限 ${C.READ_MS_MIN}ms（实测 ${B._readTimeMs(0)}）`);
+  ok(B._readTimeMs(20) === C.READ_MS_MIN, `20 字以内取下限（实测 ${B._readTimeMs(20)}）`);
+  ok(B._readTimeMs(160) === C.READ_MS_MAX, `160 字取上限 ${C.READ_MS_MAX}ms（实测 ${B._readTimeMs(160)}）`);
+  ok(B._readTimeMs(5000) === C.READ_MS_MAX, '超长回复**不会无限涨**（夹在上限，否则一整页能停半分钟）');
+  const mid = B._readTimeMs(90);
+  ok(mid > C.READ_MS_MIN && mid < C.READ_MS_MAX, `中间字数落在两端之间（90 字 → ${mid}ms）`);
+  /* 单调：字数越多停越久，不许回头（回头 = 长话停得比短话还快）。 */
+  let mono = true;
+  for (let n = 0; n < 400; n += 7) if (B._readTimeMs(n + 7) < B._readTimeMs(n)) mono = false;
+  ok(mono, '随字数单调不减（长话不会停得比短话还短）');
+  ok(C.READ_MS_MIN >= 2000 && C.READ_MS_MAX <= 20000,
+    `区间本身合理（${C.READ_MS_MIN}~${C.READ_MS_MAX}ms，短到看不完 / 长到挡事都不行）`);
+
+  /* 开关关掉必须回到固定值 —— 那条区间是**估的**，必须能一键退出。 */
+  ok(/const ms = readTimeOn\(\) \? readTimeMs\(utterChars\) : AUTO_HIDE_MS;/.test(s),
+    '停留时长走开关：关掉 floatBubbleReadTime → 回到固定 AUTO_HIDE_MS');
+  ok(/chatOpt\('floatBubbleReadTime'/.test(s), 'floatBubbleReadTime 走配置现读（规矩 4）');
+  /* 🔴 字数必须**每句清零**：不清就变成"这一句按上一句的字数停"，短话跟着长话停 14s。 */
+  const nu2 = (s.match(/function newUtterance\(\) \{[\s\S]*?\n\}/) || [''])[0];
+  ok(/utterChars = 0;/.test(nu2), '每句话开头把字数清零（否则短话沿用上一句的停留时长）');
+  ok(/utterChars \+= String\(text\)\.length;/.test(s), '字数在 appendChunk 里累加（流式逐段）');
+  ok(!/utterChars \+= [\s\S]{0,40}think/.test(s), '想法那一行**不计入**字数（她没打算念出来的不算"要读的字"）');
+
+  /* ---- C3：光标的样式与生命周期 ---- */
+  ok(/body\.caret #shell\.typing #text::after/.test(h),
+    '光标只在「开关开 + 打字中」时出现（body.caret 由主进程下发）');
+  ok(/margin-right:\s*-4px/.test(h),
+    '光标带负外边距（净宽为负 → **永不**多逼出一次换行 → 不触发高度跳动）');
+  ok(/animation:\s*caret/.test(h) && /@keyframes caret/.test(h), '光标会闪（不是一根死竖线）');
+  ok(!/border-left/.test(h), '光标不用 border（border 跟着盒子走，画不到最后一个字后面）');
+  const onShow = (s.match(/send\('bubble:show', \{[^}]*\}/) || [''])[0];
+  ok(/caret:\s*caretOn\(\)/.test(onShow), 'caret 开关随 bubble:show 下发给渲染层（与 outline 同一路）');
+  ok(/classList\.toggle\('caret', !!s\.caret\)/.test(h), '渲染层按开关挂 body.caret（关掉就完全没有光标）');
+  /* 生命周期：出字时出现、说完撤掉。漏了"撤掉"就是"说完还一直闪"。 */
+  ok(/onChunk[\s\S]{0,200}classList\.add\('typing'\)/.test(h), '出字中 → typing（光标出现）');
+  ok(/onEnd\(\(\) => shell\.classList\.remove\('waiting', 'typing'\)\)/.test(h),
+    '说完 → 撤掉 typing（留着会一直闪，像没说完）');
+  ok(/onFull[\s\S]{0,260}remove\('waiting', 'typing'\)/.test(h),
+    '整段播报也要撤 typing（没有打字过程，不该有光标）');
+  ok(/onBegin[\s\S]{0,400}remove\('typing'\)/.test(h), '新一句话开头清掉上一句残留的 typing');
+  /* 与 waiting 互斥：三态不能同时出现两个。 */
+  ok(/onChunk[\s\S]{0,120}remove\('waiting'\)/.test(h), '出字后撤掉 waiting（… 和光标不能同时在）');
+}
+
+console.log('[L] 情绪角标（2026-10-28 方案 A）');
+{
+  const s = stripComments(read('main/bubble.js'));
+  const h = stripComments(read('main/bubble.html'));
+  const pre = stripComments(read('main/bubble-preload.js'));
+  const m = stripComments(read('main/main.js'));
+
+  /* 🔴 情绪集**跟着当前模型档案走**，不写死 8 个 —— 换模型（hiyori ↔ 鲸鱼娘）
+   *    时这条断言自动跟着变，不会"换了个模型角标就少一半"。 */
+  const params = stripComments(read('renderer/params.js'));
+  const profName = (params.match(/export const EMOTION = (\w+)\.emotion/) || [])[1];
+  ok(!!profName, `从 params.js 认出当前档案（${profName}）`);
+  const prof = stripComments(read(`renderer/profiles/${profName}.js`));
+  const emoBlock = (prof.match(/emotion:\s*\{([\s\S]*?)\n  \}/) || ['', ''])[1];
+  const emos = [...emoBlock.matchAll(/^\s{4}(\w+):/gm)].map((x) => x[1]);
+  ok(emos.length >= 8, `档案里有 ${emos.length} 个情绪：${emos.join('/')}`);
+
+  const badgeBlock = (h.match(/const BADGE = \{[\s\S]*?\n  \};/) || [''])[0];
+  const has = [...badgeBlock.matchAll(/^\s{4}(\w+):/gm)].map((x) => x[1]);
+  const missing = emos.filter((e) => e !== 'calm' && !has.includes(e));
+  ok(missing.length === 0,
+    `除 calm 外**每个情绪都有图形**（缺 ${missing.join(',') || '无'}）—— 缺一项的表现是角标停在上一个情绪不换`);
+  const extra = has.filter((e) => !emos.includes(e));
+  ok(extra.length === 0, `表里没有档案里不存在的情绪（多 ${extra.join(',') || '无'}）`);
+  ok(!has.includes('calm'), 'calm **故意不在表里**（常态不挂牌；没挂牌 ≠ 缺项）');
+
+  /* 未知情绪必须收牌 —— 换模型 / 模型改情绪名时不能挂个错牌在上面。 */
+  ok(/const svg = emo \? BADGE\[emo\] : null;/.test(h) &&
+     /if \(!svg\) \{ badge\.classList\.remove\('on'\); return; \}/.test(h),
+    '认不出的情绪 → 收牌（回退），不会挂着上一句的情绪');
+
+  /* 🔴 注释块必须**闭合成对**（2026-10-28 真机抓到的）：改注释时留一段裸文本在
+   *    注释外面，CSS 解析器会把紧跟着的那条规则**整块吃掉** —— 表现是角标突然
+   *    掉到泡体下方（实测 dyTop=-72），而 HTML/CSS 都不报错。 */
+  const rawHtml = read('main/bubble.html');
+  const opens = (rawHtml.match(/\/\*/g) || []).length;
+  const closes = (rawHtml.match(/\*\//g) || []).length;
+  ok(opens === closes, `CSS 注释成对（/* ${opens} 个 vs */ ${closes} 个）—— 落单会把紧跟的规则整块吃掉`);
+  /* 更直接：#badge { 前面不能是"注释已结束又没新注释"的裸文本。 */
+  ok(/#badge \{[\s\S]{0,40}position: absolute/.test(rawHtml),
+    '#badge 规则真的带着 position（防止整块 CSS 被吃掉）');
+
+  /* 🔴 不占布局：占了就会打乱 A3 的宽度档位和 report() 的高度上报。 */
+  const badgeCss = (h.match(/#badge \{[^}]*\}/) || [''])[0];
+  ok(/position: absolute;/.test(badgeCss), '角标绝对定位（**不占布局**，否则打乱 A3 与高度上报）');
+  /* 位置余量：角标"半进半出"圆角，超出的部分必须落在 #wrap 的 margin 里，
+   * 否则被 body 的 overflow:hidden 裁掉（第一版尾巴就是这么消失的）。 */
+  const wrapCss = (h.match(/#wrap \{[^}]*\}/) || [''])[0];
+  const mg = (wrapCss.match(/margin:\s*(\d+)px\s+(\d+)px/) || []).slice(1).map(Number);
+  const off = (badgeCss.match(/top:\s*-(\d+)px;?[\s\S]*?right:\s*-(\d+)px;/) || []).slice(1).map(Number);
+  ok(mg.length === 2 && off.length === 2 &&
+     off[0] <= mg[0] && off[1] <= mg[1],
+    `角标超出量（上 ${off[0]} / 右 ${off[1]}）不超过 #wrap 的 margin（上 ${mg[0]} / 右 ${mg[1]}）→ 裁不到`);
+
+  /* 图形：Lucide（ISC）现成路径，不是 emoji 字符。 */
+  ok(/viewBox="0 0 24 24"/.test(badgeBlock) && /<path d="/.test(badgeBlock),
+    '图形是内联 SVG 路径（Lucide，ISC —— 不自己手推 path）');
+  ok(!/&#\d|[\u{1F300}-\u{1FAFF}]/u.test(badgeBlock),
+    '表里没有 emoji 字符（字形随系统变，且 llm.js 清洗器本来就在丢 emoji）');
+  /* ⚠️ 查**原始**文件（带注释）：许可声明就写在注释里，而 h 是剥过注释的。
+   *    ISC 要求保留版权声明 —— 这条断言守的是"别把来源注释删了"。 */
+  ok(/ISC/.test(read('main/bubble.html')) && /Lucide/.test(read('main/bubble.html')),
+    '源码里注明了图标来源（Lucide）与许可（ISC 要求保留声明）');
+
+  /* 开关与生命周期 */
+  ok(/body:not\(\.badge\) #badge \{ display: none; \}/.test(h),
+    'body.badge 关掉时角标**彻底不渲染**（不是靠 opacity 藏）');
+  ok(/badge: moodBadgeOn\(\)/.test(s), 'badge 开关随 bubble:show 下发（与 outline / caret 同一路）');
+  ok(/chatOpt\('floatBubbleMoodBadge'/.test(s), 'floatBubbleMoodBadge 走配置现读（规矩 4）');
+  ok(/curEmotion = null;/.test((s.match(/function newUtterance\(\) \{[\s\S]*?\n\}/) || [''])[0]),
+    '每句话开头清掉情绪（上一句的心情不能挂到这一句）');
+  ok(/onBegin[\s\S]{0,500}setBadge\(null\)/.test(h), '新一句话开头收牌');
+  ok(/onFull[\s\S]{0,400}setBadge\(null\)/.test(h), '整段播报（提醒 / 番茄钟）不挂情绪牌');
+
+  /* 主进程：走唯一出口（规矩 27），且不写死情绪集。 */
+  ok(/bubble\.setEmotion\(e\);/.test(m), 'emitChatEmotion 把情绪发给气泡（唯一出口双发，规矩 27）');
+  const setE = (s.match(/function setEmotion\(e\) \{[\s\S]*?\n\}/) || [''])[0];
+  ok(setE !== '', 'bubble.js 有 setEmotion');
+  ok(!/happy|sleepy|surprised/.test(setE),
+    'setEmotion **不校验情绪名**（集合是模型档案的属性，主进程不该写死）');
+  ok(/onEmotion/.test(pre), 'preload 有 onEmotion 通道');
+}
+
 console.log(fails === 0 ? '\n全部通过' : `\n${fails} 项失败`);
 process.exit(fails === 0 ? 0 : 1);

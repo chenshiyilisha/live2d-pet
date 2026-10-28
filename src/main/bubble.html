@@ -98,6 +98,27 @@
     content: "…";
     animation: blink 1.1s steps(4, end) infinite;
   }
+  /* 流式打字光标（C3，2026-10-28）：还在往外吐字时，正文末尾一根闪烁竖线。
+   * 三个状态互斥：waiting「…」（在想）→ typing 光标（在说）→ 说完都没了。
+   *
+   * ⚠️ margin-right:-4px **不是装饰**：光标本身 2px 宽，要是正赶上行尾，这 2px
+   *    会多逼出一次换行 → 高度跳一截 → 主进程跟着 setBounds（C4 要治的正是这个
+   *    台阶）。负外边距让它净宽为负，**永不**引起换行。
+   * ⚠️ 用 inline-block 而不是 border：border 是跟着**盒子**走的，而 #text 是
+   *    span，只包到最后一个字 —— 用 border 会画在整段文字外框上，不在末尾。
+   * ⚠️ 只在 body.caret 时生效（chat.floatBubbleCaret，默认开）。 */
+  body.caret #shell.typing #text::after {
+    content: "";
+    display: inline-block;
+    width: 2px;
+    height: 1.02em;
+    margin-left: 2px;
+    margin-right: -4px;
+    vertical-align: -0.18em;
+    background: #1d1d1f;
+    animation: caret 1s step-end infinite;
+  }
+  @keyframes caret { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
   /* 「心里想的」那一行。恒在正文**上方** —— 人设要求模型把 [think:…]
    * 写在最前面，所以它是"先动念、再开口"的顺序，追加时不会把正文顶下去。
    * 空的时候不占高度（:empty），说话时气泡里根本看不出有这个区域。
@@ -118,6 +139,43 @@
     padding-bottom: 5px;
     border-bottom: 1px dashed #e6e6e9;
   }
+  /* ---- 情绪角标（2026-10-28，方案 A）----
+   *
+   * 这句话什么心情 → 气泡右上角挂一个小图形。信号是每句末尾的 [emo:xxx]。
+   *
+   * 出处与依据（都不是我自己拍的）：
+   *   ① 位置：Material Design 的 Badge 规范 —— 默认就贴在宿主**右上角**、且
+   *      **允许压着宿主的角**（MUI 的 anchorOrigin 默认 top/right + overlap 属性）。
+   *      所以这个"半进半出圆角"的挂法是有规范的，不是随手摆的。
+   *   ② 图形：直接取 **Lucide**（lucide-static v1.62.0，**ISC** 许可）的现成
+   *      路径 —— heart / smile / circle-question-mark / sparkles / circle-alert /
+   *      zap / moon。🔴 **不自己手推 SVG path**：手推的路径既费时又容易画歪，
+   *      而这是"别人早就画好并公开授权"的东西。
+   *      ⚠️ 合规：ISC 要求保留版权声明 —— 仓库 README 与 docs 里都注明了来源
+   *      （见 docs/bubble-polish-plan.md §10.4）。
+   *   ③ "用图形不用 emoji 字符"：dsh-dfy 原话「爱心、怒气、问号…均为视觉特效，
+   *      **不是文字占位**」；且 llm.js 的清洗器本来就在丢 emoji（字形还随系统变）。
+   *
+   * 🔴 位置是「半进半出」右上圆角（top:-5 right:-5，像贴纸角标）—— 能这么挂
+   *    是因为 #wrap 的 margin（上 8 / 右 10）正好容得下超出的 5px，body 的
+   *    overflow:hidden 裁不到它。改 margin 或角标尺寸时这条要一起重算。
+   * 🔴 绝对定位、**完全不占布局** —— 占布局就会打乱 A3 的宽度档位和高度上报
+   *    （report() 量的高度必须仍然只是"文字的真实高度"）。
+   * 出入动画：缩放回弹（cubic-bezier 过冲）+ 淡入；收牌直接淡出。
+   * body.badge 由主进程按 chat.floatBubbleMoodBadge 下发 —— 关掉就彻底没有。 */
+  #badge {
+    position: absolute;
+    top: -5px;
+    right: -5px;
+    width: 17px;
+    height: 17px;
+    opacity: 0;
+    transform: scale(0.5);
+    transition: opacity 0.18s ease, transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+    pointer-events: none;
+  }
+  #badge.on { opacity: 1; transform: scale(1); }
+  body:not(.badge) #badge { display: none; }
   @keyframes blink { 0%, 60% { opacity: 1; } 61%, 100% { opacity: 0.2; } }
   /* 入场 / 出场：两个方向对称（出场是 2026-10-28 补的 —— 之前入场有 pop，
    * 出场直接 win.hide()，收得比出现得突兀）。
@@ -138,12 +196,38 @@
   <div id="wrap">
     <div id="shell" class="waiting"><span id="think"></span><span id="text"></span></div>
     <div id="tail"></div>
+    <div id="badge"></div>
   </div>
 <script>
   const shell = document.getElementById('shell');
   const think = document.getElementById('think');
   const text = document.getElementById('text');
   const tail = document.getElementById('tail');
+  const badge = document.getElementById('badge');
+
+  /* 情绪角标的图形表（Lucide，ISC —— 见上面 #badge 那条注释）。
+   * 🔴 **8 个情绪写全**：漏一个的表现是"角标停在上一个情绪上不换"——
+   *    看着像没收到信号，其实是表里没这一项（跟 params.js 情绪表同款坑）。
+   *    calm 是常态，**故意不在表里**（不挂牌）—— 没挂牌 ≠ 表里缺项。
+   *    认不出的情绪 → 收牌（回退），换模型也不会挂个问号在上面。 */
+  const BADGE = {
+    happy: '<svg viewBox="0 0 24 24" fill="none" stroke="#ff6b81" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9.5a5.5 5.5 0 0 1 9.591-3.676.56.56 0 0 0 .818 0A5.49 5.49 0 0 1 22 9.5c0 2.29-1.5 4-3 5.5l-5.492 5.313a2 2 0 0 1-3 .019L5 15c-1.5-1.5-3-3.2-3-5.5" /></svg>',
+    smile: '<svg viewBox="0 0 24 24" fill="none" stroke="#f2a33c" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10V9" /> <path d="M16.472 15a6 6 0 01-8.943 0" /> <path d="M9 10V9" /> <circle cx="12" cy="12" r="10" /></svg>',
+    think: '<svg viewBox="0 0 24 24" fill="none" stroke="#8a8a8e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /> <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /> <path d="M12 17h.01" /></svg>',
+    shy: '<svg viewBox="0 0 24 24" fill="none" stroke="#ff8fb8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z" /> <path d="M20 2v4" /> <path d="M22 4h-4" /> <circle cx="4" cy="20" r="2" /></svg>',
+    serious: '<svg viewBox="0 0 24 24" fill="none" stroke="#6b6b70" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /> <line x1="12" x2="12" y1="8" y2="12" /> <line x1="12" x2="12.01" y1="16" y2="16" /></svg>',
+    surprised: '<svg viewBox="0 0 24 24" fill="none" stroke="#f5c518" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.914 4a1.5 1.5 0 00-2.474-1.561l-9 9A1.5 1.5 0 005.5 14h4.002a.5.5 0 01.471.666L8.086 20a1.5 1.5 0 002.475 1.56l9-9A1.5 1.5 0 0018.5 10h-3.997a.5.5 0 01-.472-.667z" /></svg>',
+    sleepy: '<svg viewBox="0 0 24 24" fill="none" stroke="#7aa7d9" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401" /></svg>'
+  };
+  const setBadge = (emo) => {
+    const svg = emo ? BADGE[emo] : null;
+    if (!svg) { badge.classList.remove('on'); return; }
+    if (badge.dataset.emo !== emo) {   // 同一个情绪不重画（重画会把过冲动画又播一遍）
+      badge.innerHTML = svg;
+      badge.dataset.emo = emo;
+    }
+    badge.classList.add('on');
+  };
 
   /* 动画重播：同名 animation 不会因为再挂一次 class 就重新播 —— 必须先摘掉
    * class、再强制一次重排（读 offsetWidth 就够），然后才挂回去。
@@ -167,8 +251,13 @@
    * 还藏着的时候就耗掉了，用户看到的是"淡到一半突然全亮"）。 */
   window.bubbleHost.onShow((s) => {
     document.body.classList.toggle('outline', !!s.outline);
+    document.body.classList.toggle('caret', !!s.caret);
+    document.body.classList.toggle('badge', !!s.badge);
     setPhase('pop');
   });
+  /* 情绪：跟**标签**走，不跟脸上的强度走（衰减回 calm 时角标不该自己变淡消失）。
+   * null = 收牌（calm / 未知情绪 / 新的一句话）。 */
+  window.bubbleHost.onEmotion((e) => setBadge(e));
   /* 出场动画：主进程等 FADE_MS 播完才真 hide（FADE_MS 与这里的 0.16s 是同一条）。 */
   window.bubbleHost.onFade(() => setPhase('fading'));
   /* 尾巴回正：泡体中线不再压在人物中线上时，尾巴往回挪（见 #tail 的注释）。 */
@@ -184,11 +273,14 @@
     document.body.classList.remove('fading');
     text.textContent = '';
     think.textContent = '';        // 上一轮的想法不能留到这一轮
+    shell.classList.remove('typing');
     shell.classList.add('waiting');
+    setBadge(null);          // 上一句的情绪不能挂到这一句上
     report();
   });
   window.bubbleHost.onChunk((t) => {
     if (shell.classList.contains('waiting')) shell.classList.remove('waiting');
+    shell.classList.add('typing');   // 出字中 → 光标（见 body.caret 那条 CSS）
     text.textContent += t;
     shell.scrollTop = shell.scrollHeight;
     report();
@@ -199,17 +291,20 @@
     think.textContent = t;
     report();
   });
-  window.bubbleHost.onEnd(() => shell.classList.remove('waiting'));
+  /* 说完：光标撤掉（留着会一直闪，像没说完）。整段播报没有打字过程，也要撤。 */
+  window.bubbleHost.onEnd(() => shell.classList.remove('waiting', 'typing'));
   window.bubbleHost.onAbort(() => {
     text.textContent = '';
     think.textContent = '';
-    shell.classList.remove('waiting');
+    shell.classList.remove('waiting', 'typing');
+    setBadge(null);
     report();
   });
   window.bubbleHost.onFull((t) => {
     text.textContent = t;
     think.textContent = '';        // 整段播报（提醒 / 番茄钟）没有想法，别留着旧的
-    shell.classList.remove('waiting');
+    shell.classList.remove('waiting', 'typing');
+    setBadge(null);                // 整段播报没有情绪（不是她说的话）
     report();
   });
 </script>

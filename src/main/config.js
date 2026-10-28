@@ -111,7 +111,25 @@ const DEFAULT_CONFIG = {
      * 让泡体不贴边、inside 时少挡脸。出处 tiny-roommate「allowed family is
      * top-left, top and top-right」（side 不参与）。尾巴会跟着回正指人。
      * 默认开（同上，纯位置美化）；关则永远严格居中上方。 */
-    floatBubbleAside: true
+    floatBubbleAside: true,
+    /* 气泡**流式打字光标**：她还在往外吐字时，正文末尾一根闪烁竖线。
+     * 与 waiting 的"…"分工：首字未到 = "…"（她在想），出字中 = 光标（她在说），
+     * 说完（bubble:end）= 都没了。
+     * 默认开（纯美化、不打扰不占资源）。关掉则只有 waiting 那一段。 */
+    floatBubbleCaret: true,
+    /* 气泡**停留时长随字数**：一句"好"和一段 150 字的解释都固定 9s，前者太久、
+     * 后者不够读完。开 = 按字数在 6s~14s 内插值（见 bubble.js 的 readTimeMs）。
+     * ⚠️ 这个区间是**估的**（中文默读约 5~7 字/秒 + 起手反应），没有资料支撑，
+     *    plan 里标为可选项；不喜欢就关掉，回到固定 9s。
+     * 默认开（同属美化，不打扰不占资源）。 */
+    floatBubbleReadTime: true,
+    /* 气泡**情绪角标**：她这句话什么心情，气泡右下角挂一个小图形（爱心 / 问号 /
+     * Z / 闪电…）。信号是每句末尾的 [emo:xxx] 标签（跟**标签**走，不跟脸上的
+     * 衰减走 —— 否则角标会自己变淡消失，看着像 bug）。
+     * 🔴 图形是 SVG 手绘的，**不用 emoji 字符**：① 字形随系统变（Win/Mac 两个样）；
+     *    ② llm.js 的清洗器本来就在丢 emoji，正文里放又会被洗掉。
+     * 默认开（纯美化）。calm 是常态，不挂牌。 */
+    floatBubbleMoodBadge: true
   },
   // 语音朗读。默认关（会出声，见上面的默认值取舍）：想听再在托盘「功能开关」里开。
   tts: {

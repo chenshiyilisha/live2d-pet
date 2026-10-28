@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('bubbleHost', {
   /* 尾巴回正量（px）：泡体被随机偏移/被屏幕边 clamp 后，尾巴要往回挪多少才
    * 仍然指着她。只在变化时下发。 */
   onTail: (cb) => ipcRenderer.on('bubble:tail', (_e, v) => cb(Number(v) || 0)),
+  /* 这句话的情绪标签（情绪角标）：[emo:xxx] 在流式末尾整段到达，null = 收牌。 */
+  onEmotion: (cb) => ipcRenderer.on('bubble:emotion', (_e, v) => cb(v == null ? null : String(v))),
   /* 内容尺寸变化时把"想要的窗口高度"报给主进程（主进程锚定底边往上长） */
   reportHeight: (h) => ipcRenderer.send('bubble:height', h)
 });

@@ -12,5 +12,8 @@ contextBridge.exposeInMainWorld('menuHost', {
   cancel: () => ipcRenderer.send('card:cancel'),
   /* 右键**松手**。⚠️ 必须在本窗也监听一条：划进卡片时光标常常已经离开主窗，
    * 主窗收不到这个 mouseup，没有这条就会一直挂到超时。 */
-  release: () => ipcRenderer.send('card:release')
+  release: () => ipcRenderer.send('card:release'),
+  /* 页面已按新相对坐标画完：子菜单翻到左侧时窗口原点会跳，主进程要
+   * 等这一声再把透明度拉回，否则会闪一帧「主卡跟着窗口飞」。 */
+  painted: () => ipcRenderer.send('card:painted')
 });

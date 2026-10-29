@@ -134,7 +134,11 @@ const DEFAULT_CONFIG = {
      * 🔴 图形是 SVG 手绘的，**不用 emoji 字符**：① 字形随系统变（Win/Mac 两个样）；
      *    ② llm.js 的清洗器本来就在丢 emoji，正文里放又会被洗掉。
      * 默认开（纯美化）。calm 是常态，不挂牌。 */
-    floatBubbleMoodBadge: true
+    floatBubbleMoodBadge: true,
+    /* 输入框闲置自动收起（秒）：点开对话框后这么久没打字 / 没发消息就 hideUI。
+     * 治"聊完一嘴输入条一直挂着"。0 = 不自动收（只能 Esc / 再点她之外的路径关）。
+     * ⚠️ 参数型，不进托盘（规矩 5）。下限由渲染层钳到 ≥15，防手滑写成 1 秒乱闪。 */
+    composerIdleSec: 120
   },
   // 语音朗读。默认关（会出声，见上面的默认值取舍）：想听再在托盘「功能开关」里开。
   tts: {

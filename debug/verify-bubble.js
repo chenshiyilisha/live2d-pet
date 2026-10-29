@@ -75,6 +75,15 @@ console.log('[B] main.js —— 分片路由收拢 + 生命周期接线');
   const abort = (m.match(/bubble\.abortStream\(\)/g) || []).length;
   ok(begin >= 2, `beginStream 挂在 chat:send 与 chat:proactive 两处（${begin}）`);
   ok(end >= 2 && abort >= 2, `endStream(${end}) / abortStream(${abort}) 成对接线`);
+  /* success 短句绝不能在有正文后无条件 showStatus：endStream 已放流，
+   * arbiter 会放行，「搞定啦」会盖掉刚流出的回复。 */
+  ok(/if \(!workChunkSeen\) bubble\.showStatus\('搞定啦/.test(m),
+    'success 短句仅在无正文时露（有 chunk 不盖对话气泡）');
+  /* 报错要把真实原因（响应中断 / 连接失败）放进气泡，不能只写「出了点问题」。 */
+  ok(/emitWorkState\('error',\s*\{\s*message:\s*res\?\.error/.test(m),
+    'chat:send 失败时把 res.error 传给 emitWorkState');
+  ok(/extra\.message/.test(m) && /出了点问题…/.test(m),
+    'error status 优先用 extra.message，缺省才回退「出了点问题…」');
 
   ok(/bubble\.setQuiet\(quiet\)/.test(m), '全屏静默会收掉气泡');
   ok(/bubble\.refreshConfig\(\)/.test(m), 'patchConfig 后刷新气泡开关');

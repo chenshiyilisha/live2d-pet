@@ -199,13 +199,14 @@ console.log('\n══════ 6. 新增的"参数型"键必须有默认值�
   check(cfg.chat.floatBubbleCaret === true, '气泡打字光标默认开（纯美化）');
   check(cfg.chat.floatBubbleReadTime === true, '气泡停留时长随字数默认开（固定 9s 短话太久、长话不够读）');
   check(cfg.chat.floatBubbleMoodBadge === true, '气泡情绪角标默认开（纯美化；calm 常态不挂牌）');
+  check(cfg.chat.composerIdleSec === 120, '输入框闲置 120s 自动收起（长时间不对话）');
   writeCfg({ chat: { floatBubble: false } });   // 老配置：只有 floatBubble 这一个键
   const c4 = config.loadConfig();
   check(c4.chat.floatBubbleOutline === false && c4.chat.floatBubbleJitter === true &&
     c4.chat.floatBubbleWiden === true && c4.chat.floatBubbleAside === true &&
     c4.chat.floatBubbleCaret === true && c4.chat.floatBubbleReadTime === true &&
-    c4.chat.floatBubbleMoodBadge === true,
-    '老配置里缺这七个键时按默认值补上（逐段逐键合并，规矩 1）');
+    c4.chat.floatBubbleMoodBadge === true && c4.chat.composerIdleSec === 120,
+    '老配置里缺 chat 新键时按默认值补上（逐段逐键合并，规矩 1）');
   check(c4.chat.floatBubble === false, '补键的同时不顶掉用户写的 floatBubble');
 }
 

@@ -615,17 +615,30 @@ function writeOwn(key, own, amt) {
   expPrev.set(key, amt);
 }
 
+/* 贴图开关是 0/1 语义。写成 0.3/0.6 = 半透明鬼影叠在脸上
+ * （用户报：模型自己衰减/切表情时，上一档表情半透明覆盖）。
+ * 共享参数仍跟 advanceAmt 平滑走；专属只在接近满档时开、一掉就关。 */
+const STICKER_ON = 0.85;
+function gateSticker(raw) {
+  return raw >= STICKER_ON ? 1 : 0;
+}
+
 /* 插值**之后**（applyEmotion 之后）：写三层的专属参数。 */
 function applyExpressions() {
   if (!emoExp.size && !evExp.size && !propExp.size) return;
   const on = cfg?.appearance?.expressions !== false && cfg?.appearance?.stickers !== false;
   for (const [emo, d] of emoExp) {
-    writeOwn(emo, d.own, on ? (expAmt.get(emo) ?? 0) : 0);
+    /* 情绪贴图不跟 advanceAmt 滑：那是共享参数（眉/嘴）的曲线。
+     * 贴图只认「是不是当前情绪、衰减是不是还接近满档」—— 否则
+     * Picard 回落时 wink/眼泪会以 0.4 强度半透明盖脸。 */
+    const onNow = on && emo === emotion && decayAmt >= STICKER_ON;
+    writeOwn(emo, d.own, onNow ? 1 : 0);
   }
   if (evName) {
     const d = evExp.get(evName);
-    writeOwn('ev:' + evName, d?.own, expAmt.get('ev:' + evName) ?? 0);
+    writeOwn('ev:' + evName, d?.own, gateSticker(expAmt.get('ev:' + evName) ?? 0));
   }
+  /* 道具故意保留软淡出：换装要有收纳感，不是表情开关。 */
   if (propCur) {
     const d = propExp.get(propCur.file);
     writeOwn('prop', d?.own, expAmt.get('prop') ?? 0);
@@ -695,7 +708,12 @@ function stopEventMotions() {
   catch { /* ignore */ }
 }
 
-/* 切情绪。目标变了之后由 ticker 逐帧插值过去，不会硬切。 */
+/* 切情绪。16 字段目标变了之后由 ticker 逐帧插值过去，不会硬切。
+ * ⚠️ exp3 专属贴图（开心兴奋的 wink / 生气的波浪嘴…）**不能**跟旧档交叉淡：
+ *    advanceAmt 会让上一档 amt 还在往 0 滑时新档已经往 1 爬 —— 两张贴图
+ *    同时 writeOwn，看起来就是「开心和平静叠在一张脸上」（用户报过）。
+ *    与 emote() 换事件表情同一条规矩：换档立刻卸下旧档专属参数，新档再淡入。
+ *    共享参数（眉/嘴形）仍走 emoEff 插值，脸型过渡照旧柔。 */
 function setEmotion(name) {
   if (!EMOTION[name]) return;
   /* 衰减的账清零。🔴 必须放在早退**之前**：同一个情绪再次触发
@@ -705,6 +723,15 @@ function setEmotion(name) {
   decayMs = 0;
   decayActive = false;
   if (name === emotion) return;
+  for (const [emo, d] of emoExp) {
+    if (emo === name) continue;
+    const amt = expAmt.get(emo) ?? 0;
+    if (amt > 0 || (expPrev.get(emo) ?? 0) > 0) {
+      for (const p of d.own ?? []) setParam(p.id, p.def);
+    }
+    expAmt.set(emo, 0);
+    expPrev.set(emo, 0);
+  }
   emotion = name;
   emoTarget = EMOTION[name];
   /* 重抽这一趟的节奏抖动（就为这一件事：同一句情绪两次进入别长得一模一样）。
@@ -2627,12 +2654,48 @@ function say(text, autoHideMs = 9000) {
   }, autoHideMs);
 }
 
+/* 输入框闲置自动收起（chat.composerIdleSec，默认 120s）。
+ * 打字 / 发消息 / 再打开都会重新计时；她还在回（busy）时到点再顺延一轮，
+ * 不中途把对话框抽走。0 = 关。 */
+let composerIdleTimer = null;
+
+function composerIdleMs() {
+  const n = Number(cfg?.chat?.composerIdleSec);
+  if (n === 0) return 0;
+  const sec = Number.isFinite(n) && n > 0 ? n : 120;
+  return Math.min(3600, Math.max(15, sec)) * 1000;
+}
+
+function clearComposerIdle() {
+  clearTimeout(composerIdleTimer);
+  composerIdleTimer = null;
+}
+
+function armComposerIdle() {
+  clearComposerIdle();
+  const ms = composerIdleMs();
+  if (!ms) return;
+  if (composer.classList.contains('hidden')) return;
+  composerIdleTimer = setTimeout(() => {
+    composerIdleTimer = null;
+    if (composer.classList.contains('hidden')) return;
+    /* 还在等她回 / 还在念 —— 对话没停，再给一轮，别把输入条抽掉。 */
+    if (busy || state === State.THINKING || state === State.SPEAKING) {
+      armComposerIdle();
+      return;
+    }
+    hideUI();
+  }, ms);
+}
+
 function showComposer() {
   composer.classList.remove('hidden');
   setTimeout(() => input.focus(), 30);
+  armComposerIdle();
 }
 
 function hideUI() {
+  clearComposerIdle();
   composer.classList.add('hidden');
   if (floatBubble()) {
     window.pet?.floatHide?.();
@@ -3251,6 +3314,7 @@ async function sendMessage() {
 
   busy = true;
   input.value = '';
+  armComposerIdle();   // 刚开口：从这轮对话起重新算闲置
 
   /* 上一轮她还没念完就被这一条打断 —— 分两步，顺序不能反：
    *   ① 先把"她实际说到哪了"截进历史（读的是 tts.js 那笔已念出的账，
@@ -3290,7 +3354,10 @@ async function sendMessage() {
   if (!floatBubble()) bubble.classList.remove('waiting');
 
   if (!res?.ok) {
-    showStatus(res?.error || '请求失败');
+    /* 浮窗开着时，错误已由主进程 emitWorkState → bubble.showStatus 说过了
+     * （响应中断 / 连接失败…）；这里再 showStatus 会在对话框脚下一份重复。
+     * 浮窗关着才用窗内 #status 兜底。 */
+    if (!floatBubble()) showStatus(res?.error || '请求失败');
     history.pop();
     /* 已经念出去半句话，剩下的不念了 —— 失败时不该继续把残缺内容读完。 */
     stopSpeaking();
@@ -3298,6 +3365,7 @@ async function sendMessage() {
     if (!floatBubble()) bubble.classList.add('hidden');
     setState(State.IDLE);
     busy = false;
+    armComposerIdle();
     return;
   }
 
@@ -3317,6 +3385,7 @@ async function sendMessage() {
     if (!busy) return;
     setState(State.IDLE);
     busy = false;
+    armComposerIdle();   // 忙完了才真正开始"不对话"计时
   }, 1400);
 
   pokeIdleTimer();
@@ -3333,7 +3402,10 @@ input.addEventListener('keydown', (e) => {
     e.preventDefault();
     hideUI();
   }
+  /* 还在打字 = 对话没停，闲置计时重来（含 IME 组字中的键）。 */
+  if (e.key !== 'Escape') armComposerIdle();
 });
+input.addEventListener('input', () => armComposerIdle());
 
 // 拖动窗口或误点都不该让输入框失去焦点后没法再点回来
 window.addEventListener('keydown', (e) => {

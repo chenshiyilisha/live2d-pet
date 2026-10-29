@@ -172,6 +172,23 @@ console.log('\n[B] 渲染层链路');
 
   /* 事件表情的退场 */
   ok(/evTarget = 0/.test(pet), '事件表情到时会退（evTarget 置 0）');
+
+  /* 切情绪时立刻卸下其他档的专属贴图 —— 否则 advanceAmt 交叉淡期间
+   * 两张贴图同时 writeOwn，开心 wink 叠在平静脸上（用户报过）。 */
+  const setEmoBody = (() => {
+    const i = pet.indexOf('function setEmotion(');
+    return i < 0 ? '' : pet.slice(i, pet.indexOf('\nfunction ', i + 1));
+  })();
+  ok(/for \(const \[emo, d\] of emoExp\)/.test(setEmoBody) &&
+    /expAmt\.set\(emo, 0\)/.test(setEmoBody) &&
+    /setParam\(p\.id, p\.def\)/.test(setEmoBody),
+    'setEmotion 换档立刻清其他情绪的 expAmt / 专属参数（不与新档交叉叠贴图）');
+
+  /* 情绪/事件专属贴图必须门控成 0/1：跟 decayAmt 平滑滑 = 半透明鬼影。 */
+  ok(/function gateSticker\(/.test(pet) && /STICKER_ON/.test(pet),
+    'gateSticker / STICKER_ON 存在（贴图开关语义，禁止中间透明度）');
+  ok(/decayAmt >= STICKER_ON/.test(pet),
+    '情绪贴图看 decayAmt 阈值（衰减一开始掉档就卸贴图，不留半透明）');
 }
 
 /* ── C. 配置与托盘 ───────────────────────────────────── */

@@ -147,17 +147,38 @@ let hotKey = '';
 const svgNS = (paths, cls) =>
   `<svg viewBox="0 0 24 24"><g class="${cls}">${paths}</g></svg>`;
 
-/* 画一张卡。尺寸从下发值来（规矩 9：常量在 geom，页面不写死）。
- * ⚠️ 用 `textContent` 逐段塞，不拼 innerHTML —— 标签以后可能来自角色名/配置，
- *    拼字符串迟早被 `<` 咬一口。 */
-function build(el, spec) {
-  if (!spec) { el.style.display = 'none'; el.textContent = ''; return; }
+/* 槽位内容是否相同：进/出子菜单时主卡项不变，只变几何 + 子卡。
+ * 相同就不拆 DOM —— 否则 textContent='' 重建会清掉 .hot，划过有 kids 的行时闪一下。 */
+function slotsSame(a, b) {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i], y = b[i];
+    if (!!x.sep !== !!y.sep) return false;
+    if (x.sep) continue;
+    if (x.i !== y.i || x.label !== y.label || x.sub !== y.sub ||
+        x.icon !== y.icon || !!x.hasKids !== !!y.hasKids) return false;
+  }
+  return true;
+}
+
+function layoutCard(el, spec) {
   el.style.display = '';
   el.style.left = spec.x + 'px';
   el.style.top = spec.y + 'px';
   el.style.width = spec.w + 'px';
   el.style.height = spec.h + 'px';
   el.style.transformOrigin = `${spec.origin.x}px ${spec.origin.y}px`;
+}
+
+/* 画一张卡。尺寸从下发值来（规矩 9：常量在 geom，页面不写死）。
+ * ⚠️ 用 `textContent` 逐段塞，不拼 innerHTML —— 标签以后可能来自角色名/配置，
+ *    拼字符串迟早被 `<` 咬一口。
+ * keepDom：槽位没变时只改 left/top/size，保留行节点和高亮。 */
+function build(el, spec, keepDom) {
+  if (!spec) { el.style.display = 'none'; el.textContent = ''; return; }
+  layoutCard(el, spec);
+  if (keepDom && el.children.length) return;
   el.textContent = '';
   for (const s of spec.slots) {
     if (s.sep) { el.appendChild(document.createElement('div')).className = 'sep'; continue; }
@@ -195,9 +216,12 @@ function build(el, spec) {
 }
 
 function paint() {
+  /* ⚠️ 必须用 classList.contains('row')，不能写 className !== 'row'：
+   * 一旦加了 hot，className 变成 "row hot"，旧判定会跳过该行 →
+   * 再也清不掉高亮，划过后会留下多条蓝底（用户报过）。 */
   for (const [name, el] of [['main', $main], ['sub', $sub]]) {
     for (const r of el.children) {
-      if (r.className !== 'row') continue;
+      if (!r.classList.contains('row')) continue;
       r.classList.toggle('hot', hotKey === name + ':' + r.dataset.i);
     }
   }
@@ -213,11 +237,17 @@ window.menuHost.onShow((d) => {
   if (m.padY != null) root.setProperty('--pad-y', m.padY + 'px');
   if (m.iconW) root.setProperty('--icon-w', m.iconW + 'px');
 
-  cards.main = d.main ? d.main.slots : [];
-  cards.sub = d.sub ? d.sub.slots : [];
-  build($main, d.main);
-  build($sub, d.sub);
-  hotKey = '';
+  const nextMain = d.main ? d.main.slots : [];
+  const nextSub = d.sub ? d.sub.slots : [];
+  const keepMain = !d.entry && slotsSame(cards.main, nextMain);
+  const keepSub = !d.entry && slotsSame(cards.sub, nextSub);
+  cards.main = nextMain;
+  cards.sub = nextSub;
+  build($main, d.main, keepMain);
+  build($sub, d.sub, keepSub);
+  /* 进/出子菜单不要清 hotKey：否则有 kids 的行悬停展开时高亮会闪掉一帧。
+   * 首次入场才重置。 */
+  if (d.entry) hotKey = '';
   paint();
 
   /* 入场只在**第一次**出现时播：进/出子菜单会重发 show，每次都弹一下会很吵。 */
@@ -226,6 +256,12 @@ window.menuHost.onShow((d) => {
     void $main.getBoundingClientRect();
     $main.classList.add('entry');
   }
+
+  /* 两帧后再告知主进程：第一帧吃掉布局，第二帧吃掉绘制。子菜单左右翻转时
+   * 窗口原点会变，主进程靠这声才恢复不透明，避免主卡闪一帧。 */
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => { try { window.menuHost.painted(); } catch { /* ignore */ } });
+  });
 });
 
 /* 高亮由主进程轮询算出后下发（命中不靠本层鼠标事件 —— 右键在主窗按下、

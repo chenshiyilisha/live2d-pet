@@ -14,8 +14,10 @@
  *
  * 🔴 命中判定在**主进程轮询**，与事件归属无关：右键是在主窗按下的，松手/划过时
  *    鼠标很可能已经在卡片窗甚至别的窗口上方。
- * 🔴 窗口 bounds **贴着内容**（开子菜单就改一次大小）：透明窗的空白区照吃鼠标
- *    （不做逐像素命中），预留一大块会把用户点别的应用的点击吞掉。
+ * 🔴 窗口 bounds：首次打开就按「主卡 ∪ 每个 kids 子菜单可能占地」算死。
+ *    进/出子菜单**不再 setBounds** —— Electron 透明窗改大小会闪一整帧
+ *    （electron#39834）。空白区仍吃鼠标，但只在菜单开着时、且点空白 = 取消，
+ *    比每次展开闪一下更可接受。
  *
  * 两种选中方式（与泡泡那版一致，用户拍板"两者都要"）：
  *   ① 手势态：右键按住 → 划到某行 → 松手执行
@@ -60,6 +62,8 @@ let timer = null;
 let dwellTimer = null;
 let timeoutTimer = null;
 let gen = 0;                 // 代际令牌（规矩 16：周期任务自调度 + 令牌取消）
+let paintGen = 0;            // 等页面画完再显形（子菜单左右翻转用）
+let paintWaiters = [];
 let done = true;             // 一次打开只提交一次
 
 const hasKids = (it) => !!(it && Array.isArray(it.kids) && it.kids.length);
@@ -111,12 +115,46 @@ function slotsOf(items, lay) {
   });
 }
 
-/* 摆位 + 下发。进/出子菜单也走这里 —— 项数一变卡片尺寸就变，窗口 bounds
- * 必须跟着改，复用同一个函数才不会漏。 */
+function flushPaintWaiters() {
+  const q = paintWaiters.slice();
+  paintWaiters.length = 0;
+  for (const fn of q) { try { fn(); } catch { /* ignore */ } }
+}
+
+/* 等页面两帧画完；超时也放行，免得 IPC 丢了菜单永远透明。 */
+function waitPainted() {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, 80);
+    paintWaiters.push(() => { clearTimeout(t); resolve(); });
+  });
+}
+
+/* 每个带子菜单的顶层项，按它展开时的真实摆位塞进 rects。
+ * 首次打开就把这些占地并进窗口 —— 之后进/出子菜单 bounds 不变，避免 setBounds 闪。 */
+function pushKidsReserves(rects, pos, size, items, lay, wa) {
+  if (!lay || !lay.rows) return;
+  for (const row of lay.rows) {
+    const it = items[row.i];
+    if (!hasKids(it)) continue;
+    const layK = G.card(it.kids);
+    const posK = G.placeSub(pos, size, row.y, layK, wa);
+    rects.push(rectOf(posK, layK));
+  }
+}
+
+function boundsEqual(a, b) {
+  return !!a && !!b
+    && a.x === b.x && a.y === b.y
+    && a.width === b.width && a.height === b.height;
+}
+
+/* 摆位 + 下发。进/出子菜单也走这里；窗口大小在首次打开时按 kids 预留钉死，
+ * 之后只改页面里的子卡显隐，不再 setBounds。 */
 function placeAndSend(entry) {
   if (!win || win.isDestroyed()) return;
   const wa = workAreaAt(anchor);
-  sizeMain = G.card(mainItems);
+  layMain = G.card(mainItems);
+  sizeMain = layMain;
   posMain = G.place(anchor, sizeMain, wa);
 
   let subRow = null;
@@ -130,10 +168,21 @@ function placeAndSend(entry) {
     posSub = G.placeSub(posMain, sizeMain, subRow ? subRow.y : 0, sizeSub, wa);
   }
 
-  /* ⚠️ bounds 必须**先**算出来：两张卡片的相对坐标都要减它。 */
+  /* ⚠️ bounds 必须**先**算出来：两张卡片的相对坐标都要减它。
+   * 并上所有 kids 可能占地，保证开子菜单时 nextBounds === bounds。 */
   const rects = [rectOf(posMain, sizeMain)];
   if (posSub) rects.push(rectOf(posSub, sizeSub));
-  bounds = G.boundsOf(rects);
+  pushKidsReserves(rects, posMain, sizeMain, mainItems, layMain, wa);
+  const nextBounds = G.boundsOf(rects);
+
+  /* 透明窗 setBounds 本身就会闪（即便只改宽、原点不动）。
+   * 尺寸没变就绝对不要调；真要改（极少：首次显形）才走 setBounds。
+   * 若可见时原点还跳了，先透明等 painted，避免主卡错位一帧。 */
+  const wasVisible = win.isVisible();
+  const moved = !boundsEqual(nextBounds, bounds);
+  const originMoved = wasVisible && moved
+    && (nextBounds.x !== bounds.x || nextBounds.y !== bounds.y);
+  bounds = nextBounds;
 
   const specSub = posSub ? {
     x: posSub.x - bounds.x,
@@ -146,10 +195,16 @@ function placeAndSend(entry) {
     origin: { x: 0, y: G.PAD_Y + (subRow ? subRow.h / 2 : 0) }
   } : null;
 
-  win.setBounds({ x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height });
-  win.showInactive();                       // 不抢焦点
+  if (originMoved) {
+    try { win.setOpacity(0); } catch { /* ignore */ }
+  }
 
-  win.webContents.send('card:show', {
+  if (moved) {
+    win.setBounds({ x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height });
+  }
+  if (!wasVisible) win.showInactive();      // 已可见时不要再 show（也会闪）
+
+  const payload = {
     size: { width: bounds.width, height: bounds.height },
     metric: { itemH: G.ITEM_H, sepH: G.SEP_H, padY: G.PAD_Y, iconW: G.ICON_W },
     main: {
@@ -168,7 +223,18 @@ function placeAndSend(entry) {
     sub: specSub,
     tint: opts.tint !== false,
     entry: !!entry
-  });
+  };
+
+  win.webContents.send('card:show', payload);
+
+  if (originMoved) {
+    const my = ++paintGen;
+    waitPainted().then(() => {
+      if (my !== paintGen || done) return;
+      if (!win || win.isDestroyed()) return;
+      try { win.setOpacity(1); } catch { /* ignore */ }
+    });
+  }
 }
 
 function sendHover() {
@@ -275,7 +341,14 @@ function startPoll() {
 function hide() {
   stopPoll();
   clearDwell();
-  try { if (win && !win.isDestroyed()) win.hide(); } catch { /* 正在销毁 */ }
+  paintGen += 1;
+  flushPaintWaiters();
+  try {
+    if (win && !win.isDestroyed()) {
+      try { win.setOpacity(1); } catch { /* ignore */ }
+      win.hide();
+    }
+  } catch { /* 正在销毁 */ }
 }
 
 function finish(id) {
@@ -359,6 +432,7 @@ function dispose() {
 ipcMain.on('card:pick', (_e, h) => { if (!done) commit(h && typeof h === 'object' ? h : { card: 'main', i: Number(h) }); });
 ipcMain.on('card:cancel', () => finish(null));
 ipcMain.on('card:release', () => release());
+ipcMain.on('card:painted', () => flushPaintWaiters());
 
 module.exports = {
   show, cancel, dispose, isOpen, release,

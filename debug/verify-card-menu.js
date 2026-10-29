@@ -209,6 +209,28 @@ head('F 接线与状态机');
     'preload 用 card: 前缀（三个菜单模块共用 menu: 会互相收到对方消息）');
   ok(!/setIgnoreMouseEvents/.test(src) && !/setIgnoreMouseEvents/.test(html),
     '不做鼠标穿透（同轮盘：卡片窗自己收 click）');
+  /* 子菜单翻到左侧时窗口原点会跳：先 setOpacity(0) → 等 card:painted → 再显回，
+   * 否则 setBounds 与 DOM 相对坐标不同步会闪一帧。 */
+  ok(/setOpacity\(0\)/.test(src) && /originMoved/.test(src),
+    '窗口原点变化时先透明（防子菜单左右翻转闪主卡）');
+  ok(/card:painted/.test(src) && /painted/.test(pre),
+    'preload/主进程接 card:painted（页面画完再恢复不透明）');
+  ok(/requestAnimationFrame[\s\S]*requestAnimationFrame[\s\S]*painted/.test(html),
+    '页面两帧后再 painted（布局 + 绘制）');
+  /* 进/出子菜单会重发 card:show。主卡槽位没变时不能 textContent='' 重建，
+   * 也不能清 hotKey —— 否则划过有 kids 的行悬停展开时高亮会闪一帧。 */
+  ok(/function slotsSame\(/.test(html) && /keepMain/.test(html) && /keepDom/.test(html),
+    '槽位未变时 keepDom，不拆主卡行节点');
+  ok(/if \(d\.entry\) hotKey = ''/.test(html),
+    '只有首次入场才清 hotKey（进/出子菜单保留高亮）');
+  /* Electron 透明窗 setBounds 会闪（#39834）。首次打开预留所有 kids 占地，
+   * 进/出子菜单 bounds 不变 → 跳过 setBounds；已可见时也不再 showInactive。 */
+  ok(/function pushKidsReserves\(/.test(src) && /pushKidsReserves\(rects/.test(src),
+    '首次摆位并上每个 kids 子菜单占地（进/出不再改窗）');
+  ok(/if \(moved\) \{\s*win\.setBounds/.test(src),
+    'bounds 没变就不 setBounds');
+  ok(/if \(!wasVisible\) win\.showInactive\(\)/.test(src),
+    '已可见时不重复 showInactive');
 }
 
 head('G 页面');
@@ -229,6 +251,13 @@ head('G 页面');
     '卡片用 box-shadow 不用 filter: drop-shadow（圆角矩形不必按合成轮廓算）');
   ok(/entry/.test(html) && /animation: grow/.test(html), '只做入场动画（关闭要立刻）');
   ok(!/textContent\s*\+?=\s*[^;]*\$\{/.test(html), '文字不拼 innerHTML（标签以后可能来自角色名/配置）');
+  /* 高亮刷新必须用 classList.contains('row')：className !== 'row' 在加了 hot
+   * 后会变成 "row hot" 而跳过该行，旧蓝底永远清不掉（多条同时高亮）。
+   * ⚠️ 对去注释后的正文断言 —— 注释里会写旧写法当反面教材。 */
+  ok(/classList\.contains\(\s*['"]row['"]\s*\)/.test(htmlLive),
+    'paint 用 classList.contains("row") 识别行（避免 hot 后 className 对不上）');
+  ok(!/className\s*!==\s*['"]row['"]/.test(htmlLive) && !/className\s*===\s*['"]row['"]/.test(htmlLive),
+    'paint 不用 className ===/!== "row"（会漏掉已高亮行）');
 }
 
 head('H 取色与对比度');

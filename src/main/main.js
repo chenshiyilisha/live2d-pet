@@ -2058,9 +2058,19 @@ function emitWorkState(phase, extra = {}) {
   try {
     mainWindow?.webContents.send('pet:work-state', { phase, ...extra });
   } catch { /* ignore */ }
-  /* status 气泡：只在非对话流时露短句（stream 占用时 arbiter 会拒） */
-  if (phase === 'success') bubble.showStatus('搞定啦 ✓', 2200);
-  else if (phase === 'error') bubble.showStatus('出了点问题…', 2800);
+  /* status 气泡：只在**没吐过正文**时露短句。
+   * ⚠️ 以前在 endStream 之后无条件 showStatus —— stream 已释放，arbiter 放行，
+   *    「搞定啦 ✓」会 bubble:full 盖掉刚流完的整段回复（用户报：发什么都只回搞定啦）。
+   *    有 chunk 就留给 endStream 的对话气泡；没吐字（静默/空回）才露短句。
+   *    报错仍必达，且要带上真实原因（响应中断 / 连接失败…），别只写「出了点问题」。 */
+  if (phase === 'success') {
+    if (!workChunkSeen) bubble.showStatus('搞定啦 ✓', 2200);
+  } else if (phase === 'error') {
+    const raw = typeof extra.message === 'string' ? extra.message.trim() : '';
+    /* 气泡一行装不下长 HTTP 正文；截短后仍能认出「响应中断」「连接失败」。 */
+    const msg = (raw ? raw.replace(/\s+/g, ' ').slice(0, 72) : '') || '出了点问题…';
+    bubble.showStatus(msg, Math.max(2800, Math.min(6000, 2000 + msg.length * 40)));
+  }
 }
 
 /* 聊天分片 / 情绪 / 想法的**唯一出口**：主窗渲染层拿它累积 replyBuffer
@@ -2781,7 +2791,11 @@ function registerIpc() {
         const local = await tryLocalIntent(last?.content);
         if (local) {
           bubble.endStream();
-          emitWorkState(local?.ok === false ? 'error' : 'success');
+          if (local?.ok === false) {
+            emitWorkState('error', { message: local.error || '出了点问题…' });
+          } else {
+            emitWorkState('success');
+          }
           return local;
         }
       } catch (err) {
@@ -2794,12 +2808,12 @@ function registerIpc() {
         emitWorkState('success');
       } else {
         bubble.abortStream();
-        emitWorkState('error');
+        emitWorkState('error', { message: res?.error });
       }
       return res;
     } catch (err) {
       bubble.abortStream();
-      emitWorkState('error');
+      emitWorkState('error', { message: String(err?.message || err) });
       throw err;
     }
   });

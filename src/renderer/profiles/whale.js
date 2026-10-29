@@ -64,7 +64,12 @@ export const WHALE = {
      *  成立 —— 而用户缩放（userScale）恰是日常会改 s/vh 比的操作。** */
     anchorY: 'bottom',
     inkTopCRatio: 0.328,    // 墨水顶部 C 项 = vh × 此值（真实值，见上；hiyori 是 0.2）
-    petScale: 0.5,          // 人物宽 292css@H328（窗口自动跟宽到 ~340），高占 75%
+    /* 0.5 → 0.253（2026-10-29，用户："让它小一点，至少让宽度看着跟底座一样宽"）。
+     * 人物宽 = 584 × petScale（@H328 标定点），0.253 → 宽 ≈148css，正好压到
+     * 底座牌那一档（PLATE_HALF×2 = 148，pet.js）；高 ≈125css（原先 292×247）。
+     * ⚠️ 用户的日常微调走托盘/右键的放大缩小（appearance.scale，0.5~1.4 实时生效），
+     *    这个基准值只定"100% 时她多大"。 */
+    petScale: 0.253,        // 人物宽 ≈148css@H328（= 底座牌宽），高 ≈125css
     headPadRatio: 0.0431,   // 底部锚定不参与（顶部锚定模型专用），保留契约完整
     inkTopK: 319,           // 墨水顶部 = vh×inkTopCRatio + inkTopK × s（真实 b，见上）
     inkH: 2111,             // 墨水总高（canvas 单位，呆毛尖 → 桌布底）
@@ -199,5 +204,32 @@ export const WHALE = {
     cheek: 2.8,
     headZ: 3.2, headY: 3.2,
     shoulder: 2.6, bodyY: 2.2, bodyZ: 2.2
+  },
+
+  /* ============================================================
+   *  情绪 → 自带表情贴纸（expressions/*.exp3.json，VTS 模型包自带的
+   *  44 个表情预设；model3.json 没注册它们 → 引擎不认识，我们自己解析）。
+   *
+   *  为什么选这几个：**只挑"贴纸/道具类专属参数"**（ParamCheekNN 开关），
+   *  剩下那批写 BrowL 系、MouthForm、EyeLOpen 的表情预设与上面 16 字段
+   *  **共享同一批参数**，混写会和 applyEmotion 的撤销法打架 —— 那部分
+   *  由 pet.js 的加载器**自动过滤**（以 param 表的值集合为准），这里
+   *  映射错了也只是不显示，不会脏脸。
+   *
+   *  上表没有 smile 专属锚点（eyeSmile 写了白写），用「吐舌」补"俏皮"；
+   *  happy 的星星眼补"这模型没有微笑眼参数"的缺（param 注释同源）。
+   *  文件名必须与 expressions/ 目录逐字一致（中文名，fetch 会编码）。
+   *  hiyori 没有这素材，档案不写 stickers → 功能整体自动禁用。
+   * ========================================================== */
+  stickers: {
+    happy:     '星星眼',
+    smile:     '吐舌',
+    think:     '问号',
+    shy:       '流汗',
+    serious:   '阴暗',
+    surprised: '感叹号',
+    sleepy:    '闭眼口水'
+    /* calm 不配 —— 平静就该是素脸。生气那组（ParamCheek80 贴纸 +
+     * Brow 全套共享参数）等 8 档之外有"生气"情绪档再接。 */
   }
 };

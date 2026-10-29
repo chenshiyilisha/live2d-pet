@@ -58,6 +58,11 @@ const DEFAULT_CONFIG = {
    * ⚠️ 上下限与这里的默认值同在 llm.js 的 LLM_TIMEOUT —— 改一处必须改两处
    *    （verify-llm 有断言拦这条）。 */
   llm: {
+    /* 上次选中的预设（见 llm-providers.js 的 PROVIDERS）。
+     * 它**只是标签**：真正发请求用的仍然是下面 baseUrl / model 两个值。
+     * 这样手改过地址的用户不会被"选中预设"悄悄顶回默认端点。
+     * 旧配置里没有这个键时，托盘标题回落成"自定义"。 */
+    provider: 'deepseek',
     baseUrl: 'https://api.deepseek.com/v1',
     apiKey: '',
     model: 'deepseek-chat',
@@ -245,7 +250,13 @@ const DEFAULT_CONFIG = {
      * 📌 2026-10-15 起源纹理已永久降为 1024（省 ~170MB 运行内存，README 有说明），
      * 本开关对当前素材自然不触发；保留给将来更大纹理的素材。
      * 默认开。关掉 = 纹理完全不动（排查画质问题时用）。 */
-    textureLod: true
+    textureLod: true,
+    /* 情绪贴纸 —— 模型自带 exp3 表情里挑"贴纸类专属参数"（星星眼/问号/
+     * 感叹号/流汗/阴暗/闭眼口水/吐舌）叠到对应情绪档上，随情绪强度淡入淡出
+     * （加载与叠加见渲染层 pet.js 的 loadStickers / applyStickers）。
+     * whale 独有：hiyori 档案没有 stickers 段，这开关对它无效。
+     * 默认开：纯显示增强、不占资源不打扰；关掉走淡出，不会瞬闪。 */
+    stickers: true
     /* 这里原本有 model: 一个可选的模型名。春移除后模型固定成日和，
      * 不再是可配置项 —— 档案键只在渲染层 profiles/hiyori.js 的 name 写一次
      * （params.js 的 MODEL_NAME 引它，见 verify-rename）。 */
@@ -274,6 +285,48 @@ const DEFAULT_CONFIG = {
   /* 角色交互反馈 */
   interaction: {
     rightMenu: true,      // 在角色身上右键弹出快捷菜单
+    /* 快捷菜单用**自绘轮盘**（右键按住 → 划向扇区 → 松手执行）。
+     * 默认开：纯交互美化、不占资源不打扰（规矩 24 只管打扰 / 占资源类）。
+     * 关掉则退回系统原生菜单（Menu.popup）—— 原生样式改不了，但它是兜底。
+     *
+     * 为什么做成轮盘（有依据，不是图好看）：
+     *   - 同领域的 JPet（Live2D 桌宠）官网原话「右键按住：显示轮盘菜单」。
+     *   - 子级显示在圆心 = Wave Menu，ACHI 2024 综述说它优于"一次只显示
+     *     一层"的重叠式子菜单。
+     *   - Kurtenbach & Buxton 实测：4 项 × 4 层错误率约 5%，8 项 × 2 层 < 10%，
+     *     但每层 8 项且深度 > 1 会迅速飙过 10% → 每层压在 4~6 项。 */
+    radialMenu: true,
+    /* 角色身上的右键菜单用哪种形态（三选一，2026-10-29 定版）：
+     *   'card'（默认）= **光标右下弹出竖排卡片**，原生菜单的形态 + 自绘的皮
+     *   'bubble'      = 头顶冒一排泡泡（**技术储备**，代码完整保留）
+     *   'wheel'       = 自绘轮盘（**技术储备**，代码完整保留）
+     *
+     * 为什么最终是卡片（前两个都真机跑过，都被用户否了）：
+     *   - 轮盘：扇区 44px 厚塞「图标+标签+当前值」是几何死局（实测距外缘只剩
+     *     2.8px）；MIT 6.831 原话「pie 快 15~20%，但效率优势不足以抵消线性菜单的
+     *     外部一致性与布局简单性」—— 我上次只引了前半句。
+     *   - 头顶泡泡：离散圆点没有"菜单"的轮廓，视线要跳 N 次逐个对准圆形目标；
+     *     也没有先例（桌宠 / 设计规范 / HCI 三处都查过）。
+     *   - 卡片：VS Code / Discord / Figma / Slack 的右键菜单**都自己画**，但
+     *     都保留"光标处弹出的垂直列表"这个形态 —— 好看 + 可预测唯一有大量
+     *     先例的组合。Apple HIG 还直接给了细节：左上角对齐光标右下、贴边翻转、
+     *     ≤3 组用分隔线、最多一级子菜单、破坏性项放最后。 */
+    petMenu: 'card',
+    /* 卡片/泡泡带底色（淡冷色面 + 悬停一档明显的蓝）。关掉退回纯白。
+     * 色值沿用轮盘验过的那一组（同一套 WCAG 判据，见 radialTint 注释）。 */
+    petMenuTint: true,
+    /* 轮盘带底色（外环淡冷色 / 内环更白 / 悬停一档明显的蓝）。
+     * 默认开：用户 2026-10-28 要的"加点背景色"。关掉则退回与气泡完全一致的纯白。
+     *
+     * 为什么是**不透明**的有色面而不是毛玻璃（两条依据）：
+     *   - Momentum Design 原话「Transparency plus blur reduces contrast, so
+     *     legibility must be verified, not assumed」—— 半透会让对比度随壁纸漂。
+     *   - Electron 的透明窗采不到窗后的桌面，backdrop-filter 没有东西可糊；
+     *     真要系统级材质得走 backgroundMaterial（仅 Win11），那是另一条路。
+     * 数值全部按 WCAG 实算过：正文 4.5:1（1.4.3）、图标与非文本 3:1（1.4.11），
+     * 悬停档差下限取 Material 的 hover state layer（8% ≈ 1.24），本盘给到 1.42+。
+     * ⚠️ 改任何一个色值都要重跑 debug/verify-wheel.js 的 [H] 段。 */
+    radialTint: true,
     headPat: true,        // 在头顶按住 = 一直蹭（A-B-C 三段，松手才收尾）
     dragReact: true,      // 拖着走的时候挣扎 / 不满
     pokeReact: true,      // 连戳给出递进反应

@@ -325,7 +325,7 @@ const stripComments = (s) =>
     ok(/readPixels\(/.test(r), '实量走 readPixels（mousedown 要同步判，走不了 IPC 往返）');
 
     /* 松手：先分流摸头，再走 onPetClicked */
-    const up = (r.match(/window\.addEventListener\('mouseup',\s*\(\)\s*=>\s*\{([\s\S]*?)\n\}\);/) || ['', ''])[1];
+    const up = (r.match(/window\.addEventListener\('mouseup',\s*\((?:e)?\)\s*=>\s*\{([\s\S]*?)\n\}\);/) || ['', ''])[1];
     ok(up !== '', 'mouseup 段落切得出来');
     ok(/if \(patState !== 'idle'\)/.test(up), 'mouseup 先分流摸头');
     ok(/patRelease\(\)/.test(up), '松手调 patRelease()（C 段）');

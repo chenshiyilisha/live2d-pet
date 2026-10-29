@@ -1,5 +1,9 @@
 'use strict';
 
+/* 「能不能真的发请求」只有一处定义（见 llm-providers.js 的 isUsable）：
+ * 有 key，或端点是本机（Ollama / LM Studio 不需要 key）。 */
+const { isUsable } = require('./llm-providers');
+
 /* ============================================================
  *  LLM 对话
  * ==========================================================
@@ -11,7 +15,8 @@
 
 /* 没接对话后端时的回复池。
  *
- * 判断入口是 streamLLM() 里的 `if (!apiKey)` —— 只要 llm.apiKey 为空就走这里。
+ * 判断入口是 streamLLM() 里的 `if (!isUsable({ baseUrl, apiKey }))` ——
+ * **没有 key 且端点不在本机**才走这里（本机端点 Ollama / LM Studio 不需要 key）。
  *
  * ⚠️ 这批文案的定位是「还没连上大脑的桌宠在陪你待着」，**不是错误提示**。
  * 原先只有 2 条、且都在催用户去配 API Key，每次聊天都重复同一句唠叨，
@@ -34,7 +39,7 @@ const OFFLINE_REPLIES = [
   '陪你待着也行，不用非得说话。\n[emo:calm]',
   '又来找我啦。\n[emo:surprised]',
   '要是给我接上模型，我能聊的可就多了。\n[emo:smile]',
-  '想让我真的会聊天？托盘右键 →「打开配置文件」，把 llm.apiKey 填上就行。\n[emo:think]'
+  '想让我真的会聊天？托盘「设置 → 模型接入」里挑一家，把 key 填上就行。\n[emo:think]'
 ];
 
 /* ══════════════════════════════════════════════════════════
@@ -430,7 +435,8 @@ function createStreamFilter(send, sendEmotion, sendThink = () => {}) {
  *
  * 参数：messages + { baseUrl, apiKey, model, extraBody, stallMs, totalMs,
  *                    send, sendEmotion, sendThink }
- * 没配 apiKey 时从 OFFLINE_REPLIES 里随机挑一句逐字吐出去 —— 走的是
+ * 不可用（没 key 且端点不在本机，见 isUsable）时从 OFFLINE_REPLIES 里
+ * 随机挑一句逐字吐出去 —— 走的是
  * 和真实回复**完全同一条通道**，渲染层不需要区分在线还是离线。
  *
  * `extraBody` 是给「各家服务自己的开关」留的口子，会浅合并进请求体。
@@ -453,7 +459,12 @@ function createStreamFilter(send, sendEmotion, sendThink = () => {}) {
 async function streamLLM(messages, { baseUrl, apiKey, model, extraBody, send, sendEmotion, sendThink, stallMs, totalMs, signal }) {
   const filter = createStreamFilter(send, sendEmotion, sendThink);
 
-  if (!apiKey) {
+  /* 走离线话术的唯一条件：**既没有 key、端点又不在本机**。
+   * 本机端点（Ollama / LM Studio）本来就不需要 key —— 旧版只看 apiKey，
+   * 选本地模型后她会一直念台词，而用户以为"已经连上了"（静默失败）。
+   * ⚠️ 判定收到 llm-providers.isUsable 一处，main.js 的记忆抽取、
+   *    渲染层的可用性提示都用同一条规则，别在这里另写一份。 */
+  if (!isUsable({ baseUrl, apiKey })) {
     const text = OFFLINE_REPLIES[Math.floor(Math.random() * OFFLINE_REPLIES.length)];
     for (const ch of text) {
       filter.push(ch);
@@ -510,7 +521,9 @@ async function streamLLM(messages, { baseUrl, apiKey, model, extraBody, send, se
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`
+        /* 本机端点常常没有 key，此时**不要**发 `Authorization: Bearer `（空值）——
+         * 有的本地服务会把它当成"提供了错误的凭据"直接 401。有 key 才带。 */
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
       },
       body: JSON.stringify({ ...extra, model, messages, stream: true }),
       signal: ac.signal

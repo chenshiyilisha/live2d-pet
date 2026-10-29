@@ -716,6 +716,134 @@ export function attachSnapProbes(live) {
           console.log('[pet] mood done');
         }
 
+        /* ?snap=whaleexp：鲸鱼娘自带的 exp3 表情到底能不能亮出来（2026-10-29）
+         *
+         * 素材包 `expressions/` 有 44 个 `.exp3.json`，但 `c_0120.model3.json` 的
+         * `FileReferences` 里**根本没有 Expressions 段**（VTube Studio 模型包通病：
+         * VTS 自己另有一份配置）→ 引擎不知道它们存在，库的 `model.expression()`
+         * 一个都用不了。
+         *
+         * 所以这里**绕过 expressionManager**，直接照 exp3 的 `Parameters` 写参数
+         * （44 个文件的 Blend 全是 Add，写起来最省事），每张落一张图。
+         * 判据只有一条：**图上真出现了星星眼 / 问号**，才说明"参数能驱动那些贴图"。
+         * 只按源码推断不行 —— 那些 ParamCheekNN 也可能只是没人用的空参数。
+         *
+         * 落盘名必须是纯 ASCII（主进程 `pet:save-shot` 的白名单是
+         * `/^[A-Za-z0-9_-]{1,40}$/`，中文名会被拒 → 回退写 pet-window.png 互相覆盖）。 */
+        if (new URLSearchParams(location.search).get('snap') === 'whaleexp') {
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          const core = () => live.model()?.internalModel?.coreModel;
+          const rdRaw = (id) => Number((live.readParam(id) ?? 0));
+          const setRaw = (id, v) => { try { core()?.setParameterValueById(id, v); } catch { /* 参数不存在：静默 */ } };
+
+          /* 每组 = 「ASCII 标签 + exp3 里的 Parameters（值照抄文件）」。
+           * 第一组是**对照**：BrowLY 我们情绪引擎每帧也在写（calm=0），如果连它
+           * 都没效果，说明问题在"写入通道"，不在表情参数本身。 */
+          const CASES = [
+            { tag: 'ctrl-brow', zh: '对照·皱眉', p: [['ParamBrowLY', -1], ['ParamBrowRY', -1]] },
+            { tag: 'star',   zh: '星星眼',   p: [['ParamCheek16', 1]] },
+            { tag: 'ques',   zh: '问号',     p: [['ParamCheek74', 1]] },
+            { tag: 'excl',   zh: '感叹号',   p: [['ParamCheek75', 1]] },
+            { tag: 'happy',  zh: '开心兴奋', p: [['ParamCheek76', 1], ['ParamEyeLOpen', 0], ['ParamEyeROpen', 0],
+              ['ParamBrowLX', -1], ['ParamBrowLY', -0.8], ['ParamBrowLAngle', -1], ['ParamBrowLForm', -0.6],
+              ['ParamBrowRX', -1], ['ParamBrowRY', -0.8], ['ParamBrowRAngle', -1], ['ParamBrowRForm', -0.6],
+              ['ParamMouthForm', 1.5]] },
+            { tag: 'angry',  zh: '生气',     p: [['ParamCheek80', 1], ['ParamCheek23', 1],
+              ['ParamBrowLX', -1], ['ParamBrowLY', -0.5], ['ParamBrowLAngle', -1], ['ParamBrowLForm', -0.59],
+              ['ParamBrowRX', -1], ['ParamBrowRY', -0.45], ['ParamBrowRAngle', -1], ['ParamBrowRForm', -0.7]] },
+            { tag: 'cry',    zh: '哭',       p: [['ParamCheek20', 1], ['ParamCheek27', 1], ['ParamCheek23', 1],
+              ['ParamBrowLX', 0], ['ParamBrowLY', -0.3], ['ParamBrowLAngle', 0.25], ['ParamBrowLForm', -1],
+              ['ParamBrowRX', 0], ['ParamBrowRY', -0.3], ['ParamBrowRAngle', 0.25], ['ParamBrowRForm', -1]] }
+          ];
+
+          await wait(1500);
+          const base = await window.pet?.saveShot?.('whaleexp-00-base');
+          console.log('[pet] whaleexp', JSON.stringify({ tag: 'base', ink: base?.ink }));
+
+          /* 🔴 第一轮教训（2026-10-29）：**写一次 = 白写**（当时怀疑动作快照回滚）。
+           * 🔴 第二轮教训（同日）：改成每帧重写后 **透明度差分仍是 0、脸上仍然没变化**，
+           *    连我们情绪引擎也在用的 BrowLY=-1 对照组都没生效 —— 所以嫌疑升级为
+           *    「写入的时机根本没赶上出画」。本轮加三样证据：
+           *      ① 拍照瞬间**回读参数值**（区分"没写进去"和"写进去了但没用"）；
+           *      ② drawable 全量差分：透明度 + **顶点包围盒** + 绘制顺序（贴图换装
+           *         可能不走透明度，走形变或移出画面）；
+           *      ③ 对照组 BrowLY —— 它如果也没效果，问题在写入通道，不在表情参数。 */
+          /* 🔴 差分两次都是假的（2026-10-29），两个坑记在这里：
+           *   ① `coreModel.getDrawableIds` 在这个构建里**不存在** → ids=[] →
+           *      循环体一次都不跑，`changed:0` 是"什么都没量"而不是"什么都没变"。
+           *   ② 顶点数组必须 slice 拷贝，否则两次采样比的是同一块内存。
+           * 现在直接读 **Core 原始数组**（`core._model.drawables.opacities` /
+           * `parts.opacities`）—— 这是第三方引擎笔记
+           * （A8Chann/dsh-pet-live2d `.dsh/skills/cubism-engine/SKILL.md`）明确推荐的口径：
+           * 「把表达式参数写进模型、core.update() 后比 drawables.opacities 的差值」。 */
+          const raw = () => core()?._model;
+          const opac = () => {
+            const m = raw();
+            if (!m) return null;
+            return {
+              n: m.drawables.count,
+              d: Array.from(m.drawables.opacities),
+              p: Array.from(m.parts.opacities),
+              ver: m.drawables.vertexPositions?.[0] ?? null   // 顺带证明采样之间确实重算过
+            };
+          };
+          let active = null;   // { p: [[id, v], ...] } —— null = 全部复位
+          /* 🔴 第三轮教训（2026-10-29）：挂在 app.ticker 上写参数**不生效**
+           * （对照组 BrowLY=-1 脸上纹丝不动），哪怕 readback 证明值写进去了。
+           * 帧流程（cubism5.es.js InternalModel.update）：motion → expression →
+           * eyeBlink → saveParameters → breath → physics → pose → focus →
+           * **emit('beforeModelUpdate') → model.update()**。
+           * 只有赶在 model.update() 之前的写入才会被这一帧采用 ——
+           * 库专门留了这个事件，就是给"每帧改参数"用的正解入口。 */
+          const im = () => live.model()?.internalModel;
+          /* 🔴 第五轮之后的关键实验（2026-10-29）：不走 `setParameterValueById`，
+           * 直接写 **Core 原始数组** `core._model.parameters.values`（按
+           * `core._model.parameters.ids` 查索引 —— 这是 A8Chann 那份引擎笔记
+           * 点名要求的查名方式）。原因见本轮结论：框架的
+           * `getParameterIndex` 拿字符串与 CubismId **对象**做 `!=` 比较，
+           * 字符串永远 miss → 落进「不存在参数」幻影表 → 渲染永远读不到。 */
+          const hook = () => {
+            if (!active) return;
+            const m = im()?.coreModel?._model;
+            if (!m) return;
+            for (const [id, v] of active.p) {
+              const idx = m.parameters.ids.indexOf(id);
+              if (idx >= 0) m.parameters.values[idx] = v;
+            }
+          };
+          im()?.on('beforeModelUpdate', hook);
+
+          for (const c of CASES) {
+            const s0 = opac();
+            if (!s0) { console.log('[pet] whaleexp 拿不到 core._model'); break; }
+            active = c;
+            await wait(700);   // ≥40 帧：让动作/物理周期跑稳
+            const s1 = opac();
+            const changed = [];
+            for (let i = 0; i < s0.n; i++) {
+              if (Math.abs(s1.d[i] - s0.d[i]) > 0.01) {
+                changed.push('d' + i + ':' + s0.d[i].toFixed(2) + '->' + s1.d[i].toFixed(2));
+              }
+            }
+            const pchanged = [];
+            for (let i = 0; i < s0.p.length; i++) {
+              if (Math.abs(s1.p[i] - s0.p[i]) > 0.01) pchanged.push('p' + i + ':' + s0.p[i].toFixed(2) + '->' + s1.p[i].toFixed(2));
+            }
+            const s = await window.pet?.saveShot?.('whaleexp-' + c.tag);
+            console.log('[pet] whaleexp', JSON.stringify({
+              tag: c.tag, zh: c.zh, ink: s?.ink, drawables: s0.n,
+              vtxMoved: Math.abs((s1.ver ?? 0) - (s0.ver ?? 0)) > 1e-6,
+              readback: c.p.map(([id]) => id.split('Param').pop() + '=' + (live.readParam(id) ?? '?')).join(' '),
+              dChanged: changed.length, dList: changed.slice(0, 8),
+              pChanged: pchanged.length, pList: pchanged.slice(0, 6)
+            }));
+            active = null;
+            await wait(400);
+          }
+          im()?.off('beforeModelUpdate', hook);
+          console.log('[pet] whaleexp done');
+        }
+
         /* ?snap=pat：摸头 A-B-C 全流程（真实鼠标序列 + 分阶段采样）
          *
          *  为什么必须走**真实鼠标事件**而不是直接调 patStart()：这段功能的

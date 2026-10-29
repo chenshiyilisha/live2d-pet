@@ -1,5 +1,8 @@
 'use strict';
 
+/* 「能不能真的发请求」只有一处定义（llm-providers.js 的 isUsable）。 */
+const { isUsable } = require('./llm-providers');
+
 /* ============================================================
  *  轻量长期记忆
  * ==========================================================
@@ -342,7 +345,9 @@ function buildExtractPrompt(userText, assistantText) {
  */
 async function extractViaLlm(userText, assistantText, llm = {}) {
   const { baseUrl, apiKey, model } = llm;
-  if (!apiKey || !baseUrl) return [];
+  /* 和 streamLLM 同一条判定（llm-providers.isUsable）：本机端点不需要 key。
+   * 旧写法只看 apiKey，于是选了 Ollama 之后聊天能通、记忆抽取永远静默跳过。 */
+  if (!isUsable({ baseUrl, apiKey }) || !baseUrl) return [];
   const url = `${String(baseUrl).replace(/\/+$/, '')}/chat/completions`;
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), 12000);
@@ -351,7 +356,7 @@ async function extractViaLlm(userText, assistantText, llm = {}) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
       },
       body: JSON.stringify({
         model: model || 'deepseek-chat',

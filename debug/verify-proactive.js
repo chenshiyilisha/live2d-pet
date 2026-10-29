@@ -121,7 +121,14 @@ console.log('\n══════ B. 渲染层接线 ══════\n');
   check(/retryIdleTimer\(\);/.test(PET) && /PROACTIVE_RETRY_MS\s*=\s*2000/.test(PET),
     '被闸门拦下 → 2 秒后再看一眼');
   // 关键：延后路径**不能**再调 pokeIdleTimer()（那会重排一整个闲置周期 = 这次不出声了）
-  const defer = PET.slice(PET.indexOf('const why = proactiveBlockedBy();'), PET.indexOf('if (!hasApiKey)'));
+  /* ⚠️ 切片两端都要**先断言存在**再切。踩过：2026-10-29 把 hasApiKey 改名成
+   *    llmUsable 之后 indexOf 返回 -1，slice(start, -1) 悄悄切出一段错的源码，
+   *    断言报的是"延后路径里有 pokeIdleTimer()"，看着像业务代码写错了。 */
+  const deferStart = PET.indexOf('const why = proactiveBlockedBy();');
+  const deferEnd = PET.indexOf('if (!llmUsable)');
+  check(deferStart >= 0 && deferEnd > deferStart,
+    '延后路径切片的两端都能在源码里找到（符号被改名时这条先红）');
+  const defer = deferStart >= 0 && deferEnd > deferStart ? PET.slice(deferStart, deferEnd) : '';
   check(!/pokeIdleTimer\(\)/.test(defer),
     '🔴 延后路径里没有 pokeIdleTimer()（老代码在这里重排整个 8 分钟周期）');
 }

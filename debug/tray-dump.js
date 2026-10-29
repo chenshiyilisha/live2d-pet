@@ -43,6 +43,10 @@ const sliceFn = (name) => {
 const fnSrc = [
   sliceFn('appearanceSubmenu'),
   sliceFn('personaStateLabel'),
+  /* 「模型接入」的组标题靠它算（2026-10-29 加）。它只依赖 providerById，
+   * 后者从 llm-providers 真实 require 进来 —— 别在桩里手写一份标签逻辑，
+   * 那样测出来的标题跟真跑的不一样。 */
+  sliceFn('llmLabelText'),
   sliceFn('buildMenuTemplate')
 ].join('\n');
 
@@ -168,6 +172,18 @@ const sandbox = {
   toast: rec('toast'),
   promptRename: rec('promptRename'),
   promptPersona: rec('promptPersona'),
+  /* ---- 模型接入（2026-10-29）----
+   * 目录与判定**真实 require**：llm-providers.js 是纯数据/纯函数、不碰 electron，
+   * 手抄一份到桩里只会让 dump 出来的菜单与真菜单悄悄脱节。 */
+  ...require('../src/main/llm-providers'),
+  /* 读 WorkBuddy 的 models.json 是唯一带 IO 的环节，这里给桩。
+   * 想验「导入有 N 条」那种标题，把 list 换成 fromWorkBuddyModels 的样例即可。 */
+  readWorkBuddyModels: () => ({ file: 'X/models.json', list: [] }),
+  applyLlmProvider: rec('applyLlmProvider'),
+  importWorkBuddyModel: rec('importWorkBuddyModel'),
+  promptLlm: rec('promptLlm'),
+  testLlm: rec('testLlm'),
+  URL,
   // 更新模块（src/main/updater.js）。这里返回"没有新版"的静止状态，
   // 菜单标题里就不带状态后缀；要验"有新版时标题怎么变"就改这个返回值。
   updaterStatus: () => ({ state: 'idle', version: '', current: PKG.version, progress: 0, lastError: '' }),

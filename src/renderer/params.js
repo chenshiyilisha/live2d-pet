@@ -26,6 +26,10 @@ import { WHALE } from './profiles/whale.js';
 
 export const MODELS = { [HIYORI.name]: HIYORI.model, [WHALE.name]: WHALE.model };
 
+/* 各模型的「情绪 → exp3 贴纸」映射（whale 独有，hiyori 是 undefined）。
+ * 消费方 pet.js 的贴纸加载器用它拼 expressions/ 下的文件名。 */
+export const STICKERS = { [HIYORI.name]: HIYORI.stickers, [WHALE.name]: WHALE.stickers };
+
 /* 当前模型的档案键 —— 全项目只在这里写一次这个字符串。
  * 主进程、渲染层、诊断脚本都引用它，免得再出现「配置里写一个名字、
  * 代码里比对另一个名字」这种两边不一致。

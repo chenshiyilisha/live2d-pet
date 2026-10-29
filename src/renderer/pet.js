@@ -8,7 +8,7 @@ import {
   MODELS, MODEL_NAME, INK_TOP_C_RATIO, P, State, EMOTION,
   EMO_SPEED, EMO_SPEED_DEFAULT, PAT, buildEmoTarget,
   EMO_SETTLE_EPS, EMO_SETTLE_HOLD_MS, emotionDeviation,
-  emoDecayAmt, mixEmoDecay, mixEmoMood
+  emoDecayAmt, mixEmoDecay, mixEmoMood, STICKERS
 } from './params.js';
 import { configureTTS, initTTS, speak, enqueueSpeech, takeSentences, stopSpeak, ttsVoiceInfo, ttsQueueState, setSpeechObserver, lipEnv, spokenText, resetSpoken, isSpeaking } from './tts.js';
 import { parseQuietHours, inQuietHours, msUntilQuietEnd } from './quiet-hours.js';
@@ -147,8 +147,13 @@ let cfg = null;
  * 事件后即时推。**收不到快照 = 全 0 权重**，主循环里 mixEmoMood 直接原样
  * 返回 —— 没有主进程配合（比如旧版配置文件、探针环境）也绝不炸、绝不偏。 */
 let moodSnap = null;
-// 有没有配 API Key。config:get 会把 key 遮成 '***'，非空即说明配了
-let hasApiKey = false;
+/* 对话后端能不能真的发请求。
+ *
+ * 主进程在 config:get 里给出**派生**字段 `llm.usable`（规则见 llm-providers.isUsable：
+ * 有 key，或端点是本机 —— Ollama / LM Studio 本来就不需要 key）。
+ * ⚠️ 别在这里改判 `!!cfg.llm.apiKey`：那样选了本地模型后，主动搭话会一直走
+ *    预置台词，而聊天本身是通的 —— 同一个"能不能聊"出现两种结论。 */
+let llmUsable = false;
 // 主动搭话计时器
 let idleTimer = null;
 let lastActivityPoke = 0;
@@ -188,19 +193,189 @@ function setIgnoreMouse(ignore) {
   window.pet?.setIgnoreMouse(ignore);
 }
 
+/* ── 参数读写：只有「按索引 + Core 原始数组」这一条路是正确的 ────────────
+ *
+ * 🔴 2026-10-29 抓到的根因（六轮真机探针，见 debug `?snap=whaleexp`）：
+ *    框架的 `CubismModel.getParameterIndex(parameterId)` 拿传进来的**字符串**和
+ *    `this._parameterIds.at(i)`（**CubismId 对象**）做 `!=` 比较 —— 字符串永远
+ *    不等于对象，查不到索引 → 值被塞进 `_notExistParameterValues`（幻影参数表）。
+ *    而 `getParameterValueById` 读的也是这张幻影表，于是**读回来完全自洽**，
+ *    `coreModel.update()` 却只认 `parameters.values` → **画面永远不动、零报错**。
+ *
+ *    证据：字符串写 `ParamCheek16=1`（星星眼）参数回读正常、269 个 drawable 的
+ *    透明度一动不动；改成直接写 `parameters.values` 后星星眼 d176/d180 透明度
+ *    0→1，截图瞳孔里真出现金色四角星（debug/pet-head-star.png）。
+ *
+ * ⇒ 于是全项目所有 `setParam` / `readParam` 都走索引：
+ *      写  core.setParameterValueByIndex(idx, v, 1)   // 1 = 完全覆盖，不做混合
+ *      读  core.getParameterValueByIndex(idx)
+ *   ⚠️ 索引表按 model 实例缓存，切模型自动重建（不重建会拿旧索引写新模型）。
+ *   ⚠️ 读出来的是**上一帧末的值**（帧外的「当前值」），不是正在出画的那一帧 ——
+ *      计账用没问题，别拿它当"画面现在长这样"的证据（要证据就截图差分）。
+ */
+let paramIdxCache = null;        // { model, map: Map<name, idx>, total }
+const paramMissWarned = new Set();
+
+/* CubismId → 字符串。
+ * ⚠️ getString() 返回的是 **csmString 对象**（{s:"ParamAngleX"}），不是字符串；
+ *    直接 `=== 'ParamAngleX'` 永远为 false，表现成「参数表读不出来、查索引全 -1」。
+ *    必须再取一层 .s。兼容 Cubism 4/5 两种形状，所以下面写了三层兜底。 */
+function idToStr(id) {
+  const raw = id?.getString?.();
+  if (typeof raw === 'string') return raw;
+  if (raw && typeof raw.s === 'string') return raw.s;
+  const own = id?.s;
+  if (typeof own === 'string') return own;
+  if (own && typeof own.s === 'string') return own.s;
+  return id == null ? '' : String(id);
+}
+
+function paramIndexOf(id) {
+  if (!id) return -1;
+  const core = model?.internalModel?.coreModel;
+  if (!core) return -1;
+  if (!paramIdxCache || paramIdxCache.model !== model) {
+    const map = new Map();
+    const total = core.getParameterCount?.() ?? 0;
+    for (let i = 0; i < total; i++) {
+      let s = '';
+      try { s = idToStr(core.getParameterId(i)); } catch { s = ''; }
+      if (s) map.set(s, i);
+    }
+    paramIdxCache = { model, map, total };
+    paramMissWarned.clear();     // 换了模型，上一位「缺哪些参数」的结论不再适用
+    /* 打一行就够：`total` 该等于模型参数总数、`map` 是能用名字找到的那部分。
+     * 两者差得离谱 = idToStr 没解出来（回去看上面 csmString 那段注释）。 */
+    console.log('[pet] param-index', JSON.stringify({
+      total, indexed: map.size, model: curModelName
+    }));
+  }
+  const idx = paramIdxCache.map.get(id);
+  return idx === undefined ? -1 : idx;
+}
+
 function setParam(id, value) {
   if (!id) return;              // PARAM 表里没定义的键（占位，见 params.js）
-  try {
-    model?.internalModel?.coreModel?.setParameterValueById(id, value);
-  } catch { /* 模型未就绪时忽略 */ }
+  if (typeof value !== 'number' || !Number.isFinite(value)) return;
+  const core = model?.internalModel?.coreModel;
+  const idx = paramIndexOf(id);
+  if (!core || idx < 0) {
+    /* 模型没有这个参数（换模型的常见情形）+ 只警告一次：
+     * 这里**不许**退回 setParameterValueById —— 那条路看着"成功"其实全是幻影，
+     * 悄悄退回去等于把这个 bug 重新藏起来。 */
+    if (id && !paramMissWarned.has(id)) {
+      paramMissWarned.add(id);
+      console.warn('[pet] param-miss', JSON.stringify({ id, model: curModelName }));
+    }
+    return;
+  }
+  try { core.setParameterValueByIndex(idx, value, 1); } catch { /* 模型未就绪时忽略 */ }
 }
 
 function readParam(id) {
   if (!id) return undefined;
+  const core = model?.internalModel?.coreModel;
+  const idx = paramIndexOf(id);
+  if (!core || idx < 0) return undefined;
   try {
-    return model?.internalModel?.coreModel?.getParameterValueById(id);
+    const v = core.getParameterValueByIndex(idx);
+    return typeof v === 'number' ? v : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/* ── 情绪贴纸：把模型自带的 exp3 表情叠加到 8 档情绪上（2026-10-29）──────
+ *
+ * whale 的模型包里有 44 个 exp3.json（星星眼/问号/生气/哭……），但
+ * model3.json 的 FileReferences **没有 Expressions 段**（VTS 模型包通病）→
+ * 引擎不认识、model.expression() 一个都用不了 → 自己 fetch 解析。
+ *
+ * 写法是**绝对写**：setParam(id, def + value × 强度)。为什么不是 exp3 语义
+ * 的 Add（当前值 + value）：当前值每帧都在被动作/物理/我们自己的情绪管线
+ * 改，Add 会把上一帧的量反复累进去（指数爆炸）；而贴纸参数是模型专属的
+ * 0/1 开关（默认值恒 0），从默认值起算既确定又天然支持淡入淡出。
+ *
+ * 🔴 共享参数必须滤掉：exp3 里像「生气」同时写 BrowL 系和 MouthForm，这些 ID
+ *   也是 16 字段情绪的参数 —— applyEmotion 用撤销法每帧管着它们，两边都写
+ *   必然打架。过滤标准 = 档案 param 表的值集合（owned），不是硬编码名单。
+ * 🔴 强度衰减到 0 时要把参数**写回默认值**：贴纸参数没有别人写，漏写 =
+ *   残影永远挂在脸上（同 arm-release 的"没人接管就冻结"教训）。
+ * ⚠️ 开关关掉不是"跳过写入"而是"目标强度 = 0"——走淡出，脸上不会瞬闪。 */
+let stickerDefs = new Map();   // emo -> [{ id, value, def }]
+let stickerAmt  = new Map();   // emo -> 当前强度 0..1（插值中）
+
+async function loadStickers(modelName) {
+  stickerDefs = new Map();
+  stickerAmt = new Map();
+  const map = STICKERS[modelName];
+  const base = MODELS[modelName]?.url?.replace(/[^/]*$/, '');
+  if (!map || !base) {
+    console.warn('[pet] stickers skip', JSON.stringify({
+      model: modelName, hasMap: !!map, hasBase: !!base
+    }));
+    return;
+  }
+  const owned = new Set(Object.values(P).filter(Boolean));
+  const core = model?.internalModel?.coreModel;
+  if (!core) { console.warn('[pet] stickers skip: core 未就绪'); return; }
+  console.log('[pet] stickers begin', JSON.stringify({ model: modelName, n: Object.keys(map).length }));
+  for (const [emo, file] of Object.entries(map)) {
+    if (!EMOTION[emo]) { console.warn('[pet] stickers 未知情绪档', emo); continue; }
+    try {
+      /* 超时 8s：dev server 对某些 URL（中文文件名）可能挂起不响应，
+       * fetch 没 timeout 就会永远 pending → 整个功能无声失效。 */
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 8000);
+      let j;
+      try {
+        const res = await fetch(base + 'expressions/' + encodeURIComponent(file) + '.exp3.json', { signal: ctl.signal });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        j = await res.json();
+      } finally { clearTimeout(timer); }
+      const all = j.Parameters ?? [];
+      const kept = [];
+      for (const p of all) {
+        if (owned.has(p.Id)) continue;          // 与 16 字段共享 → 丢弃（见上）
+        const idx = paramIndexOf(p.Id);
+        if (idx < 0) continue;
+        let def = 0;
+        try {
+          const d = core.getParameterDefaultValue?.(idx);
+          if (typeof d === 'number' && Number.isFinite(d)) def = d;
+        } catch { /* 拿不到就按 0（这些开关参数的中立位） */ }
+        kept.push({ id: p.Id, value: Number(p.Value) || 0, def });
+      }
+      if (kept.length) { stickerDefs.set(emo, kept); stickerAmt.set(emo, 0); }
+      console.log('[pet] stickers', JSON.stringify({
+        emo, file, kept: kept.length, dropped: all.length - kept.length
+      }));
+    } catch (e) {
+      /* 打包环境若没带上 exp3，功能整体静默降级成"没有贴纸"，不挡启动。 */
+      console.warn('[pet] stickers load fail', JSON.stringify({ emo, file, err: String(e) }));
+    }
+  }
+}
+
+function applyStickers(dt) {
+  if (!stickerDefs.size) return;
+  const on = cfg?.appearance?.stickers !== false;
+  for (const [emo, params] of stickerDefs) {
+    const target = (on && emo === emotion) ? decayAmt : 0;
+    const cur = stickerAmt.get(emo) ?? 0;
+    if (target <= 0 && cur <= 0.004) {
+      if (cur > 0) {
+        for (const p of params) setParam(p.id, p.def);   // 归零必须还默认值
+        stickerAmt.set(emo, 0);
+      }
+      continue;
+    }
+    /* 贴纸是"出现/消失"不是"渐变形状"：速度比 16 字段最快一档（9/s）
+     * 略慢的一档起 —— 300ms 上下，肉眼是"跟着情绪冒出来"而不是闪现。 */
+    const k = target > cur ? 6 : 4;
+    const amt = cur + (target - cur) * Math.min(1, dt * k);
+    stickerAmt.set(emo, amt);
+    for (const p of params) setParam(p.id, p.def + p.value * amt);
   }
 }
 
@@ -894,23 +1069,8 @@ async function mountModel(name) {
       'ParamLeg'
     ];
 
-    // CubismId → 字符串
-    //
-    // ⚠️ 关键坑：getString() 返回的是 **csmString 对象**（{s:"ParamAngleX"}），
-    //    不是字符串！直接拿它 `=== 'ParamAngleX'` 永远为 false，
-    //    表现成「参数表读不出来 / findIdx 全返回 -1」。必须再取一层 .s。
-    const idToStr = (id) => {
-      if (typeof id === 'string') return id;
-      try {
-        const a = id?.getString?.();
-        if (typeof a === 'string') return a;
-        if (a && typeof a.s === 'string') return a.s;
-        const b = id?.s;
-        if (typeof b === 'string') return b;
-        if (b && typeof b.s === 'string') return b.s;
-      } catch { /* ignore */ }
-      return '';
-    };
+    /* CubismId → 字符串 的唯一实现在模块顶部（规矩 9）：idToStr 里那层
+     * csmString 的坑（getString() 返回 {s:"..."} 而不是字符串）在那边有完整注释。 */
 
     // 建「参数名 ↔ 索引」表；先走索引表，读不到再退回按名取索引
     const nameToIdx = new Map();
@@ -1021,6 +1181,11 @@ async function mountModel(name) {
      * 期望 Idle / TapBody / Drag / Walk 四组（后两个是自制动作）。 */
     motions: Object.keys(model.internalModel?.motionManager?.motionGroups || {})
   }));
+  /* 情绪贴纸按**本次挂载的模型**加载（不 await：解析失败/慢都别挡首帧，
+   * 加载完成前 stickerDefs 是空 Map，applyStickers 直接短路）。
+   * ⚠️ 必须放 mountModel 里用参数 name —— 曾经误放到 boot，那里裸写 `name`
+   *    拿到的是 window.name（=''），贴纸全程静默失效。 */
+  loadStickers(name).catch((e) => console.warn('[pet] stickers fatal', String(e)));
   /* 人物刚画出来 → 重量一次头顶 y（悬浮气泡锚点）。慢一点等首帧画稳。 */
   setTimeout(() => window.pet?.requestHeadMeasure?.(), 1500);
   /* 摸头条带的锚（渲染层自己的实量头顶）也要量一次 —— 量不到会自动重试。 */
@@ -1033,7 +1198,7 @@ async function boot() {
   // 历史得在第一次对话之前就位。
   try {
     cfg = await window.pet?.getConfig?.();
-    hasApiKey = !!cfg?.llm?.apiKey;
+    llmUsable = !!cfg?.llm?.usable;
     applyFrameCap();   // 低配降帧等开关即时生效
     // 用户调的人物大小（托盘 / 右键菜单），必须在 mountModel 之前生效 ——
     // mountModel 里的 applyModelGeometry() 会把它乘进 PET_SCALE
@@ -1046,6 +1211,21 @@ async function boot() {
       console.log('[pet] 载入历史', h.length, '条');
     }
   } catch { /* ignore */ }
+
+  /* 🔴 底座那一条高度**从第一帧起就留着**（2026-10-29 用户拍板：「始终是加了
+   * 底座时的大小，这样就不用担心加载底座后大小切换的问题了」）。
+   *
+   * 以前是"开了悬浮显示才让高度"：底座出现那一刻 --stats-h 0→N → #stage 变矮 →
+   * layout() → canvas resize → 人物整体缩小一圈。用户看到的「一大一小两个她」
+   * 就是这次缩放留下的旧帧（preserveDrawingBuffer 把上一帧留在了合成面上）。
+   * 清屏 / 整窗重绘都是事后补锅 —— 只要尺寸还会变，就总有缝。
+   * 现在把高度**在第一次 layout() 之前**就冻结成"牌摆满时"的值，之后任何
+   * 开关 / 转圈 / 出数都不再动它，那条 resize 链根本不会发生。
+   *
+   * ⚠️ 必须在 app.init 之前：里面 mountModel 会跑第一次 layout()，晚一步就等于
+   *    "先按大尺寸画一帧、再缩小" —— 正是要消灭的那一幕。
+   * ⚠️ 不看配置：悬浮显示开没开都留。「始终」两个字就是这个意思。 */
+  applyStatsReserve();
 
   app = new PIXI.Application();
   await app.init({
@@ -1227,6 +1407,11 @@ async function boot() {
       emoCur[key] += (emoEff[key] - emoCur[key]) * (1 - Math.exp(-dt * sp));
     }
     applyEmotion();
+    /* 情绪贴纸（exp3 叠加，whale 独有）：跟 16 字段管的是**两批参数**
+     * （exp3 里与我们共享的 BrowL 系、MouthForm、EyeOpen 等，加载时就滤掉了，
+     * 见 loadStickers 的 owned 过滤），不会和撤销法打架；放在情绪管线
+     * 尾部纯粹是逻辑位置 —— 和脸的其他部分一起组装。 */
+    applyStickers(dt);
 
     /* 「情绪安定」计时（主动搭话的判据之一，口径见 params.js 的 EMO_SETTLE_EPS）。
      * ⚠️ 量的是 emoEff 不是 emoTarget：摸头的调制也在 emoEff 里，
@@ -1570,8 +1755,8 @@ function layout() {
    * 舞台上方又有 #stats 底座时，底座上沿离底边还有几 px，#stage 又是
    * bottom: --stats-h 让出来的 —— 两边加起来，人物下沿会正好压到底座上沿。
    * 让出 STATS_GAP 之后人站在底座上方、留一线空白，视觉上才像"站在台子上"。
-   * ⚠️ 没开底座时（--stats-h = 0）这 14px 是纯底部留白，人物略小于从前一丁点，
-   *    属可接受的代价 —— 不区分开关状态能少一条分支、也少一处不一致。 */
+   * ⚠️ --stats-h 现在**恒为底座高度**（2026-10-29 起冻结，见 applyStatsReserve），
+   *    所以这 14px 恒是"站在底座上的呼吸位"，不随悬浮显示的开关变化。 */
   const H = stageEl.clientHeight - STATS_GAP;
   if (!W || !H) return;
 
@@ -1591,6 +1776,9 @@ function layout() {
   if (app.screen.width !== vw || app.screen.height !== vh) {
     app.renderer.resize(vw, vh);   // autoDensity 会同步写 canvas 的 style 尺寸
     resized = true;                // 见函数末尾：改过尺寸就必须**立刻重画一帧**
+    /* 实跑证据：一次正常启动 + 底座出数，这里**只该有一行**（首帧那次）。
+     * 出现第二行就说明还有东西在改舞台高 / 窗口尺寸 —— 那就是「两个她」的来路。 */
+    console.log('[pet] canvasResize', JSON.stringify({ to: [vw, vh], stats: statsReserve }));
   }
 
   // ---- 2) 缩放：整张 Cubism 画布恰好等于画布高度，再乘人物缩放系数 ----
@@ -1693,7 +1881,15 @@ function layout() {
    *
    * 现象：用户报「底座出现时出现一大一小两个她，底座消失大模型也消失」。
    * 链路正好落在这里：底座出现 → --stats-h 0→N → #stage 变矮 → layout() →
-   * 画布 resize → 人物整体缩放变化。而我们开着 `preserveDrawingBuffer: true`
+   * 画布 resize → 人物整体缩放变化。
+   *
+   * ✅ **2026-10-29 起这条链的源头已经没了**：`--stats-h` 在 boot 里就冻结成
+   *    "牌摆满"那一档（applyStatsReserve），开关底座 / 转圈 / 出数都不再改它 →
+   *    layout() 不会再因底座跑起来 → 这里根本不会进（`[pet] canvasResize` 整场
+   *    只有首帧一行）。下面这套"清屏 + 整窗重绘"保留下来守**真正的** resize：
+   *    窗口尺寸变化、换模型、用户改缩放。别再让 `--stats-h` 变回去。
+   *
+   * 而我们开着 `preserveDrawingBuffer: true`
    * （命中测试 / 实量头顶要 readPixels，见 app.init 那条注释），**画布尺寸变化
    * 时浏览器可能保留旧帧并按新尺寸拉伸**，于是屏幕上同时出现"旧的大人物（底座
    * 出现前那一帧）+ 新的小人物"—— 且**只有一个底座**，与用户观察一致。
@@ -1709,7 +1905,36 @@ function layout() {
       app.renderer.clear();
       app.renderer.render({ container: app.stage, clear: true });
     } catch { /* 渲染器还没就绪（首帧前）：ticker 会照常画上去，只是没有这次补画 */ }
+
+    /* 🔴 上面这一步**不够**（2026-10-28 只做了它，用户 2026-10-29 实测仍复现）。
+     *    原因：清画布只能保证"画布这块新内容是对的"，管不到**窗口合成面**上
+     *    "画布缩掉之后露出来的那块" —— 那里还留着缩之前那一帧。
+     *
+     *    官方一手资料（Electron 博客《Tech Talk: Improving Window Resize
+     *    Behavior》，2025-12-19）讲的正是这个机制：
+     *      「只有视口会在新帧到来时被重绘，其余部分保持原样」
+     *      「新帧更小，而超出新视口的区域我们从来没有重绘 → 仍然显示以前的帧」
+     *    官方修法是「把视口之外曾经画过的区域涂成透明」，补丁从 Electron
+     *    39.2.6 起就在（我们在 44.7.0），但那条修的是**窗口 resize**；我们这里
+     *    窗口尺寸不变、只缩画布层，所以得由应用层补两下：
+     *      ① 让主进程整窗重绘（invalidate）—— 把那块旧帧丢掉；
+     *      ② 下一帧再补画一次 —— 重绘时若仍拿到旧纹理，第二次就能盖掉。
+     *    ⚠️ 两条都只在**真 resize 过**时执行，不进每帧路径。 */
+    requestRepaint();
+    requestAnimationFrame(() => {
+      if (!app) return;
+      try {
+        app.renderer.clear();
+        app.renderer.render({ container: app.stage, clear: true });
+      } catch { /* 同上 */ }
+    });
   }
+}
+
+/* 整窗重绘请求（主进程 webContents.invalidate）。
+ * ⚠️ window.pet 可能不存在（最小页面 / 探针页），一律可选链。 */
+function requestRepaint() {
+  try { window.pet?.repaint?.(); } catch { /* ignore */ }
 }
 
 // 窗口尺寸 / 屏幕缩放变化时重算（桌宠窗口本身不可缩放，主要是防 DPR 变化）
@@ -1936,6 +2161,13 @@ window.addEventListener('mousemove', (e) => {
 });
 
 canvas.addEventListener('mousedown', (e) => {
+  /* 右键**按下**就开盘（轮盘是"按住 → 划向 → 松手"的 marking 手势）。
+   * ⚠️ 不能等 contextmenu 事件：Windows 上它是在**松手**时才发的，那时候
+   *    手势已经结束了。形态（轮盘 / 原生菜单）由主进程按配置决定。 */
+  if (e.button === 2) {
+    if (isOverPet(e.clientX, e.clientY)) window.pet?.wheelOpen?.(e.screenX, e.screenY);
+    return;
+  }
   if (e.button !== 0) return;
   dragging = true;
   dragMoved = false;
@@ -1962,7 +2194,10 @@ canvas.addEventListener('contextmenu', (e) => {
   window.pet?.contextMenu?.();
 });
 
-window.addEventListener('mouseup', () => {
+window.addEventListener('mouseup', (e) => {
+  /* 轮盘兜底：mouseup 归主窗还是归轮盘窗是不确定的（右键在主窗按下、松手时
+   * 鼠标可能已经在别处），所以两边都提交，主进程那头是幂等的。 */
+  if (e.button === 2) window.pet?.wheelRelease?.();
   if (!dragging) return;
   dragging = false;
   window.pet?.dragEnd?.();          // 让主进程判断要不要贴屏幕边缘
@@ -2112,6 +2347,29 @@ function syncStageWidth() {
    *    这正是"按对话框固定大小，不需要点击后再调整"的落点。
    *    千万别把 talking 拌回这行算式：那会让每次对话开关都动一次窗口。 */
   const want = Math.round(Math.max(contentW, TALK_W));
+
+  /* 🔴 **只增不减**（2026-10-29，第三次「两个她」的真凶在这里）。
+   *
+   * 启动期 layout() 会跑好几轮（离屏 → 首帧 → 几何收敛），petRect.w 一轮一个值，
+   * 每轮都上报 → 窗口宽度 324 → 312 → 310 连缩两刀（高度还被 applyStageWidth
+   * 里的 refreshWinSize 带偏 2px）→ 画布 resize 两次 → **旧的大帧按新尺寸残留**，
+   * 屏幕上就是一大一小两个她。用户看到的时间点正好是底座出数，于是三次都
+   * 被误判成"底座引起"。
+   *
+   * 只增不减为什么是安全的：窗口是**全透明**的，比内容宽出来的部分是看不见的
+   * 空白；而空白区在命中测试里判成非角色 → 自动穿透（规矩 20），既不挡鼠标
+   * 也不挡视线。反过来，「缩」才是残留的唯一来路 —— 缩小后新视口比旧帧小，
+   * 超出部分留在合成面上没人重绘（Electron 官方博客 2025-12-19 那篇讲的机制）。
+   * 需要更宽的三种情况（换模型 / 用户放大 / 屏幕变化）仍然是 want > 当前宽，
+   * 照常加宽 —— 加宽时新区域本来就没画过，不会残留。
+   *
+   * 判据用 innerWidth（CSS 内容区宽）。DPR=1.5 下有 ±1 的取整误差，用 2px 容差。 */
+  const cur = Math.round(window.innerWidth);
+  if (want <= cur + 2) {
+    /* 记下来（供诊断/后续比较），但**不报**——不报就不 setBounds，不动画布。 */
+    if (want !== stageWantW) stageWantW = want;
+    return;
+  }
   if (want === stageWantW) return;
   stageWantW = want;
   window.pet?.setStageWidth?.(want);
@@ -2215,19 +2473,20 @@ window.pet?.onConfigChanged?.(async () => {
   const wasFloating = cfg?.monitor?.floating === true;
   try {
     cfg = await window.pet.getConfig();
-    hasApiKey = !!cfg?.llm?.apiKey;
+    llmUsable = !!cfg?.llm?.usable;
     applyFrameCap();   // 低配降帧等开关即时生效
     // 大小也可能是在配置里改的，跟着同步一次
     setUserScale(cfg?.appearance?.scale);
-    /* 关掉悬浮显示时，除了藏底座还得把让出去的那条高度还回来 ——
-     * 否则舞台一直矮着，人物白缩一圈（setStatsReserve 内部会重排 layout）。
+    /* 关掉悬浮显示时**只藏牌、不还高度**（2026-10-29「始终是加了底座时的大小」）：
+     * 那一条高度是写死给"底座"的，关掉它只是为了不看牌，人物不该因此变大一圈 ——
+     * 一变大就又是一次 canvas resize，正是这个 bug 的来路。
      * ⚠️ 顺手把 statsSeen 清零：这样下一次再打开时又是"先转圈再出数"，
      *    而不是拿上一次的老数字顶上（那会让人以为数字是刚采的）。 */
     if (wasFloating && cfg?.monitor?.floating !== true) {
       statsSeen = false;
       cancelStatsLoading();
       statsEl?.classList.add('hidden');
-      setStatsReserve(0);
+      applyStatsReserve();
     } else {
       /* 刚把悬浮显示打开：数据要等主进程下一次推送（~1s），先摆个转圈顶上。
        * statsSeen 为真时 scheduleStatsLoading 自己会跳过 —— 别拿转圈盖住真数字。 */
@@ -2544,7 +2803,7 @@ async function proactiveSpeak() {
     return;
   }
 
-  if (!hasApiKey) {
+  if (!llmUsable) {
     const line = proactiveLine(emotion);
     /* 留一条日志：这张表是"按情绪挑话头"，出问题（比如情绪名对不上、
      * 池子配错）时只有这里是唯一线索。 */
@@ -3056,7 +3315,9 @@ function renderStats(s) {
     statsSeen = false;
     cancelStatsLoading();
     statsEl.classList.add('hidden');
-    setStatsReserve(0);
+    /* 预留高度**不还回去**（"始终是加了底座时的大小"）：这里只是确认一下它
+     * 还等于冻结值 —— 恒等，所以什么都不会发生，更不会 resize。 */
+    applyStatsReserve();
     return;
   }
 
@@ -3082,7 +3343,9 @@ function renderStats(s) {
 
   statsEl.replaceChildren(plate);
   statsEl.classList.toggle('hidden', items.length === 0);
-  setStatsReserve(items.length === 0 ? 0 : measureStatsReserve());
+  /* 只确认、不重量：这一批数字有几项、牌有几行，都与人物大小无关
+   * （预留高度按"牌摆满"那一档冻结，见 applyStatsReserve）。 */
+  applyStatsReserve();
 }
 
 /* ============================================================
@@ -3133,7 +3396,7 @@ function renderStatsLoading() {
 
   statsEl.replaceChildren(plate);
   statsEl.classList.remove('hidden');
-  setStatsReserve(measureStatsReserve());
+  applyStatsReserve();
   console.log('[pet] stats loading');
 }
 
@@ -3164,54 +3427,86 @@ function dismissStatsLoading() {
   if (!statsEl.querySelector('.plate.loading')) return;
   statsEl.replaceChildren();
   statsEl.classList.add('hidden');
-  setStatsReserve(0);
+  applyStatsReserve();          // 预留高度不还（原因同上）
 }
 
-/* 底座实际占掉的高度（含它自己距下沿的 4px 留白），写进 --stats-h。
+/* ============================================================
+ *  底座预留高度 —— **一次量出、永久冻结**
+ *
+ *  🔴 2026-10-29 用户拍板：「始终是加了底座时的大小，这样就不用担心加载底座后
+ *     大小切换的问题了」。所以这里不再"跟着状态走"，而是定格在「牌摆满」那一档：
+ *       · 悬浮显示关着 → 也留（牌不可见，但那一条高度照样空着）
+ *       · 转圈 → 出数 → 也留（同一个值，不重量）
+ *       · 只出到 2 项（没有独显 → 没有 GPU / 温度）→ 也按 4 项的 2 行留
+ *     只要这个数**不变**，layout() 就不会因底座跑起来、canvas 也不会 resize ——
+ *     「一大一小两个她」那条链（旧帧留在窗口合成面上）从源头就没了。
+ *     之前那两次修（resize 后清屏 / 整窗 invalidate）都是**事后补锅**：
+ *     只要尺寸还会变，就总有缝。
+ * ========================================================== */
+
+/* 底座实际占掉的高度（含它自己距下沿的 4px 留白）。
  *
  * ⚠️ 量的是内层 **.plate**（可见的那块牌），不是外层 #stats ——
  *    外层是撑满宽度的定位容器，它的高度虽然此刻恰好等于 .plate，
  *    但那是"因为外层是单行 flex + align-items:flex-end"才成立的巧合。
  *    直接量 .plate 才是量的"底座真正占了多少地方"，不依赖那层巧合。
- * ⚠️ 必须**先显示、再量** —— 量一个 opacity:0 的元素拿到的 rect 是对的
- *    （opacity 不参与布局），所以这里能直接量。但量完要立刻把舞台让出来，
- *    否则 canvas 矮下去后底座可能折行（更宽/更高）→ 下一帧再调一次收敛，
- *    所以用量完的同一值回写、不递归。 */
+ * ⚠️ 量一个 opacity:0 的元素拿到的 rect 是对的（opacity 不参与布局），
+ *    所以骨架挂上去不必真的显示。 */
 function measureStatsReserve() {
   const el = statsEl.querySelector('.plate') || statsEl;
   const h = Math.ceil(el.getBoundingClientRect().height);
   return Math.max(0, h) + 4;   // +4 是底座与窗口下沿的间距（style.css 里 bottom: 4px）
 }
 
-let statsReserve = 0;
-function setStatsReserve(px) {
-  const v = Math.max(0, Math.round(px));
-  if (v === statsReserve) return;
-  const before = statsReserve;
-  statsReserve = v;
-  document.body.style.setProperty('--stats-h', `${v}px`);
-  // 舞台变矮 → canvas 尺寸变 → 必须让 layout() 重算取景（否则人物还按旧窗口排）
+/* 量高度用的骨架：行 / 格结构与真牌**完全一致**（走同一个 buildPlate、
+ * 带全部 STAT_ITEMS），只是文字换成占位符 + 整块不可见。
+ * ⚠️ 骨架必须用真 builder 造：牌高全靠行盒撑出来，空 span 的行盒是 0 高，
+ *    量出来会矮一截 —— 那就又回到"预留高度算错"的老坑。 */
+function buildStatsSkeleton() {
+  const plate = buildPlate(STAT_ITEMS, (spec) => buildStatsItem(spec, '88'));
+  plate.classList.add('skeleton');
+  return plate;
+}
+
+let statsReserve = 0;       // 冻结后的预留高度（0 = 还没量过）
+let statsApplied = -1;      // 已经写进 CSS 的那个值（-1 = 还没写）
+
+/* 把预留高度落到 CSS 上 —— **全项目唯一写 --stats-h 的地方**。
+ *
+ * 第一次调用负责"量 + 冻结"：挂骨架 → 量 → 记住 → 写 CSS → layout()。
+ * 之后每次调用只是"确认还是那个值"：恒等于已生效值就**直接返回**，
+ * 既不重量也不重排 —— 这正是出数 / 转圈 / 开关悬浮显示都不会再触发
+ * 一次 canvas resize 的原因。
+ *
+ * ⚠️ 调用点一律是**幂等的确认式调用**，别有人再传一个"算出来的新值"进来：
+ *    一旦允许按状态改数，`--stats-h` 就又会在运行中跳，前面所有的补锅
+ *    （清屏 / invalidate）都得重新背上。 */
+function applyStatsReserve() {
+  if (!statsEl) return 0;
+  if (!statsReserve) {
+    statsEl.replaceChildren(buildStatsSkeleton());
+    statsEl.classList.add('hidden');
+    statsReserve = measureStatsReserve();
+  }
+  if (statsReserve === statsApplied) return statsReserve;
+
+  const before = statsApplied;
+  statsApplied = statsReserve;
+  document.body.style.setProperty('--stats-h', `${statsReserve}px`);
+  /* 舞台高度变了 → 取景要重算。**只有第一次生效会走到**（那时 app 通常
+   * 还没建，layout() 自己早退，首帧直接按新高度排）。 */
   layout();
 
-  /* 「屏幕上一大一小两个她」的取证（2026-10-28，未解 bug）：
-   * 用户报「底座出现时出现一大一小两个模型，底座消失大模型也消失」——
-   * 这正好是**这条路径**被触发的时刻：--stats-h 一变 → layout() → canvas
-   * resize → 人物缩放跟着变。所以嫌疑从"两个进程"挪回了"同一块画布上出现了
-   * 两帧内容"（透明窗 + preserveDrawingBuffer 的合成残留）。
-   * 判据就看这一个数：**canvas 永远只有 1 个、stage 永远只有 1 个孩子**。
-   *   打印 1 / 1 → 单进程单画布，那"两个她"只能是**合成层残留**（截图抓不到、
-   *   只有肉眼可见）；打印 2 → 真的画了两份，去查为什么。 */
-  console.log('[pet] statsReserve', JSON.stringify({
-    from: before, to: v,
+  /* 取证：这个数**整场只该出现一行**。出现第二行就说明又有东西在改舞台高度。
+   * canvases / stageChildren 同时是「两个她」的定性依据：
+   *   1 / 1 → 单进程单画布（那么屏幕上真有两个只能是合成层残留）；
+   *   2   → 真的画了两份，去查 mountModel 为什么被跑了两次。 */
+  console.log('[pet] statsReserve frozen', JSON.stringify({
+    from: before, to: statsReserve,
     canvases: document.querySelectorAll('canvas').length,
-    stageChildren: app?.stage?.children?.length ?? null,
-    screen: app ? [app.screen.width, app.screen.height] : null,
-    modelScale: model ? Number(holder.scale.x.toFixed(4)) : null,
-    canvasCss: (() => {
-      const c = document.querySelector('canvas');
-      return c ? [c.style.width, c.style.height, c.width, c.height] : null;
-    })()
+    stageChildren: app?.stage?.children?.length ?? null
   }));
+  return statsReserve;
 }
 
 /* ============================================================

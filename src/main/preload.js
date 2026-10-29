@@ -42,8 +42,17 @@ contextBridge.exposeInMainWorld('pet', {
   // 心境层事件（点击 / 摸头起止 —— 只收渲染层才有的信号，拖拽聊天主进程自有）
   moodEvent: (type) => ipcRenderer.send('mood:event', { type }),
 
-  // 在角色身上右键 → 主进程弹原生菜单（表情 / 动作 / 外观 / 退出）
+  // 在角色身上右键 → 主进程弹快捷菜单（默认自绘轮盘，配置关掉时退回原生）
   contextMenu: () => ipcRenderer.send('pet:context-menu'),
+  /* 轮盘是「按住 → 划向扇区 → 松手」：按下时带上**屏幕坐标**（盘要开在鼠标处），
+   * 松手时通知主进程提交当前命中项（兜底：mouseup 归主窗还是轮盘窗不确定）。 */
+  wheelOpen: (x, y) => ipcRenderer.send('pet:wheel-open', { x, y }),
+  wheelRelease: () => ipcRenderer.send('pet:wheel-release'),
+
+  /* 要求主进程**整窗重绘**（webContents.invalidate）。画布层缩小后旧帧会留在
+   * "新内容不再覆盖"的区域里 —— 详见 main.js 里 pet:repaint 那段（Electron
+   * 官方博客《Tech Talk: Improving Window Resize Behavior》）。 */
+  repaint: () => ipcRenderer.send('pet:repaint'),
 
   quit: () => ipcRenderer.send('pet:quit'),
   hide: () => ipcRenderer.send('pet:hide'),

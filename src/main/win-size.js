@@ -78,12 +78,17 @@ function refreshWinSize() {
 
 /* 渲染层报上来的「窗口该多宽」。返回夹过之后实际采纳的值（0 = 无效，不采纳）。
  * ⚠️ 这里只改 SIZE.w，**不碰窗口** —— 挪窗口得保住右边缘，那件事只有主进程
- *    做得了（见 main.js 的 setStageWidth）。 */
+ *    做得了（见 main.js 的 setStageWidth）。
+ * 🔴 2026-10-29：**不许在这里调 refreshWinSize()**。它会把高度按当时的
+ *    workArea 重算一遍 —— 启动早期 workArea 还没稳（任务栏/DPI 初始化中），
+ *    于是窗口高 344→342 变一次 → 渲染层 canvas 跟着 resize →「两个她」。
+ *    高度只该在**屏幕真的变了**时变（见 main.js 的 screen 事件）。
+ *    宽度的收敛策略见渲染层 syncStageWidth（只增不减）。 */
 function applyStageWidth(want) {
   const q = Math.round(Number(want));
   if (!Number.isFinite(q) || q <= 0) return 0;
   reportedW = Math.min(WIN_W_MAX, Math.max(WIN_W_MIN, q));
-  refreshWinSize();
+  SIZE.w = reportedW;
   return reportedW;
 }
 

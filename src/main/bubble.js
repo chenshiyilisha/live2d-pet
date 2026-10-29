@@ -390,6 +390,22 @@ async function measureHead() {
   } catch { /* 窗口正在销毁 / capturePage 失败：下次布局再量 */ }
 }
 
+/* 头顶锚点（**屏幕坐标**）：给别的"头顶浮层"用（泡泡菜单）。
+ * 🔴 headTop 是**窗内**坐标，必须配 contentBounds 换算 —— 规矩 20：锚
+ *    getContentBounds()，绝不用 getBounds() 反推。x 取人物中线（人物恒居中）。
+ * ⚠️ 还没量到（headTop 为 null，模型没画出来 / 软件合成糊成白块）时退回窗顶：
+ *    位置会高一点，但**绝不会飘到别处去** —— 与 place() 的 fail-open 同源。
+ *    规矩 9：这条换算只有这一处，别在别处再拼一次 b.y + headTop。 */
+function headAnchor() {
+  const main = getWindow();
+  if (!main || main.isDestroyed()) return null;
+  const b = main.getContentBounds();
+  return {
+    x: Math.round(b.x + b.width / 2),
+    y: Math.round(b.y + (headTop != null && headTop > 0 ? headTop : 0))
+  };
+}
+
 function requestMeasure() {
   if (measureTimer) return;               // 已有排队中的量，节流
   measureTimer = setTimeout(() => {
@@ -685,6 +701,7 @@ module.exports = {
   configureBubble,
   registerBubbleIpc,
   requestMeasure,
+  headAnchor,
   beginStream,
   appendChunk,
   appendThink,

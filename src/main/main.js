@@ -6,6 +6,7 @@ const {
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 /* 这一层只做「编排」：起服务、建窗口、装托盘、挂 IPC、开机自启。
  * 具体能力全在 src/main/ 下的独立模块里：
@@ -44,6 +45,11 @@ const { startLocalServer } = require('./server');
 const { collectStats, formatStats, startSensorWatch, stopSensorWatch, waitForFirstGpu, HUD_FIELDS, FULL_FIELDS } = require('./sysinfo');
 const { recognizeWav } = require('./speech');
 const { streamLLM, createStreamFilter } = require('./llm');
+/* 模型目录（预设 + 端点判定 + WorkBuddy models.json 解析）。
+ * 纯数据/纯函数，断言见 debug/verify-llm-providers.js。 */
+const {
+  PROVIDERS, providerById, currentProviderId, isLocalUrl, isUsable, toPatch, fromWorkBuddyModels
+} = require('./llm-providers');
 const { analyzeRepetition, REPEAT_WINDOW } = require('./repetition-guard');
 const {
   setReminderSink, addReminder, clearReminders, reminderCount,
@@ -67,6 +73,9 @@ const {
 const { startSynth, stopSynth, synthWav } = require('./tts');
 const { configureUpdater, checkForUpdates, updaterStatus } = require('./updater');
 const bubble = require('./bubble');
+const wheel = require('./wheel');
+const bubbleMenu = require('./bubble-menu');
+const cardMenu = require('./card-menu');
 const { createMoodEngine } = require('./mood');
 const memory = require('./memory');
 
@@ -297,6 +306,17 @@ function createWindow() {
    * 漏一处就有一处偷偷跑到满帧（用户还以为藏起来就省了）。 */
   mainWindow.on('show', notifyVisibility);
   mainWindow.on('hide', notifyVisibility);
+  if (process.env.PET_WINSIZE_LOG) {
+    /* 诊断开关：PET_WINSIZE_LOG=1 时把「谁在动窗口尺寸」全打出来。
+     * 存在的理由：第三次「两个她」的来路是**窗口被缩**（旧帧比新视口大 →
+     * 合成面残留），而缩窗口的调用点分散在 setStageWidth / 屏幕事件 /
+     * 拖拽三条路径上，渲染层只能看到结果（canvasResize 出现第二行）。
+     * 用这个开关跑一次就能把「渲染层看到的第二行」对上「主进程哪一行」。
+     * ⚠️ 默认关闭，别改成常驻日志（每帧 setStageWidth 都会打一行）。 */
+    mainWindow.on('resize', () => console.log('[winsize] win-resize', JSON.stringify({
+      bounds: mainWindow.getBounds(), content: mainWindow.getContentBounds(), SIZE: { ...SIZE }, t: Date.now()
+    })));
+  }
 
   /* 启动时把生效的名字打出来。
    * 名字有三处落点（托盘 / 标题 / 人设自称），用户改名后如果哪一处没跟着变，
@@ -901,6 +921,277 @@ async function promptRename() {
 }
 
 /* ============================================================
+ *  模型接入（连接预设 / WorkBuddy 导入 / 真测一句）
+ * ==========================================================
+ *
+ *  背景：`llm.js` 一直是 OpenAI 兼容的，换一家只改 baseUrl / model / key，
+ *  但**入口只有「打开配置文件手改 JSON」** —— 填错的表现是等 20 秒超时，
+ *  用户根本分不清是"地址错"还是"key 错"还是"模型名错"。
+ *
+ *  这一层的职责就是把这三件事变成菜单里能点、能看见状态的：
+ *    · 预设一键填（改 provider + baseUrl + model，**不动已填的 key**）
+ *    · 从 WorkBuddy 的自定义模型文件导入（它就是 OpenAI 兼容的一堆端点）
+ *    · 真发一句，按状态码区分"key 无效 / 地址或模型名不对 / 连不上 / 超时"
+ *
+ *  🔴 边界：WorkBuddy **内置模型**（快速/均衡/极致）走的是它自己的云端额度，
+ *     凭据在桌面 App 内部，外部进程拿不到，**这里导入的只是它的「自定义模型」**。
+ *     官方 schema 见 workbuddy.cn/docs/cli/models（models[].url 是完整接口路径）。
+ * ========================================================== */
+
+/* WorkBuddy / CodeBuddy 的自定义模型文件位置（官方文档写的就是这个路径）。 */
+const workBuddyModelsFile = () => path.join(os.homedir(), '.workbuddy', 'models.json');
+
+/* 菜单标题里显示"现在用的是哪家"。
+ * 顺序：已知预设 → WorkBuddy 导入的 → 手填地址的 host → 兜底文案。
+ * ⚠️ 不要用 provider 字段直接当标签：旧配置里可能压根没有这个键。 */
+function llmLabelText(cfg = loadConfig()) {
+  const llm = cfg?.llm || {};
+  const id = currentProviderId(llm);
+  const p = providerById(id);
+  if (p && !p.custom) return p.label;
+  if (id === 'workbuddy') return `WorkBuddy · ${llm.model || '模型'}`;
+  try {
+    return new URL(String(llm.baseUrl || '')).host || '自定义';
+  } catch {
+    return '自定义';
+  }
+}
+
+/* 读 WorkBuddy 的 models.json。读不到/坏档都返回空列表 ——
+ * 读别人的配置文件失败不是本程序的错，不该冒泡到 UI。 */
+function readWorkBuddyModels() {
+  const file = workBuddyModelsFile();
+  let raw = '';
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch {
+    return { file, list: [] };
+  }
+  return { file, list: fromWorkBuddyModels(raw) };
+}
+
+/* 切到某条预设。custom 不覆盖地址（见 llm-providers 的 toPatch）。 */
+function applyLlmProvider(id) {
+  const p = providerById(id);
+  if (!p) return;
+  patchConfig('llm', toPatch(p));
+  const llm = loadConfig().llm || {};
+  if (p.custom) {
+    toast('已切到自定义：填地址与模型名');
+    llmDialog();
+    return;
+  }
+  if (p.local) {
+    toast(`已切到「${p.label}」：本机端点，不用填 key`);
+    return;
+  }
+  if (!isUsable(llm)) {
+    toast(`已切到「${p.label}」，填个 key 就能聊`);
+    llmDialog();
+    return;
+  }
+  toast(`已切到「${p.label}」`);
+}
+
+/* 把 WorkBuddy 里配好的某条自定义模型搬过来。
+ * 地址/模型/key 一起搬 —— 那条模型在 WorkBuddy 里能跑，搬过来就该能跑。 */
+function importWorkBuddyModel(entry) {
+  if (!entry) return;
+  const patch = { provider: 'workbuddy', baseUrl: entry.baseUrl, model: entry.model };
+  if (entry.apiKey) patch.apiKey = entry.apiKey;
+  patchConfig('llm', patch);
+  toast(entry.keyIsRef
+    ? `已导入「${entry.label}」：它的 key 是环境变量引用，需在系统里设好那个变量`
+    : `已导入「${entry.label}」`);
+}
+
+/* 真发一句。**只判"能不能聊"，不判回答质量** —— 所以 max_tokens 给小、
+ * 不加任何提示词，能返回 200 且有正文就算通。
+ *
+ * 为什么要真发而不是打 /models：/models 通了但模型名写错的情况极常见
+ * （各家模型 id 命名完全不同），只有真发 chat 才能同时验证地址+key+模型名。
+ * 超时给 15 秒：本地模型首次加载权重要十几秒，云端一般 2 秒内。 */
+async function testLlm() {
+  const llm = loadConfig().llm || {};
+  if (!isUsable(llm)) {
+    toast('还没填 key：先在「模型接入 → 填写 / 修改 Key」里填');
+    return;
+  }
+  const url = `${String(llm.baseUrl || '').replace(/\/+$/, '')}/chat/completions`;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 15000);
+  toast(`正在试一句（${llm.model || '模型'}）…`);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      signal: ac.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(llm.apiKey ? { Authorization: `Bearer ${llm.apiKey}` } : {})
+      },
+      body: JSON.stringify({
+        model: llm.model,
+        messages: [{ role: 'user', content: '用一句话打个招呼' }],
+        max_tokens: 32,
+        stream: false
+      })
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      /* 状态码直接翻译成用户能动手的结论 —— 这三类占了实测失败的绝大多数。 */
+      const hint =
+        res.status === 401 || res.status === 403 ? '：key 无效或没权限' :
+        res.status === 404 ? '：地址或模型名不对' :
+        res.status === 429 ? '：限流 / 额度用完' : '';
+      toast(`模型连不通（HTTP ${res.status}）${hint}`);
+      console.log('[llm-test] fail', res.status, body.slice(0, 300));
+      return;
+    }
+    const data = await res.json().catch(() => null);
+    const text = data?.choices?.[0]?.message?.content ?? '';
+    toast(text ? `模型已就绪：「${String(text).trim().slice(0, 20)}」` : '模型已连通（没解析到正文）');
+    console.log('[llm-test] ok', JSON.stringify({ url, model: llm.model, chars: String(text).length }));
+  } catch (err) {
+    toast(err?.name === 'AbortError' ? '模型超时：15 秒没回' : `模型连不上：${err?.message || err}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* 填地址 / 模型 / key 的小窗。与改名对话框同一套路（BrowserWindow + data: URL +
+ * 轮询取值），不扩 IPC 面。
+ *
+ * 为什么不做成"完整设置页"：那是 M5 的活（要排版、校验、折叠高级项）。
+ * 这里只解决"选完预设后 key 没地方填"这一个卡点。 */
+function llmDialog() {
+  const cfg = loadConfig();
+  const llm = cfg.llm || {};
+  const p = providerById(llm.provider);
+
+  return new Promise((resolve) => {
+    const w = new BrowserWindow({
+      width: 460,
+      height: 320,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      frame: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
+      modal: !!mainWindow && !mainWindow.isDestroyed(),
+      show: false,
+      backgroundColor: '#1e1e22',
+      webPreferences: { contextIsolation: true, nodeIntegration: false }
+    });
+
+    const html = `<!doctype html><meta charset="utf-8"><style>
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{background:#1e1e22;color:#e8e8ea;font:13px/1.5 "Microsoft YaHei",system-ui,sans-serif;
+           padding:16px 20px;user-select:none}
+      h2{font-size:13px;font-weight:500;margin-bottom:4px}
+      .sub{font-size:12px;color:#9a9aa4;margin-bottom:12px}
+      label{display:block;font-size:12px;color:#9a9aa4;margin:10px 0 4px}
+      input{width:100%;height:30px;padding:0 10px;border-radius:6px;border:1px solid #3a3a40;
+            background:#2a2a30;color:#fff;font:13px/1 inherit;outline:none}
+      input:focus{border-color:#5a5a66}
+      .row{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+      button{height:28px;padding:0 14px;border-radius:6px;border:1px solid #3a3a40;
+             background:#2a2a30;color:#e8e8ea;font-size:13px;cursor:pointer}
+      button.primary{background:#4a6cf7;border-color:#4a6cf7;color:#fff}
+      button:hover{filter:brightness(1.15)}
+      .row .left{margin-right:auto}
+      .tipline{font-size:11px;color:#7d7d88;margin-top:10px;line-height:1.6}
+    </style>
+    <h2>模型接入</h2>
+    <div class="sub" id="cur"></div>
+    <label>接口地址（到 /v1 这一级）</label>
+    <input id="u" spellcheck="false">
+    <label>模型名</label>
+    <input id="m" spellcheck="false">
+    <label>API Key</label>
+    <input id="k" type="password" spellcheck="false" autocomplete="off">
+    <div class="tipline" id="tip"></div>
+    <div class="row">
+      <button class="left" id="open">去申请 Key</button>
+      <button id="c">取消</button><button class="primary" id="s">保存</button>
+    </div>
+    <script>
+      const U = ${JSON.stringify(String(llm.baseUrl || ''))};
+      const M = ${JSON.stringify(String(llm.model || ''))};
+      const K = ${JSON.stringify(String(llm.apiKey || ''))};
+      const KEY_URL = ${JSON.stringify((p && p.keyUrl) || '')};
+      const LOCAL = ${JSON.stringify(!!(p && p.local))};
+      document.getElementById('u').value = U;
+      document.getElementById('m').value = M;
+      const kEl = document.getElementById('k');
+      kEl.value = K;
+      document.getElementById('cur').textContent = ${JSON.stringify(`${p ? p.label : '自定义'}${LOCAL ? '（本机端点，key 可以留空）' : ''}`)};
+      document.getElementById('tip').textContent = LOCAL
+        ? '本机端点不需要 API Key。保存后点「模型接入 → 测试连接」确认能聊。'
+        : (KEY_URL ? '还没有 Key？点左下角按钮打开申请页，复制后粘贴到这里。' : '保存后点「模型接入 → 测试连接」确认能聊。');
+      const openBtn = document.getElementById('open');
+      if (!KEY_URL) openBtn.style.visibility = 'hidden';
+      document.getElementById('open').onclick = () => { window.__llmResult = { open: KEY_URL }; };
+      document.getElementById('s').onclick = () => {
+        window.__llmResult = {
+          baseUrl: document.getElementById('u').value.trim(),
+          model: document.getElementById('m').value.trim(),
+          apiKey: kEl.value.trim()
+        };
+      };
+      document.getElementById('c').onclick = () => { window.__llmResult = { cancel: true }; };
+      window.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape') window.__llmResult = { cancel: true };
+        if (ev.key === 'Enter') document.getElementById('s').click();
+      });
+      document.getElementById('u').focus();
+    <\/script>`;
+
+    w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    w.once('ready-to-show', () => w.show());
+
+    let finished = false;
+    const finish = (val) => {
+      if (finished) return;
+      finished = true;
+      clearInterval(timer);
+      if (!w.isDestroyed()) w.destroy();
+      resolve(val);
+    };
+    const timer = setInterval(async () => {
+      if (w.isDestroyed()) { finish(undefined); return; }
+      try {
+        const v = await w.webContents.executeJavaScript('window.__llmResult ?? undefined');
+        if (v === undefined) return;
+        if (v.open) {
+          /* 只开申请页，**不关窗** —— 用户复制完 key 还要回来粘贴。 */
+          w.webContents.executeJavaScript('window.__llmResult = undefined');
+          try { shell.openExternal(v.open); } catch { /* ignore */ }
+          return;
+        }
+        finish(v.cancel ? undefined : v);
+      } catch { /* 页面还在加载 */ }
+    }, 120);
+    w.on('closed', () => { if (!finished) { finished = true; clearInterval(timer); resolve(undefined); } });
+  });
+}
+
+async function promptLlm() {
+  const next = await llmDialog();
+  if (!next) return false;
+  const before = loadConfig().llm || {};
+  patchConfig('llm', {
+    baseUrl: next.baseUrl || before.baseUrl,
+    model: next.model || before.model,
+    apiKey: next.apiKey
+  });
+  toast('模型配置已保存');
+  return true;
+}
+
+
+/* ============================================================
  *  角色设定（人设）对话框
  * ==========================================================
  *
@@ -1190,6 +1481,7 @@ function setStageWidth(want) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const prev = SIZE.w;
   const width = applyStageWidth(want);
+  if (process.env.PET_WINSIZE_LOG) console.log('[winsize] setStageWidth', JSON.stringify({ want, prev, width, SIZE: { ...SIZE }, t: Date.now() }));
   if (!width || width === prev) return;
   cancelMoveAnim();
 
@@ -1237,6 +1529,26 @@ function setOpacity(v) {
   patchConfig('appearance', { opacity: o });
   syncAppearance();
   toast(`不透明度 ${Math.round(o * 100)}%`);
+}
+
+/* 不透明度循环档：100 → 90 → 80 → 70 → 回到 100。
+ * 泡泡菜单里只给一个「更透明」而不是列出四个档位 —— 省两个泡泡（Material 的
+ * FAB menu 上限 6 项），而且"再点一次继续变淡"比挑数字更像在跟她玩。
+ * ⚠️ 档位数组只有这一处（规矩 9），托盘里那个子菜单也读它。 */
+const OPACITY_STEPS = [1, 0.9, 0.8, 0.7];
+function cycleOpacity() {
+  const cur = clampOpacity(loadConfig().appearance?.opacity);
+  /* 浮点不能直接 === 比（0.9 落盘再读回来可能是 0.9000000001），找**最近**的档
+   * 再往下走一格；认不出来（用户手改过配置）就从 100 重新开始。 */
+  let idx = -1;
+  let bd = Infinity;
+  for (let i = 0; i < OPACITY_STEPS.length; i++) {
+    const d = Math.abs(OPACITY_STEPS[i] - cur);
+    if (d < bd) { bd = d; idx = i; }
+  }
+  const next = bd > 0.02 ? OPACITY_STEPS[1]
+    : OPACITY_STEPS[(idx + 1) % OPACITY_STEPS.length];
+  setOpacity(next);
 }
 
 function toggleTTS() {
@@ -1326,6 +1638,7 @@ function buildMenuTemplate() {
     flag('appearance', 'jitter', '表情节奏抖动'),
     flag('appearance', 'emotionDecay', '情绪自然回落'),
     flag('appearance', 'mood', '心境会慢慢变'),
+    flag('appearance', 'stickers', '情绪贴纸（自带表情）'),
     flag('appearance', 'textureLod', '纹理降档（省显存）'),
     flag('appearance', 'alwaysOnTop', '窗口置顶')
   ];
@@ -1451,10 +1764,48 @@ function buildMenuTemplate() {
     upd.state === 'ready' ? `更新（${upd.version} 待安装）` :
     upd.version ? `更新（有新版 ${upd.version}）` : '更新';
 
+  /* 模型接入收进「设置」子菜单 —— 顶层四组的限制（规矩 5）不能为了它破。
+   * 组标题直接写出「现在哪家 + 有没有 key」，不展开也能判断她为什么只会背稿。 */
+  const wbModels = readWorkBuddyModels();
+  const llmReady = isUsable(cfg.llm);
+  /* 打勾的那一条要按 currentProviderId 算（旧配置没有 provider 字段，
+   * 按 baseUrl 反查）—— 否则老用户打开菜单会一条都不勾。 */
+  const activeProvider = currentProviderId(cfg.llm);
+  const llmMenu = {
+    label: `模型接入（${llmLabelText(cfg)}${llmReady ? '' : ' · 没 key'}）`,
+    submenu: [
+      ...PROVIDERS.map((p) => ({
+        label: p.label,
+        type: 'radio',
+        checked: activeProvider === p.id,
+        click: () => applyLlmProvider(p.id)
+      })),
+      { type: 'separator' },
+      /* WorkBuddy 里配好的自定义模型：为什么值得接 —— 同一套 key 复用到桌宠，
+       * 不用为"再填一遍"回去翻控制台。文件不存在/为空时给出可操作提示。 */
+      wbModels.list.length
+        ? {
+            label: `从 WorkBuddy 导入（${wbModels.list.length}）`,
+            submenu: wbModels.list.slice(0, 12).map((entry) => ({
+              label: entry.label,
+              click: () => importWorkBuddyModel(entry)
+            }))
+          }
+        : {
+            label: '从 WorkBuddy 导入（models.json 里没有模型）',
+            enabled: false
+          },
+      { type: 'separator' },
+      { label: '填写 / 修改 Key…', click: () => { promptLlm(); } },
+      { label: '测试连接', click: () => { testLlm(); } }
+    ]
+  };
+
   const settingsMenu = [
     // 当前名字写进标签里，不用点进去就知道现在叫什么
     { label: `重命名（当前：${resolveName(cfg)}）`, click: () => { promptRename(); } },
     { label: `角色设定${personaStateLabel(cfg)}`, click: () => { promptPersona(); } },
+    llmMenu,
     { type: 'separator' },
     {
       label: updateLabel,
@@ -1663,7 +2014,8 @@ function rememberAfterTurn(messages, assistantText) {
   }
 
   if (cfg.memory?.llmExtract === false) return;
-  if (!cfg.llm?.apiKey) return;
+  /* 和聊天同一条判定：本机端点（Ollama/LM Studio）没有 key 也能抽。 */
+  if (!isUsable(cfg.llm)) return;
 
   /* 已经有启发式命中时仍可补抽，但跳过明显无信息的短句 */
   if (userText.trim().length < 4) return;
@@ -2077,10 +2429,14 @@ function registerIpc() {
     pushMoodSnapshot();
   });
 
-  /* ---- 在角色身上右键弹出的快捷菜单 ---- */
+  /* ---- 在角色身上右键弹出的快捷菜单 ----
+   * 默认**自绘轮盘**（右键按住 → 划向扇区 → 松手），配置 interaction.radialMenu
+   * 关掉时退回系统原生菜单 —— 原生样式改不了（Electron 官方 issue #4990 的原话：
+   * 样式由 OS 决定），但它是兜底，得留着。 */
   ipcMain.on('pet:context-menu', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     const cfg = loadConfig();
+    if (cfg.interaction?.radialMenu !== false) return;   // 默认走轮盘，这里只管回退
     const send = (ch, payload) => {
       try { mainWindow.webContents.send(ch, payload); } catch { /* ignore */ }
     };
@@ -2131,6 +2487,208 @@ function registerIpc() {
       { label: '退出', click: () => app.quit() }
     ]);
     menu.popup({ window: mainWindow });
+  });
+
+  /* ---- 轮盘菜单的数据（主进程生成，渲染层只回传 id） ----
+   * ⚠️ 命令全部留在主进程：页面拿不到 Node，也拿不到这些能力，它只负责"用户
+   *    选了哪个 id"。这样加命令不用动 wheel.html。
+   *
+   * 分层依据 Kurtenbach & Buxton 的实测：4 项 × 4 层错误率约 5%、8 项 × 2 层
+   * 也在 10% 以内，但每层 8 项且深度 > 1 会迅速飙过 10%。所以**外环压到 6 项**、
+   * 只有叶子多的那一组（表情 8 个）才放到内环，深度最多 2 层。
+   * 「退出」特意放在内环（第二级）—— 破坏性命令不该一次手势就够得着。 */
+  function buildPetWheel() {
+    const cfg = loadConfig();
+    const send = (ch, payload) => {
+      try { mainWindow.webContents.send(ch, payload); } catch { /* ignore */ }
+    };
+    const actions = new Map();
+    const put = (id, fn) => { actions.set(id, fn); return id; };
+    const scale = Math.round(clampScale(cfg.appearance?.scale) * 100);
+    const opacity = clampOpacity(cfg.appearance?.opacity);
+
+    const emos = [
+      ['calm', '平静'], ['happy', '开心'], ['smile', '微笑'], ['think', '思考'],
+      ['shy', '害羞'], ['serious', '认真'], ['surprised', '惊讶'], ['sleepy', '困倦']
+    ];
+
+    const items = [
+      {
+        id: 'emo', label: '表情', icon: 'smile',
+        kids: emos.map(([k, label]) => ({
+          id: put(`emo.${k}`, () => send('pet:set-emotion', { name: k })), label
+        }))
+      },
+      {
+        id: 'motion', label: '动作', icon: 'hand',
+        kids: [
+          { id: put('motion.greet', () => send('pet:play-motion', { group: 'TapBody' })), label: '打个招呼' },
+          { id: put('motion.idle', () => send('pet:play-motion', { group: 'Idle' })), label: '随便动动' }
+        ]
+      },
+      {
+        id: 'scale', label: '大小', sub: `${scale}%`, icon: 'zoomIn',
+        kids: [
+          { id: put('scale.up', () => bumpScale(SCALE_STEP)), label: '放大' },
+          { id: put('scale.down', () => bumpScale(-SCALE_STEP)), label: '缩小' },
+          { id: put('scale.reset', resetScale), label: '重置 100%' }
+        ]
+      },
+      {
+        id: 'opacity', label: '透明', sub: `${Math.round(opacity * 100)}%`, icon: 'sun',
+        kids: [1, 0.9, 0.8, 0.7].map((v) => ({
+          id: put(`opacity.${v}`, () => setOpacity(v)), label: `${Math.round(v * 100)}%`
+        }))
+      },
+      /* 朗读是叶子（一次手势切开关）。
+       * ⚠️ 轮盘**只留"玩"的那部分**：重命名 / 角色设定 / 检查更新 / 打开配置
+       *    文件 / 退出一律不进轮盘 —— 它们在托盘菜单里都有（第二入口本来就是
+       *    硬要求），而且退出这种破坏性命令不该一次手势就够得着（muriel 规范：
+       *    "Do not hide a destructive… inside a gesture-only path"）。 */
+      {
+        id: put('tts', toggleTTS),
+        label: '朗读', sub: isOn('tts', 'enabled', false) ? '开' : '关',
+        icon: 'volume2'
+      },
+      { id: put('hide', () => mainWindow?.hide()), label: '隐藏', icon: 'eyeOff' }
+    ];
+    return { items, actions };
+  }
+
+  /* ---- 快捷菜单的数据（主进程生成，渲染层只回传 id）----
+   * 顶层 5 项：表情 / 动作 / 外观 / 朗读 / 隐藏，分三组（两条分隔线）。
+   * 「大小」和「透明」合成一个「外观」：菜单要短（规矩 5），而且这两项都属于
+   * "外观"这一类，分开列只会把卡片撑高。
+   * 深度最多 2 层（Apple HIG：最多一级子菜单）。
+   * ⚠️ 命令全部留在主进程：页面拿不到 Node，只负责"用户选了哪个 id"。
+   *    这样加命令不用动 card-menu.html / bubble-menu.html。
+   * ⚠️ 泡泡（技术储备）和卡片（默认）**共用这一份** —— 两份数据长得一样却各写
+   *    一遍，迟早一个改了另一个没改。 */
+  function buildPetMenu() {
+    const send = (ch, payload) => {
+      try { mainWindow.webContents.send(ch, payload); } catch { /* ignore */ }
+    };
+    const actions = new Map();
+    const put = (id, fn) => { actions.set(id, fn); return id; };
+
+    const emos = [
+      ['calm', '平静'], ['happy', '开心'], ['smile', '微笑'], ['think', '思考'],
+      ['shy', '害羞'], ['serious', '认真'], ['surprised', '惊讶'], ['sleepy', '困倦']
+    ];
+
+    const items = [
+      {
+        id: 'emo', label: '表情', icon: 'smile',
+        kids: emos.map(([k, label]) => ({
+          id: put(`emo.${k}`, () => send('pet:set-emotion', { name: k })), label
+        }))
+      },
+      {
+        id: 'motion', label: '动作', icon: 'hand',
+        kids: [
+          { id: put('motion.greet', () => send('pet:play-motion', { group: 'TapBody' })), label: '打个招呼' },
+          { id: put('motion.idle', () => send('pet:play-motion', { group: 'Idle' })), label: '随便动动' }
+        ]
+      },
+      { sep: true },
+      {
+        id: 'look', label: '外观', icon: 'zoomIn',
+        kids: [
+          { id: put('scale.up', () => bumpScale(SCALE_STEP)), label: '放大' },
+          { id: put('scale.down', () => bumpScale(-SCALE_STEP)), label: '缩小' },
+          { id: put('scale.reset', resetScale), label: '重置 100%' },
+          /* 「更透明」是循环档（100→90→80→70→100）：比一次列出 4 个档位省三行，
+           * 而且"再点一次继续变淡"比挑数字更符合桌宠的调性。 */
+          { id: put('opacity.cycle', cycleOpacity), label: '更透明' }
+        ]
+      },
+      {
+        id: put('tts', toggleTTS),
+        label: '朗读', sub: isOn('tts', 'enabled', false) ? '开' : '关',
+        icon: 'volume2'
+      },
+      { sep: true },
+      /* 🔴 「重命名 / 角色设定 / 检查更新 / 打开配置文件 / 退出」一律不进这张
+       *    菜单：托盘里都有（第二入口本来就是硬要求），而且退出这种破坏性命令
+       *    不该一次手势就够得着（muriel 规范原话："Do not hide a destructive,
+       *    legal, financial, or permission consequence inside an unlabeled glyph
+       *    or a gesture-only path."）。 */
+      { id: put('hide', () => mainWindow?.hide()), label: '隐藏', icon: 'eyeOff' }
+    ];
+    return { items, actions };
+  }
+
+  /* 泡泡的锚点 = 她头顶（屏幕坐标）。
+   * 🔴 头顶 y 只有一处来源（bubble.js 实量的 headTop + contentBounds 换算，
+   *    规矩 20/27）。量不到时退回窗顶 —— 位置高一点，但绝不会飘到别处。 */
+  function petHeadAnchor() {
+    const a = bubble.headAnchor();
+    if (a) return a;
+    const b = mainWindow && !mainWindow.isDestroyed() ? mainWindow.getContentBounds() : null;
+    if (!b) return { x: 0, y: 0 };
+    return { x: Math.round(b.x + b.width / 2), y: Math.round(b.y) };
+  }
+
+  /* ⚠️ 频道名还是 `pet:wheel-open`（历史名，从轮盘那版沿用）。改名要同步动
+   *    preload.js 和 renderer/pet.js 两处，收益只是好看，先留着。 */
+  ipcMain.on('pet:wheel-open', (_e, pos) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const cfg = loadConfig();
+    if (cfg.interaction?.rightMenu === false) return;
+    const x = Number(pos?.x);
+    const y = Number(pos?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+    /* 形态分流（规矩 4：新形态是开关）：
+     *   'card'（默认）光标处卡片 | 'bubble' 头顶泡泡 | 'wheel' 自绘轮盘
+     * 后两个都是**技术储备**：代码完整保留，改一个字符串就能切回去。 */
+    const form = cfg.interaction?.petMenu;
+    if (form === 'wheel') {
+      const { items, actions } = buildPetWheel();
+      /* 底色开关（interaction.radialTint）。色值不在主进程，只传布尔。 */
+      wheel.show(items, actions, x, y, { tint: cfg.interaction?.radialTint !== false });
+      return;
+    }
+
+    const { items, actions } = buildPetMenu();
+    if (form === 'bubble') {
+      /* 泡泡是**离散圆点**，没有"分隔线"这个概念 —— 把 {sep:true} 滤掉再给。 */
+      bubbleMenu.show(items.filter((it) => !it.sep), actions, petHeadAnchor(),
+        { tint: cfg.interaction?.petMenuTint !== false });
+      return;
+    }
+
+    cardMenu.show(items, actions, { x, y },
+      { tint: cfg.interaction?.petMenuTint !== false });
+  });
+
+  /* 主窗这边收到的右键松手（菜单窗自己还有一条，两条都幂等）。 */
+  ipcMain.on('pet:wheel-release', () => {
+    const form = loadConfig().interaction?.petMenu;
+    if (form === 'wheel') wheel.release();
+    else if (form === 'bubble') bubbleMenu.release();
+    else cardMenu.release();
+  });
+
+  /* 渲染层要求「整窗重绘」。
+   *
+   * 🔴 2026-10-29「两个她」的第二次修（第一次只清画布，**不够** —— 用户实测仍复现）。
+   *    官方一手资料：Electron 博客《Tech Talk: Improving Window Resize Behavior》
+   *    （2025-12-19），原文两条：
+   *      · 「只有视口会在新帧到来时被重绘，其余部分保持原样」
+   *      · 「缩小窗口的某些情况下…裁剪矩形的一部分仍然显示以前的帧，因为新帧
+   *        更小，而超出新视口的区域我们从来没有重绘」
+   *    官方修法 = **把视口之外曾经画过的区域涂成透明**，补丁随 Electron 39.2.6
+   *    落地；我们是 44.7.0，那条补丁**已经在里面了**。
+   *
+   *    但它修的是「**窗口** resize」。我们这个场景窗口尺寸不变、只有**画布层**
+   *    缩小（--stats-h 只让 #stage 变矮），不在它的覆盖范围内，所以症状还在。
+   *    原理可以照搬：旧帧占着"新内容不再覆盖"的那块区域，得主动要求整窗重绘，
+   *    让合成器把那块丢掉。`webContents.invalidate()` 就是官方口子
+   *    （"Schedules a full repaint of the window this web contents is in"）。 */
+  ipcMain.on('pet:repaint', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    try { mainWindow.webContents.invalidate(); } catch { /* 正在销毁 */ }
   });
 
   /* ---- 系统状态 ---- */
@@ -2236,7 +2794,13 @@ function registerIpc() {
 
   ipcMain.handle('config:get', () => {
     const cfg = loadConfig();
-    return { ...cfg, llm: { ...cfg.llm, apiKey: cfg.llm.apiKey ? '***' : '' } };
+    /* usable 是**派生**字段，别写进配置：判定规则只有一处（llm-providers.isUsable），
+     * 渲染层拿到布尔值直接用 —— 让渲染层自己判就会多出第二份"什么算能聊"的定义，
+     * 一旦本地免 key 那条规则改动，两边必然不同步。 */
+    return {
+      ...cfg,
+      llm: { ...cfg.llm, apiKey: cfg.llm.apiKey ? '***' : '', usable: isUsable(cfg.llm) }
+    };
   });
 
   /* 主人此刻在听什么。开关关着时恒为 null —— 渲染层不用自己判开关。
@@ -2579,8 +3143,9 @@ if (!gotLock) {
      *     位置还在屏幕内就原地不动，跑到屏幕外才拉回右下角。
      * ⚠️ 一律用 setBounds 带死宽高 —— 透明无边框窗口上 setPosition 会
      *    触发 DWM 边框重算、把窗口撑大（见 pet:drag-move 的注释）。 */
-    const onDisplayChanged = () => {
+    const onDisplayChanged = (e, d) => {
       const resized = refreshWinSize();
+      if (process.env.PET_WINSIZE_LOG) console.log('[winsize] displayChanged', JSON.stringify({ e, id: d?.id, area: d?.workArea, resized, SIZE: { ...SIZE }, t: Date.now() }));
       if (!mainWindow) return;
       // 重定位也按窗口当前所在的那块屏算
       const { workArea } = currentDisplay();
@@ -2712,6 +3277,9 @@ if (!gotLock) {
     moodEngine.save(moodFile());      // 时间戳落盘 → 下次启动按它离线补漂
     disposeMotion();
     disposeReminders();
+    wheel.dispose();        // 轮盘窗有轮询定时器，退出前必须停掉
+    bubbleMenu.dispose();   // 泡泡菜单同理（技术储备不豁免：切过去也要能退干净）
+    cardMenu.dispose();     // 卡片菜单（默认形态）—— 轮询 + 悬停定时器都得停
     /* 常驻的采样进程必须显式杀掉：Windows 上父进程退出**不会**带走子进程，
      * 留着它就是一个永远在跑的 powershell.exe。 */
     stopFullscreenWatch();

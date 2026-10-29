@@ -251,11 +251,22 @@ const DEFAULT_CONFIG = {
      * 本开关对当前素材自然不触发；保留给将来更大纹理的素材。
      * 默认开。关掉 = 纹理完全不动（排查画质问题时用）。 */
     textureLod: true,
-    /* 情绪贴纸 —— 模型自带 exp3 表情里挑"贴纸类专属参数"（星星眼/问号/
-     * 感叹号/流汗/阴暗/闭眼口水/吐舌）叠到对应情绪档上，随情绪强度淡入淡出
-     * （加载与叠加见渲染层 pet.js 的 loadStickers / applyStickers）。
-     * whale 独有：hiyori 档案没有 stickers 段，这开关对它无效。
+    /* 自带 exp3 表情 —— 模型包里那 44 个预设，按两种触发挂到脸上：
+     *  · 情绪（expressions 表）：8 档各一个整脸表情，强度跟情绪衰减走
+     *  · 事件（emotes 表）：emote() 起的临时表情，几秒后退
+     * 加载与叠加见渲染层 pet.js 的 loadExpressions / mixExpressions。
+     * whale 独有：hiyori 档案没有这两段，开关对它无效。
      * 默认开：纯显示增强、不占资源不打扰；关掉走淡出，不会瞬闪。 */
+    expressions: true,
+    /* 道具 —— 闲置时随机冒出来一件（眼镜 / 猫耳 / 蛋包饭 / 鲸鱼…），
+     * 几十秒后自己收（池子与权重在 profiles/whale.js 的 props）。
+     * 🔴 这条属于"打扰类"：她会自己戴东西。但**默认仍然给开**，理由是
+     * 它只在她闲着的时候出现、且不发出任何声音/通知，只是画面在变；
+     * 嫌吵的人一键就关。 */
+    props: true,
+    /* ⚠️ 旧键，已并入 expressions（2026-10-29）。留着是为了老配置文件里
+     * 的 stickers:false 仍然生效 —— 渲染层的判定是
+     * 「expressions !== false && stickers !== false」，两个键任一关掉都关。 */
     stickers: true
     /* 这里原本有 model: 一个可选的模型名。春移除后模型固定成日和，
      * 不再是可配置项 —— 档案键只在渲染层 profiles/hiyori.js 的 name 写一次

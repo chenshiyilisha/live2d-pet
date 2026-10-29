@@ -1638,7 +1638,19 @@ function buildMenuTemplate() {
     flag('appearance', 'jitter', '表情节奏抖动'),
     flag('appearance', 'emotionDecay', '情绪自然回落'),
     flag('appearance', 'mood', '心境会慢慢变'),
-    flag('appearance', 'stickers', '情绪贴纸（自带表情）'),
+    /* 自带 exp3 表情。⚠️ 旧键 stickers 已并入 expressions，这里一次点把
+     * **两个键写成同一个值** —— 否则老配置里 stickers:false 会在背后
+     * 把表情关着，而勾选框显示"开"（看着像功能坏了）。 */
+    {
+      label: '情绪表情（自带 exp3）',
+      type: 'checkbox',
+      checked: isOn('appearance', 'expressions', true) && isOn('appearance', 'stickers', true),
+      click: (item) => {
+        patchConfig('appearance', { expressions: item.checked, stickers: item.checked });
+        syncAppearance();
+      }
+    },
+    flag('appearance', 'props', '闲置时摆弄道具'),
     flag('appearance', 'textureLod', '纹理降档（省显存）'),
     flag('appearance', 'alwaysOnTop', '窗口置顶')
   ];

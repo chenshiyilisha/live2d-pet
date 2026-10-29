@@ -8,8 +8,10 @@ import {
   MODELS, MODEL_NAME, INK_TOP_C_RATIO, P, State, EMOTION,
   EMO_SPEED, EMO_SPEED_DEFAULT, PAT, buildEmoTarget,
   EMO_SETTLE_EPS, EMO_SETTLE_HOLD_MS, emotionDeviation,
-  emoDecayAmt, mixEmoDecay, mixEmoMood, STICKERS
+  emoDecayAmt, mixEmoDecay, mixEmoMood, EMO_RANGE,
+  EXPRESSIONS, EMOTES, PROPS
 } from './params.js';
+import { pickProp, propDuration, propGap } from './prop-pool.js';
 import { configureTTS, initTTS, speak, enqueueSpeech, takeSentences, stopSpeak, ttsVoiceInfo, ttsQueueState, setSpeechObserver, lipEnv, spokenText, resetSpoken, isSpeaking } from './tts.js';
 import { parseQuietHours, inQuietHours, msUntilQuietEnd } from './quiet-hours.js';
 import { abortRecording, configureRecorder } from './recorder.js';
@@ -71,6 +73,10 @@ let ignoringMouse = true;
 // 拖拽
 let dragging = false;
 let dragMoved = false;
+/* 这次按下的时刻（性能时间轴）。用来判断"被快速甩了一下" —— 窗口是跟着
+ * 鼠标走的，pointer 在窗口内几乎不动，所以渲染层**拿不到拖动速度**；
+ * 唯一能测的代理量是「从按下到松手用了多久」。短 = 甩，长 = 慢慢挪。 */
+let dragDownAt = 0;
 let lastScreenX = 0;
 let lastScreenY = 0;
 // 按下的位置（窗口坐标）—— 松手时用来判断"点到的是头还是身子"
@@ -285,98 +291,376 @@ function readParam(id) {
   }
 }
 
-/* ── 情绪贴纸：把模型自带的 exp3 表情叠加到 8 档情绪上（2026-10-29）──────
+/* ── 自带 exp3 表情：情绪 / 事件 / 道具三种触发，两条应用通道（2026-10-29 二阶）
  *
- * whale 的模型包里有 44 个 exp3.json（星星眼/问号/生气/哭……），但
- * model3.json 的 FileReferences **没有 Expressions 段**（VTS 模型包通病）→
- * 引擎不认识、model.expression() 一个都用不了 → 自己 fetch 解析。
+ * whale 的模型包里有 44 个 exp3.json，model3.json 的 FileReferences
+ * **没有 Expressions 段**（VTS 模型包通病）→ 引擎不认识、model.expression()
+ * 一个都用不了 → 自己 fetch 解析。
  *
- * 写法是**绝对写**：setParam(id, def + value × 强度)。为什么不是 exp3 语义
- * 的 Add（当前值 + value）：当前值每帧都在被动作/物理/我们自己的情绪管线
- * 改，Add 会把上一帧的量反复累进去（指数爆炸）；而贴纸参数是模型专属的
- * 0/1 开关（默认值恒 0），从默认值起算既确定又天然支持淡入淡出。
+ * 🔴 一个 exp3 里混着**两种参数**，必须拆开走两条路：
  *
- * 🔴 共享参数必须滤掉：exp3 里像「生气」同时写 BrowL 系和 MouthForm，这些 ID
- *   也是 16 字段情绪的参数 —— applyEmotion 用撤销法每帧管着它们，两边都写
- *   必然打架。过滤标准 = 档案 param 表的值集合（owned），不是硬编码名单。
- * 🔴 强度衰减到 0 时要把参数**写回默认值**：贴纸参数没有别人写，漏写 =
- *   残影永远挂在脸上（同 arm-release 的"没人接管就冻结"教训）。
+ *   ① 共享参数（Brow 系 / MouthForm / EyeOpen / Paramhh2 / AngleY,Z）
+ *      —— 它们也是 16 字段情绪的参数，applyEmotion 每帧用撤销法管着。
+ *         这里**不能**再写一遍（两边都写必然打架），而是在**插值之前**
+ *         把它们当加性偏置混进 emoEff（与 mixEmoMood 同一层、同样夹回
+ *         EMO_RANGE）。这样表情跟着情绪一起插值，眉先到、嘴后到，不硬切。
+ *
+ *   ② 专属参数（ParamCheekNN 贴图开关 / fx1 / jingyu / baleite…）
+ *      —— 没有别人写，走**绝对写** setParam(id, def + value × 强度)。
+ *         为什么不是 exp3 语义的 Add（当前值 + value）：当前值每帧都在被
+ *         动作/物理改，Add 会把上一帧的量反复累进去（指数爆炸）；而这些
+ *         开关的默认值恒 0，从默认值起算既确定又天然支持淡入淡出。
+ *
+ * 三种触发（只是"什么时候把强度推向 1"不同，应用通道完全共用）：
+ *   · 情绪（expressions 表）：跟 emotion 标签走，强度 = decayAmt
+ *   · 事件（emotes 表）：emote() 起一次性曲线，2~3 秒后自己退
+ *   · 道具（props 表）：闲置时随机冒出来，几十秒后自己收
+ *
+ * 🔴 强度归零时专属参数要**写回默认值**：这些参数没有别人写，漏写 =
+ *    残影永远挂在脸上（同 arm-release 的"没人接管就冻结"教训）。
  * ⚠️ 开关关掉不是"跳过写入"而是"目标强度 = 0"——走淡出，脸上不会瞬闪。 */
-let stickerDefs = new Map();   // emo -> [{ id, value, def }]
-let stickerAmt  = new Map();   // emo -> 当前强度 0..1（插值中）
 
-async function loadStickers(modelName) {
-  stickerDefs = new Map();
-  stickerAmt = new Map();
-  const map = STICKERS[modelName];
+/* exp3 的参数 id → 16 字段名。
+ * ⚠️ 左右眉角度/形态在 EMOTION 里**只有一个字段**（browAngle/browForm），
+ *    applyEmotion 拿它同时写左右两条参数。所以下面拆解时对同一字段取
+ *    **平均**，不是相加 —— 相加会变成双倍（哭的 0.25 会写成 0.5）。
+ *    实测这个模型包的 exp3 左右角度恒相等（哭 0.25/0.25、生气 -1/-1、
+ *    爱心眼 0.2/0.2），平均 = 原值；将来遇到不相等的是折中，不会脏脸。
+ * ⚠️ 表里**没有** ParamMouthOpenY：口型由 TTS/口型引擎每帧接管，
+ *    表情里那 0.75 的张口度让它去抢必然打架 → 落在"属于 16 字段但我们
+ *    没有承载字段"这一类，拆解时直接丢弃。 */
+const EXP3_FIELD = {
+  ParamBrowLY: 'browLY',
+  ParamBrowRY: 'browRY',
+  ParamBrowLX: 'browLX',
+  ParamBrowRX: 'browRX',
+  ParamBrowLAngle: 'browAngle',
+  ParamBrowRAngle: 'browAngle',
+  ParamBrowLForm: 'browForm',
+  ParamBrowRForm: 'browForm',
+  ParamMouthForm: 'mouthForm',
+  ParamEyeLOpen: 'eyeOpen',
+  ParamEyeROpen: 'eyeOpen',
+  Paramhh2: 'cheek',
+  ParamAngleY: 'headY',
+  ParamAngleZ: 'headZ'
+};
+
+let emoExp    = new Map();   // 情绪名 -> { shared:[{field,value}], own:[{id,value,def}] }
+let evExp     = new Map();   // 事件名 -> 同上
+let propExp   = new Map();   // 道具文件名 -> 同上
+let expAmt    = new Map();   // key -> 当前强度 0..1（情绪名 / 'ev:<名>' / 'prop'）
+let expPrev   = new Map();   // key -> 上一帧强度（用来判断"归零那一帧"该不该写回默认值）
+let evName    = null;        // 当前事件表情名（同一时刻只播一个）
+let evTarget  = 0;           // 它的目标强度（0/1）
+let evHoldMs  = 0;           // 满强度还能保持多久（毫秒）
+let propCur   = null;        // { file, target, remainMs } 当前挂着的道具
+let propLast  = '';          // 上一个道具（避免连着抽到同一件）
+let propNextMs = 0;          // 距下次尝试冒道具还有多久（毫秒）
+let idleMs = 0;              // 连续闲置时长（毫秒，只在真正闲着时累加）
+let idleEmoteStage = 0;      // 本轮闲置已经走到第几档（0 未冒 / 1 呆眼 / 2 吐魂）
+
+/* 两次道具之间的间隔。太短 = 一直在换装（像抽奖机），太长 = 一天见不到一次。
+ * 1.5~4 分钟是照着"她自己在玩东西"的频率定的：你回来看一眼，多半能看到
+ * 她正戴着什么或者桌上摆着什么，但不会每次抬头都变。 */
+const PROP_GAP = [90000, 240000];
+
+/* 取一个 exp3。超时 8s：dev server 对某些 URL（中文文件名）可能挂起不响应，
+ * fetch 没 timeout 就会永远 pending → 整个功能无声失效。 */
+async function fetchExp3(base, file) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const res = await fetch(base + 'expressions/' + encodeURIComponent(file) + '.exp3.json', { signal: ctl.signal });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return await res.json();
+  } finally { clearTimeout(timer); }
+}
+
+/* 把一个 exp3 拆成两条通道（见上面 ①② 那段）。 */
+function splitExp3(j) {
+  const core = model?.internalModel?.coreModel;
+  const owned = new Set(Object.values(P).filter(Boolean));
+  const acc = new Map();      // field -> { sum, n }（左右合并字段取平均，见 EXP3_FIELD）
+  const own = [];
+  const dropped = [];
+  for (const p of j.Parameters ?? []) {
+    const v = Number(p.Value) || 0;
+    const field = EXP3_FIELD[p.Id];
+    if (field && Object.prototype.hasOwnProperty.call(EMOTION.calm, field)) {
+      const cur = acc.get(field) || { sum: 0, n: 0 };
+      cur.sum += v; cur.n += 1;
+      acc.set(field, cur);
+      continue;
+    }
+    /* 属于 16 字段、但我们没有承载字段（ParamMouthOpenY 归口型引擎）→ 丢弃。
+     * 判据是档案 param 表的值集合，不是硬编码名单。 */
+    if (owned.has(p.Id)) { dropped.push(p.Id); continue; }
+    const idx = paramIndexOf(p.Id);
+    if (idx < 0) { dropped.push(p.Id); continue; }
+    let def = 0;
+    try {
+      const d = core?.getParameterDefaultValue?.(idx);
+      if (typeof d === 'number' && Number.isFinite(d)) def = d;
+    } catch { /* 拿不到就按 0（这些开关参数的中立位） */ }
+    own.push({ id: p.Id, value: v, def });
+  }
+  const shared = [];
+  for (const [field, { sum, n }] of acc) shared.push({ field, value: sum / n });
+  return { shared, own, dropped };
+}
+
+/* 三张表一起加载：情绪 / 事件 / 道具。任何一个文件失败只降级它自己。 */
+async function loadExpressions(modelName) {
+  emoExp = new Map(); evExp = new Map(); propExp = new Map();
+  expAmt = new Map(); expPrev = new Map();
+  propCur = null; propLast = '';
+  propNextMs = propGap(PROP_GAP);
   const base = MODELS[modelName]?.url?.replace(/[^/]*$/, '');
-  if (!map || !base) {
-    console.warn('[pet] stickers skip', JSON.stringify({
-      model: modelName, hasMap: !!map, hasBase: !!base
+  const core = model?.internalModel?.coreModel;
+  const emoMap = EXPRESSIONS[modelName] || {};
+  const evMap = EMOTES[modelName] || {};
+  const propList = PROPS[modelName] || [];
+  if ((!Object.keys(emoMap).length && !Object.keys(evMap).length && !propList.length) || !base) {
+    console.warn('[pet] expr skip', JSON.stringify({
+      model: modelName, emo: Object.keys(emoMap).length, ev: Object.keys(evMap).length,
+      props: propList.length, hasBase: !!base
     }));
     return;
   }
-  const owned = new Set(Object.values(P).filter(Boolean));
-  const core = model?.internalModel?.coreModel;
-  if (!core) { console.warn('[pet] stickers skip: core 未就绪'); return; }
-  console.log('[pet] stickers begin', JSON.stringify({ model: modelName, n: Object.keys(map).length }));
-  for (const [emo, file] of Object.entries(map)) {
-    if (!EMOTION[emo]) { console.warn('[pet] stickers 未知情绪档', emo); continue; }
+  if (!core) { console.warn('[pet] expr skip: core 未就绪'); return; }
+  console.log('[pet] expr begin', JSON.stringify({
+    model: modelName, emo: Object.keys(emoMap).length,
+    ev: Object.keys(evMap).length, props: propList.length
+  }));
+
+  const load = async (kind, key, file) => {
     try {
-      /* 超时 8s：dev server 对某些 URL（中文文件名）可能挂起不响应，
-       * fetch 没 timeout 就会永远 pending → 整个功能无声失效。 */
-      const ctl = new AbortController();
-      const timer = setTimeout(() => ctl.abort(), 8000);
-      let j;
-      try {
-        const res = await fetch(base + 'expressions/' + encodeURIComponent(file) + '.exp3.json', { signal: ctl.signal });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        j = await res.json();
-      } finally { clearTimeout(timer); }
-      const all = j.Parameters ?? [];
-      const kept = [];
-      for (const p of all) {
-        if (owned.has(p.Id)) continue;          // 与 16 字段共享 → 丢弃（见上）
-        const idx = paramIndexOf(p.Id);
-        if (idx < 0) continue;
-        let def = 0;
-        try {
-          const d = core.getParameterDefaultValue?.(idx);
-          if (typeof d === 'number' && Number.isFinite(d)) def = d;
-        } catch { /* 拿不到就按 0（这些开关参数的中立位） */ }
-        kept.push({ id: p.Id, value: Number(p.Value) || 0, def });
+      const d = splitExp3(await fetchExp3(base, file));
+      if (!d.shared.length && !d.own.length) {
+        console.warn('[pet] expr empty', JSON.stringify({ kind, key, file }));
+        return null;
       }
-      if (kept.length) { stickerDefs.set(emo, kept); stickerAmt.set(emo, 0); }
-      console.log('[pet] stickers', JSON.stringify({
-        emo, file, kept: kept.length, dropped: all.length - kept.length
+      console.log('[pet] expr', JSON.stringify({
+        kind, key, file, shared: d.shared.length, own: d.own.length, dropped: d.dropped
       }));
+      return d;
     } catch (e) {
-      /* 打包环境若没带上 exp3，功能整体静默降级成"没有贴纸"，不挡启动。 */
-      console.warn('[pet] stickers load fail', JSON.stringify({ emo, file, err: String(e) }));
+      /* 打包环境若没带上 exp3，功能整体静默降级，不挡启动。 */
+      console.warn('[pet] expr load fail', JSON.stringify({ kind, key, file, err: String(e) }));
+      return null;
     }
+  };
+
+  for (const [emo, file] of Object.entries(emoMap)) {
+    if (!EMOTION[emo]) { console.warn('[pet] expr 未知情绪档', emo); continue; }
+    const d = await load('emo', emo, file);
+    if (d) { emoExp.set(emo, d); expAmt.set(emo, 0); }
+  }
+  for (const [name, file] of Object.entries(evMap)) {
+    const d = await load('ev', name, file);
+    if (d) evExp.set(name, d);
+  }
+  for (const spec of propList) {
+    if (!spec?.file) continue;
+    const d = await load('prop', spec.file, spec.file);
+    if (d) propExp.set(spec.file, d);
+  }
+  console.log('[pet] expr ready', JSON.stringify({
+    emo: emoExp.size, ev: evExp.size, prop: propExp.size
+  }));
+}
+
+/* 强度推进（出现比消失快：冒出来要利落，退场要留余韵）。
+ * ⚠️ 与 16 字段的速度无关 —— 那是形状的插值，这是"贴纸在不在"的开关曲线。 */
+const EXP_RATE_IN = 6;
+const EXP_RATE_OUT = 4;
+function advanceAmt(key, target, dt) {
+  const cur = expAmt.get(key) ?? 0;
+  if (target === cur) return cur;
+  const k = target > cur ? EXP_RATE_IN : EXP_RATE_OUT;
+  let next = cur + (target - cur) * Math.min(1, dt * k);
+  if (Math.abs(target - next) < 0.002) next = target;   // 别留 0.001 的尾巴
+  expAmt.set(key, next);
+  return next;
+}
+
+/* 共享参数：当加性偏置混进 emoEff（**插值之前**调用）。
+ * 与 mixEmoMood 同一层、同样夹回 EMO_RANGE —— 于是表情跟着情绪的
+ * 错峰插值一起到位，不会硬切，也不会和撤销法打架。 */
+function blendShared(emoEff, shared, amt) {
+  for (const s of shared) {
+    const r = EMO_RANGE[s.field];
+    let v = emoEff[s.field] + s.value * amt;
+    if (r) { if (v < r[0]) v = r[0]; else if (v > r[1]) v = r[1]; }
+    emoEff[s.field] = v;
   }
 }
 
-function applyStickers(dt) {
-  if (!stickerDefs.size) return;
-  const on = cfg?.appearance?.stickers !== false;
-  for (const [emo, params] of stickerDefs) {
-    const target = (on && emo === emotion) ? decayAmt : 0;
-    const cur = stickerAmt.get(emo) ?? 0;
-    if (target <= 0 && cur <= 0.004) {
-      if (cur > 0) {
-        for (const p of params) setParam(p.id, p.def);   // 归零必须还默认值
-        stickerAmt.set(emo, 0);
-      }
-      continue;
-    }
-    /* 贴纸是"出现/消失"不是"渐变形状"：速度比 16 字段最快一档（9/s）
-     * 略慢的一档起 —— 300ms 上下，肉眼是"跟着情绪冒出来"而不是闪现。 */
-    const k = target > cur ? 6 : 4;
-    const amt = cur + (target - cur) * Math.min(1, dt * k);
-    stickerAmt.set(emo, amt);
-    for (const p of params) setParam(p.id, p.def + p.value * amt);
+/* 推进事件表情的保持计时。返回本帧是否还在播。 */
+function tickEventEmote(dt) {
+  if (!evName) return false;
+  evHoldMs -= dt * 1000;
+  if (evHoldMs <= 0) evTarget = 0;
+  return true;
+}
+
+/* 道具调度：闲置时随机冒一件，挂一会儿自己收。
+ * 条件比"空闲"更严：还在摸头（patState !== 'idle'）也不冒 —— 那会打断互动。 */
+function tickProps(dt) {
+  const on = cfg?.appearance?.props !== false;
+  if (!on) {
+    if (propCur) { propCur.target = 0; }
+    return;
   }
+  if (!propExp.size) return;
+  if (propCur) {
+    if (propCur.target > 0) propCur.remainMs -= dt * 1000;
+    if (propCur.remainMs <= 0 && propCur.target > 0) {
+      propCur.target = 0;
+      console.log('[pet] prop off', JSON.stringify({ file: propCur.file }));
+    }
+    if (propCur.target === 0 && (expAmt.get('prop') ?? 0) <= 0.002) {
+      propCur = null;
+      propNextMs = propGap(PROP_GAP);
+    }
+    return;
+  }
+  propNextMs -= dt * 1000;
+  if (propNextMs > 0) return;
+  /* 只在真正闲着的时候冒 —— 说话/听/想、被摸、在拖，都不冒。 */
+  if (state !== State.IDLE || patState !== 'idle') { propNextMs = 6000; return; }
+  const spec = pickProp(PROPS[MODEL_NAME] || [], Math.random, propLast);
+  if (!spec || !propExp.has(spec.file)) { propNextMs = propGap(PROP_GAP); return; }
+  propCur = { file: spec.file, target: 1, remainMs: propDuration(spec) };
+  propLast = spec.file;
+  console.log('[pet] prop', JSON.stringify({ file: spec.file, ms: Math.round(propCur.remainMs) }));
+}
+
+/* 闲置久了脸上开始"走神"：2 分钟发呆（呆眼），4 分钟魂飞出去（吐魂）。
+ * 和道具是两条独立的闲置线 —— 道具是"她自己在玩"，发呆是"她没在玩"。
+ * 每个闲置周期各只来一次：一有互动（点/摸/说话/拖）就整个清零，
+ * 否则隔几秒冒一次，就成了"循环动画"而不是"走神"。 */
+function tickIdleEmote(dt) {
+  const on = cfg?.appearance?.expressions !== false && cfg?.appearance?.stickers !== false;
+  if (!on || state !== State.IDLE || patState !== 'idle' || dragging) {
+    idleMs = 0; idleEmoteStage = 0;
+    return;
+  }
+  idleMs += dt * 1000;
+  if (idleEmoteStage === 0 && idleMs >= 120000) {
+    idleEmoteStage = 1;
+    emote('呆眼', 3200);
+  } else if (idleEmoteStage === 1 && idleMs >= 240000) {
+    idleEmoteStage = 2;
+    emote('吐魂', 4200);
+  }
+}
+
+/* 强制挂 / 收一件道具（诊断与手动触发用；file=null 表示收起当前那件）。
+ * ⚠️ 收起**不是**直接把 propCur 置 null —— 那样专属参数会停在最后一帧的
+ *    值上（残影永远戴在脸上）。走 target=0 淡出，tickProps 等强度退干净
+ *    之后才真正卸下，那一帧 writeOwn 会把参数写回默认值。 */
+function forceProp(file, ms = 30000) {
+  if (file === null) {
+    if (propCur) propCur.target = 0;
+    return true;
+  }
+  if (!propExp.has(file)) {
+    console.warn('[pet] prop miss', JSON.stringify({ file, have: [...propExp.keys()] }));
+    return false;
+  }
+  propCur = { file, target: 1, remainMs: ms };
+  propLast = file;
+  console.log('[pet] prop force', JSON.stringify({ file, ms }));
+  return true;
+}
+
+/* 插值**之前**：把三层的共享参数混进 emoEff。 */
+function mixExpressions(emoEff, dt) {
+  if (!emoExp.size && !evExp.size && !propExp.size) return;
+  const on = cfg?.appearance?.expressions !== false && cfg?.appearance?.stickers !== false;
+  for (const [emo, d] of emoExp) {
+    const target = (on && emo === emotion) ? decayAmt : 0;
+    const amt = advanceAmt(emo, target, dt);
+    if (amt > 0) blendShared(emoEff, d.shared, amt);
+  }
+  if (evName) {
+    const d = evExp.get(evName);
+    const amt = advanceAmt('ev:' + evName, on ? evTarget : 0, dt);
+    if (d && amt > 0) blendShared(emoEff, d.shared, amt);
+    /* 退干净了才卸下名字：amt 到 0 之前还得继续写 own 的默认值。 */
+    if (!on || (evTarget === 0 && amt <= 0.002)) {
+      expPrev.delete('ev:' + evName);
+      expAmt.delete('ev:' + evName);
+      evName = null;
+    }
+  }
+  if (propCur) {
+    const d = propExp.get(propCur.file);
+    const amt = advanceAmt('prop', propCur.target, dt);
+    if (d && amt > 0) blendShared(emoEff, d.shared, amt);
+  }
+}
+
+/* 专属参数：走绝对写。**只在激活期间与归零那一帧写** ——
+ * 每帧无脑写 def 会和别的表情抢同一张贴图（例如「哭」和「生气」都写
+ * ParamCheek23 波浪嘴，谁后写谁赢，于是零强度的那个把活跃的那个盖掉）。 */
+function writeOwn(key, own, amt) {
+  const prev = expPrev.get(key) ?? 0;
+  if (amt <= 0 && prev <= 0) return;
+  if (own) {
+    for (const p of own) setParam(p.id, amt > 0 ? p.def + p.value * amt : p.def);
+  }
+  expPrev.set(key, amt);
+}
+
+/* 插值**之后**（applyEmotion 之后）：写三层的专属参数。 */
+function applyExpressions() {
+  if (!emoExp.size && !evExp.size && !propExp.size) return;
+  const on = cfg?.appearance?.expressions !== false && cfg?.appearance?.stickers !== false;
+  for (const [emo, d] of emoExp) {
+    writeOwn(emo, d.own, on ? (expAmt.get(emo) ?? 0) : 0);
+  }
+  if (evName) {
+    const d = evExp.get(evName);
+    writeOwn('ev:' + evName, d?.own, expAmt.get('ev:' + evName) ?? 0);
+  }
+  if (propCur) {
+    const d = propExp.get(propCur.file);
+    writeOwn('prop', d?.own, expAmt.get('prop') ?? 0);
+  }
+}
+
+/* 临时播一个事件表情（供交互钩子与调试调用）。
+ * holdMs = 满强度保持时长，之后自动淡出。 */
+function emote(name, holdMs = 2500) {
+  if (!evExp.has(name)) {
+    console.warn('[pet] emote miss', JSON.stringify({ name, have: [...evExp.keys()] }));
+    return false;
+  }
+  if (evName === name) { evHoldMs = Math.max(evHoldMs, holdMs); return true; }
+  /* 换表情时把上一个的强度记在 expAmt 里，它会自己淡出 —— 但它已经不在
+   * evName 上了，blendShared 不会再推它。所以直接清零并卸下。 */
+  if (evName) {
+    const old = evName;
+    const d = evExp.get(old);
+    for (const p of d?.own ?? []) setParam(p.id, p.def);
+    expAmt.set('ev:' + old, 0);
+    expPrev.set('ev:' + old, 0);
+  }
+  evName = name;
+  evTarget = 1;
+  evHoldMs = holdMs;
+  console.log('[pet] emote', JSON.stringify({ name, holdMs }));
+  return true;
+}
+
+/* 立刻开始淡出当前事件表情（探针用：不用等满 holdMs）。
+ * ⚠️ 只是把目标置 0，参数要等强度退干净才写回默认值（writeOwn 负责）。 */
+function emoteOff() {
+  evTarget = 0;
+  evHoldMs = 0;
 }
 
 /* 播 / 停一个**事件驱动**的动作组（目前只有 Drag / Walk，都是本项目自制的，
@@ -1181,11 +1465,12 @@ async function mountModel(name) {
      * 期望 Idle / TapBody / Drag / Walk 四组（后两个是自制动作）。 */
     motions: Object.keys(model.internalModel?.motionManager?.motionGroups || {})
   }));
-  /* 情绪贴纸按**本次挂载的模型**加载（不 await：解析失败/慢都别挡首帧，
-   * 加载完成前 stickerDefs 是空 Map，applyStickers 直接短路）。
+  /* 自带 exp3 表情（情绪 / 事件 / 道具三张表）按**本次挂载的模型**加载
+   * （不 await：解析失败/慢都别挡首帧，加载完成前三个 Map 都是空的，
+   * applyExpressions 直接短路）。
    * ⚠️ 必须放 mountModel 里用参数 name —— 曾经误放到 boot，那里裸写 `name`
-   *    拿到的是 window.name（=''），贴纸全程静默失效。 */
-  loadStickers(name).catch((e) => console.warn('[pet] stickers fatal', String(e)));
+   *    拿到的是 window.name（=''），表情全程静默失效。 */
+  loadExpressions(name).catch((e) => console.warn('[pet] expr fatal', String(e)));
   /* 人物刚画出来 → 重量一次头顶 y（悬浮气泡锚点）。慢一点等首帧画稳。 */
   setTimeout(() => window.pet?.requestHeadMeasure?.(), 1500);
   /* 摸头条带的锚（渲染层自己的实量头顶）也要量一次 —— 量不到会自动重试。 */
@@ -1398,6 +1683,16 @@ async function boot() {
       mixEmoMood(emoEff, moodSnap?.bias);
     }
 
+    /* 事件表情的保持计时 + 道具调度 —— 两者都只改"目标强度"，不直接写参数。
+     * ⚠️ 必须在 mixExpressions 之前：本帧的目标算完，这一帧才走得对。 */
+    tickEventEmote(dt);
+    tickProps(dt);
+    tickIdleEmote(dt);
+    /* 自带 exp3 表情的**共享参数**（眉/嘴/眼/脸红）当加性偏置混进 emoEff。
+     * 位置与 mixEmoMood 同层（衰减之后、插值之前）—— 于是表情复用了整套
+     * 错峰插值：眉先到、嘴后到，而不是一块整体硬切上来。 */
+    mixExpressions(emoEff, dt);
+
     /* 情绪插值：指数逼近（与帧率无关），但**每个字段一个速度** ——
      * 一张脸同时到位是木偶，错峰到位才像活人。速度表见 params.js 的 EMO_SPEED。
      * 用 1 − e^(−dt·s) 而不是乘一个固定 k，是为了不同帧率下轨迹一致。
@@ -1407,11 +1702,10 @@ async function boot() {
       emoCur[key] += (emoEff[key] - emoCur[key]) * (1 - Math.exp(-dt * sp));
     }
     applyEmotion();
-    /* 情绪贴纸（exp3 叠加，whale 独有）：跟 16 字段管的是**两批参数**
-     * （exp3 里与我们共享的 BrowL 系、MouthForm、EyeOpen 等，加载时就滤掉了，
-     * 见 loadStickers 的 owned 过滤），不会和撤销法打架；放在情绪管线
-     * 尾部纯粹是逻辑位置 —— 和脸的其他部分一起组装。 */
-    applyStickers(dt);
+    /* 自带 exp3 的**专属参数**（贴图开关 / 道具开关）走绝对写 → 必须排在
+     * 撤销法之后；共享参数已经在上面的 mixExpressions 里混进 emoEff 了，
+     * 两批参数因此各有各的通道，不会互相清掉。 */
+    applyExpressions();
 
     /* 「情绪安定」计时（主动搭话的判据之一，口径见 params.js 的 EMO_SETTLE_EPS）。
      * ⚠️ 量的是 emoEff 不是 emoTarget：摸头的调制也在 emoEff 里，
@@ -1531,6 +1825,23 @@ async function boot() {
       HIT_ALPHA_MIN,
       setEmotion,
       setState,
+      /* 自带 exp3 表情的三个入口（诊断探针与将来的交互钩子共用）：
+       *   emote(name, ms)     临时播一个事件表情
+       *   forceProp(file,ms)  强制挂一件道具（file=null 淡出）
+       *   exprState()         三层各自的当前强度 —— 探针靠它判断"到底动没动" */
+      emote,
+      emoteOff,
+      forceProp,
+      exprNames: () => [...evExp.keys()],
+      propNames: () => [...propExp.keys()],
+      exprState: () => ({
+        amt: Object.fromEntries(expAmt),
+        ev: evName,
+        evTarget,
+        evHoldMs: Math.round(evHoldMs),
+        prop: propCur ? { file: propCur.file, target: propCur.target, remainMs: Math.round(propCur.remainMs) } : null,
+        loaded: { emo: emoExp.size, ev: evExp.size, prop: propExp.size }
+      }),
       State,
       stageEl,
       canvas,
@@ -2172,6 +2483,7 @@ canvas.addEventListener('mousedown', (e) => {
   dragging = true;
   dragMoved = false;
   dragReacted = false;
+  dragDownAt = performance.now();
   downX = e.clientX;
   downY = e.clientY;
   lastScreenX = e.screenX;
@@ -2203,6 +2515,12 @@ window.addEventListener('mouseup', (e) => {
   window.pet?.dragEnd?.();          // 让主进程判断要不要贴屏幕边缘
   if (dragMoved) {
     patAbort();                     // 拖走了：摸头这一路不算数
+    /* 被**快速**甩了一下 → 转晕（晕晕眼 + 眼半闭 + 眉）。
+     * 判据只有时长：窗口跟着鼠标跑，pointer 在窗口内几乎不动，
+     * 渲染层拿不到拖动速度；120~700ms 这个区间是"一甩就撒手"，
+     * 更短是误触、更长是慢慢挪位置 —— 后者不该晕。 */
+    const dragMs = performance.now() - dragDownAt;
+    if (dragMs > 120 && dragMs < 700) emote('晕晕', 2200);
     if (dragReacted) {
       setEmotion('calm');          // 松手了，气消了
       stopEventMotions();          // 停掉 Drag，交还给插件的 idle 调度
@@ -2233,12 +2551,19 @@ window.addEventListener('mouseup', (e) => {
     if (annoyed) {
       setEmotion('shy');
       if (!patNagged) say('别摸啦，头发要乱了。');
+      /* 被摸烦了 → 吐舌抗议（20舌头 + 歪嘴）。
+       * 两档都给：patNagged 那次她过程中已经喊过一嗓子（say 在上面的
+       * 状态机里），这里只是把脸上的抗议补上，不重复说话。 */
+      emote('吐舌', 1800);
       return;                       // 闹脾气了，不甩输入框过来
     }
     setState(State.LISTENING);
     showComposer();
     noteUserResponse();        // 摸完她松手 = 明确搭理（同上）
     pokeIdleTimer();
+    /* 摸完偶尔眼睛冒星星（1/3）—— 每次都出会腻：那就成了"摸头 =
+     * 固定播放星星眼"，而不是"她今天心情好"。 */
+    if (Math.random() < 0.34) emote('星星眼', 1600);
     return;
   }
 
@@ -2266,7 +2591,11 @@ function onPetClicked() {
 
   if (cfg?.interaction?.pokeReact !== false && clickStreak >= 4) {
     setEmotion('surprised');
-    say('戳够了没有。');
+    /* 戳到第六下 → 快哭了。四下那句"戳够了没有"还带着点脾气，
+     * 六下的是真委屈（6哭贴纸 + 呆眼 + 波浪嘴，见档案的 emotes 表）。 */
+    const hurt = clickStreak >= 6;
+    if (hurt) emote('哭', 2600);
+    say(hurt ? '呜……你干嘛啦。' : '戳够了没有。');
     return;
   }
 

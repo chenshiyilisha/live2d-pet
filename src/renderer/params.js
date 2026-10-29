@@ -26,9 +26,26 @@ import { WHALE } from './profiles/whale.js';
 
 export const MODELS = { [HIYORI.name]: HIYORI.model, [WHALE.name]: WHALE.model };
 
-/* 各模型的「情绪 → exp3 贴纸」映射（whale 独有，hiyori 是 undefined）。
- * 消费方 pet.js 的贴纸加载器用它拼 expressions/ 下的文件名。 */
-export const STICKERS = { [HIYORI.name]: HIYORI.stickers, [WHALE.name]: WHALE.stickers };
+/* 各模型的「情绪 → exp3 表情」映射（whale 独有，hiyori 是 undefined）。
+ * 消费方 pet.js 的加载器用它拼 expressions/ 下的文件名。
+ *
+ * ⚠️ 键名从 stickers 改成 expressions（2026-10-29）：那张表不再只挑
+ *    "纯贴图开关"，现在也放**整脸表情**（含眉/嘴/眼这些与 16 字段共享的
+ *    参数）—— 加载器把共享部分转成加性增量、专属部分走绝对写，见 pet.js
+ *    的 loadExpressions。名字不改会误导下一个读的人。
+ * ⚠️ 旧键 stickers 仍然认（hiyori 那边没有，只是留个后路，别两处都写）。 */
+export const EXPRESSIONS = {
+  [HIYORI.name]: HIYORI.expressions,
+  [WHALE.name]: WHALE.expressions
+};
+/** @deprecated 用 EXPRESSIONS。留这个名字是因为已有断言与注释在引用。 */
+export const STICKERS = EXPRESSIONS;
+
+/* 事件表情：{ 模型: { 事件名: exp3 文件名 } }。不绑情绪，由 emote() 临时播。 */
+export const EMOTES = { [WHALE.name]: WHALE.emotes };
+
+/* 道具池：{ 模型: [ { file, w, ms } ] }。闲置时随机冒出来，见 prop-pool.js。 */
+export const PROPS = { [WHALE.name]: WHALE.props };
 
 /* 当前模型的档案键 —— 全项目只在这里写一次这个字符串。
  * 主进程、渲染层、诊断脚本都引用它，免得再出现「配置里写一个名字、

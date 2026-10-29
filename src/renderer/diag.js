@@ -716,6 +716,61 @@ export function attachSnapProbes(live) {
           console.log('[pet] mood done');
         }
 
+        /* ?snap=expr：表情层（事件 / 道具）逐个落图（2026-10-29 二阶）
+         *
+         * 为什么要逐个落图：**参数写进去 ≠ 画出来** —— 幻影参数那一轮已经
+         * 证明过"读回来完全自洽、画面纹丝不动、零报错"，所以判据只能是图。
+         * 情绪 8 档由 ?snap=mood 覆盖（顺手也就验了新加的整脸表情），
+         * 这里只跑 15 个事件表情 + 18 件道具。
+         *
+         * 每个之间留 900ms 让上一个淡干净 —— 否则两张图叠在一起，
+         * 分不清是"这个没生效"还是"上一个还没退"。 */
+        if (new URLSearchParams(location.search).get('snap') === 'expr') {
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          await wait(1500);
+          live.setEmotion('calm');
+          await wait(1200);
+          /* 🔴 文件标签必须是**纯 ASCII**：主进程 pet:save-shot 的白名单是
+           *    /^[A-Za-z0-9_-]{1,40}$/，中文名会被判 null → 全部退回
+           *    pet-window.png 互相覆盖。踩过：33 张只剩 1 张，日志里却有 33 行。
+           *    真实名字放进日志的 label 字段，图名用序号。 */
+          const shot = async (tag, label) => {
+            const s = await window.pet?.saveShot?.('expr-' + tag);
+            const st = live.exprState();
+            console.log('[pet] expr-shot', JSON.stringify({
+              tag, label,
+              ev: st.ev,
+              prop: st.prop?.file ?? null,
+              amt: Object.fromEntries(Object.entries(st.amt)
+                .filter(([, v]) => v > 0).map(([k, v]) => [k, Number(v.toFixed(2))])),
+              ink: s?.ink
+            }));
+          };
+          await shot('base', '(calm)');
+          let i = 0;
+          for (const name of live.exprNames()) {
+            const tag = 'ev' + String(++i).padStart(2, '0');
+            live.emote(name, 3000);
+            await wait(900);
+            await shot(tag, name);
+            /* 截完就让它立刻退，并等强度退干净 —— 否则下一张图里叠着上一个
+             * 表情（第一版就是 3s 保持 + 900ms 间隔，后 18 张道具图全被
+             * 「撤回」污染了）。 */
+            live.emoteOff?.();
+            await wait(1200);
+          }
+          i = 0;
+          for (const file of live.propNames()) {
+            const tag = 'pr' + String(++i).padStart(2, '0');
+            live.forceProp(file, 6000);
+            await wait(900);
+            await shot(tag, file);
+            live.forceProp(null);
+            await wait(1200);
+          }
+          console.log('[pet] expr done');
+        }
+
         /* ?snap=whaleexp：鲸鱼娘自带的 exp3 表情到底能不能亮出来（2026-10-29）
          *
          * 素材包 `expressions/` 有 44 个 `.exp3.json`，但 `c_0120.model3.json` 的

@@ -20,7 +20,12 @@ const NAMES = (process.argv[3] || '00-base,star,ques,excl,happy').split(',').map
 const DIR = __dirname;
 /* 头部位置按**比例**给：窗口尺寸/人物大小一变，绝对像素就得跟着改。
  * 0.26/0.28/0.42/0.34 是 whale 在默认窗口下的实测取景。 */
-const CROP = { x: 0.26, y: 0.28, w: 0.42, h: 0.34 };
+/* 可用 PET_HEAD_CROP="x,y,w,h"（都是整窗比例）临时覆盖 —— 人物尺寸/取景
+ * 一变，默认比例就框不到脸（鲸鱼娘缩小后第一次裁就裁到了头顶，2026-10-29）。 */
+const CROP = process.env.PET_HEAD_CROP
+  ? Object.fromEntries(['x', 'y', 'w', 'h']
+    .map((k, i) => [k, Number(process.env.PET_HEAD_CROP.split(',')[i])]))
+  : { x: 0.26, y: 0.28, w: 0.42, h: 0.34 };
 const SCALE = 3;
 
 app.whenReady().then(() => {

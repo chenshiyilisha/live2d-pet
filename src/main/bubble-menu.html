@@ -1,0 +1,234 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>bubble-menu</title>
+<style>
+  /* 头顶泡泡菜单：右键她 → 头顶浮出一排泡泡。
+   *
+   * 形态依据（不是拍脑袋）：
+   *   - Material 的 FAB menu / speed dial 原文「show 2–6 related actions floating
+   *     on screen」「no more than six options」→ 顶层压到 5 个。
+   *   - 气泡菜单（Pop Menus）规范原文「以小型气泡浮层的形式承载菜单功能，
+   *     通常包含一个箭头指向浮层出现的位置，选中某个菜单项后自动关闭」
+   *     → 白圆泡 + 尾巴指着她 + 选中即关，都是规范里写着的。
+   *   - 排成**弧形**而不是一行：Fitts 定律说指向时间随距离增长，一行的话末端
+   *     那个的距离是第一个的好几倍（MIT 6.831 讲线性菜单劣势正是这个）。
+   *
+   * 图标来自 Lucide（lucide-static 1.63.0，ISC）—— 不手推 path，直接取现成的。
+   * ISC 要求保留版权声明，README 的「第三方素材与授权」表已注明。 */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    background: transparent;
+    overflow: hidden;
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: default;
+  }
+  #menu {
+    display: block;
+    /* 与气泡 / 轮盘同一套两层柔投影：近景 1px/2px 贴着桌面，远景 3px/8px 轻浮起。 */
+    filter:
+      drop-shadow(0 1px 2px rgba(25, 25, 28, 0.10))
+      drop-shadow(0 3px 8px rgba(25, 25, 28, 0.15));
+  }
+  /* 取色沿用轮盘验过的那一组（debug/verify-wheel.js [H] 在盯对比度，改必红）：
+   *   正文 4.5:1（WCAG 1.4.3）、图标 3:1（1.4.11）、悬停档差 1.35+。
+   *   一级有色、二级更白 = 层级感（跟轮盘"外环 / 内环"同一套逻辑）。
+   * ⚠️ 不做半透：Electron 透明窗采不到窗后桌面，半透只会让对比度随壁纸漂。 */
+  :root {
+    --s-1: #e4ebf7;
+    --s-2: #fafbfe;
+    --s-hot: #adc9ed;
+    --line: #c6d4e5;
+    --ink: #1d1d1f;
+    --ink-2: #616166;
+    --icon: #5f5e5a;
+  }
+  body.plain { --s-1: #ffffff; --s-2: #ffffff; --s-hot: #f4f5f5; --line: #ececed; }
+  .disc { stroke: var(--line); stroke-width: 0.5; }
+  .lv1 .disc { fill: var(--s-1); }
+  .lv2 .disc { fill: var(--s-2); }
+  .bb.hot .disc { fill: var(--s-hot); }
+  .lb {
+    fill: var(--ink); font-size: 13px; text-anchor: middle;
+    dominant-baseline: central; pointer-events: none;
+  }
+  .lv2 .lb { font-size: 12px; }
+  .lb.sub { font-size: 11px; fill: var(--ink-2); }
+  .bb.hot .lb.sub { fill: var(--ink); }
+  .ic { stroke: var(--icon); stroke-width: 1.6; fill: none;
+        stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+  .bb.hot .ic { stroke: var(--ink); }
+  /* 尾巴：纯白（跟着盘色）方块转 45°，只露一半在泡体下沿外，尖角朝下指着她。
+   * ⚠️ 与对话气泡同一手法：drop-shadow 挂 #menu（按合成轮廓算），尾巴才会和
+   *    泡体共用同一条连续阴影，不会在接缝处留一圈脏边。 */
+  .tail { fill: var(--s-1); stroke: var(--line); stroke-width: 0.5; }
+  .lv2 .tail, .bb.hot .tail { fill: var(--s-hot); }
+  .lv2 .bb.hot .tail { fill: var(--s-hot); }
+  #menu.nomotion { transition: none !important; }
+  #stage { transform-origin: 50% 50%; }
+  @media (prefers-reduced-motion: no-preference) {
+    /* 只做**入场**动画（惯例：animate the entry, not the exit —— 关闭要立刻）。
+     * 逐个往上冒：从她头顶"长出来"，而不是整排闪现。 */
+    #stage.pop .bb { animation: rise 150ms cubic-bezier(0.2, 0.9, 0.3, 1.2) backwards; }
+    #stage.pop .bb:nth-child(1) { animation-delay: 0ms; }
+    #stage.pop .bb:nth-child(2) { animation-delay: 18ms; }
+    #stage.pop .bb:nth-child(3) { animation-delay: 36ms; }
+    #stage.pop .bb:nth-child(4) { animation-delay: 54ms; }
+    #stage.pop .bb:nth-child(5) { animation-delay: 72ms; }
+    #stage.pop .bb:nth-child(n+6) { animation-delay: 90ms; }
+    @keyframes rise { from { opacity: 0; transform: translateY(8px) scale(0.88); } to { opacity: 1; transform: none; } }
+  }
+</style>
+</head>
+<body>
+<svg id="menu" xmlns="http://www.w3.org/2000/svg">
+  <g id="stage"><g id="row"></g></g>
+</svg>
+<script>
+const ICONS = {
+  smile: '<path d="M15 10V9" /> <path d="M16.472 15a6 6 0 01-8.943 0" /> <path d="M9 10V9" /> <circle cx="12" cy="12" r="10" />',
+  hand: '<path d="M18 11V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2" /> <path d="M14 10V4a2 2 0 0 0-2-2a2 2 0 0 0-2 2v2" /> <path d="M10 10.5V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2v8" /> <path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15" />',
+  zoomIn: '<circle cx="11" cy="11" r="8" /> <line x1="21" x2="16.65" y1="21" y2="16.65" /> <line x1="11" x2="11" y1="8" y2="14" /> <line x1="8" x2="14" y1="11" y2="11" />',
+  volume2: '<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /> <path d="M16 9a5 5 0 0 1 0 6" /> <path d="M19.364 18.364a9 9 0 0 0 0-12.728" />',
+  eyeOff: '<path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49" /> <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242" /> <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143" /> <path d="m2 2 20 20" />'
+};
+
+const svg = document.getElementById('menu');
+const stage = document.getElementById('stage');
+const gRow = document.getElementById('row');
+
+let items = [];
+let pts = [];
+let hot = -1;
+let level = 1;
+
+const el = (tag, attrs) => {
+  const n = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+};
+
+function addIcon(g, name, x, y, size) {
+  const src = ICONS[name];
+  if (!src) return;
+  const wrap = el('g', {
+    transform: `translate(${x - size / 2} ${y - size / 2}) scale(${size / 24})`,
+    class: 'ic'
+  });
+  wrap.innerHTML = src;
+  g.appendChild(wrap);
+}
+
+/* 尾巴挂哪个泡泡：横向离她最近的那一个（弧形的最高点基本就是它）。
+ * ⚠️ 只挂**一个** —— 每个泡泡都挂会变成一排刺猬，而且"气泡菜单"规范说的是
+ *    「**一个**箭头指向浮层出现的位置」。 */
+function tailIndex(anchor) {
+  let bi = -1;
+  let bd = Infinity;
+  for (let i = 0; i < pts.length; i++) {
+    const d = Math.abs(pts[i].x - anchor.x);
+    if (d < bd) { bd = d; bi = i; }
+  }
+  return bi;
+}
+
+function render(data) {
+  items = data.items || [];
+  pts = data.pts || [];
+  level = data.level || 1;
+  hot = -1;
+  svg.setAttribute('width', String(data.size.width));
+  svg.setAttribute('height', String(data.size.height));
+  svg.setAttribute('viewBox', `0 0 ${data.size.width} ${data.size.height}`);
+  gRow.textContent = '';
+  gRow.setAttribute('class', 'lv' + level);
+  const ti = data.anchor ? tailIndex(data.anchor) : -1;
+  items.forEach((it, i) => {
+    const p = pts[i];
+    if (!p) return;
+    const g = el('g', { class: 'bb' });
+    g.dataset.i = String(i);
+    if (i === ti) {
+      /* 方块转 45°，只露一半在泡体下沿外（跟对话气泡同一个 9px 尖角）。 */
+      const s = 9;
+      g.appendChild(el('rect', {
+        class: 'tail', x: p.x - s / 2, y: p.y + p.r - 4, width: s, height: s, rx: 1,
+        transform: `rotate(45 ${p.x} ${p.y + p.r - 4 + s / 2})`
+      }));
+    }
+    g.appendChild(el('circle', { class: 'disc', cx: p.x, cy: p.y, r: p.r }));
+    /* 竖排顺序固定：图标 → 主标签 → 当前值。次序不因内容变化（肌肉记忆）。 */
+    if (it.icon) addIcon(g, it.icon, p.x, p.y + (it.sub ? -13 : -7), 16);
+    const ly = it.icon ? (it.sub ? p.y + 4 : p.y + 11) : (it.sub ? p.y - 4 : p.y);
+    const t = el('text', { class: 'lb', x: p.x, y: ly });
+    t.textContent = it.label;
+    g.appendChild(t);
+    if (it.sub) {
+      const t2 = el('text', { class: 'lb sub', x: p.x, y: p.y + (it.icon ? 18 : 12) });
+      t2.textContent = it.sub;
+      g.appendChild(t2);
+    }
+    gRow.appendChild(g);
+  });
+  paint();
+  stage.classList.remove('pop');
+  void stage.getBoundingClientRect();      // 强制重排，动画才会重播
+  stage.classList.add('pop');
+}
+
+function paint() {
+  const gs = gRow.children;
+  for (let i = 0; i < gs.length; i++) gs[i].classList.toggle('hot', i === hot);
+}
+
+function setHot(i) {
+  hot = i;
+  paint();
+}
+
+window.menuHost.onShow((d) => {
+  document.body.classList.toggle('plain', d.tint === false);
+  render(d);
+});
+
+/* 主进程轮询算出的命中项（命中不靠这一层的鼠标事件 —— 右键在主窗按下、
+ * 松手时鼠标可能已经跑到别的窗口上，事件归属不确定）。 */
+window.menuHost.onHover((i) => setHot(i));
+
+/* 常驻模式：左键点泡泡 = 选中；点空白处 = 取消。 */
+svg.addEventListener('click', (e) => {
+  const g = e.target.closest ? e.target.closest('.bb') : null;
+  if (!g) { window.menuHost.cancel(); return; }
+  window.menuHost.pick(Number(g.dataset.i));
+});
+
+/* 键盘等价物（muriel 规范：radial 类菜单不能只有"方向"这一种入口）。
+ * ⚠️ 这里改完要**回报主进程**：命中状态在主进程手里，页面只是镜像 —— 不回报
+ *    的话按方向键看着高亮在动，松手/回车执行的还是旧的那个。 */
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { window.menuHost.back(); return; }
+  if (e.key === 'Enter' || e.key === ' ') { window.menuHost.pick(hot); return; }
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    const n = items.length;
+    if (!n) return;
+    const d = e.key === 'ArrowRight' ? 1 : -1;
+    const next = hot < 0 ? (d > 0 ? 0 : n - 1) : (hot + d + n) % n;
+    setHot(next);
+    window.menuHost.hoverKey(next);
+    e.preventDefault();
+  }
+});
+
+/* 右键松手也要能提交：划向泡泡时鼠标常常已经离开主窗，主窗收不到这个
+ * mouseup（轮盘那次踩过同一个坑）。两条路径都归主进程的 done 闩，幂等。 */
+window.addEventListener('mouseup', (e) => {
+  if (e.button === 2) window.menuHost.release();
+});
+
+window.addEventListener('contextmenu', (e) => e.preventDefault());
+</script>
+</body>
+</html>

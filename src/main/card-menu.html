@@ -1,0 +1,254 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>card-menu</title>
+<style>
+  /* 光标处卡片菜单：右键她 → 光标右下弹出一张竖排卡片。
+   *
+   * 形态依据（不是自由发挥）：
+   *   - VS Code / Discord / Figma / Slack 的右键菜单**都自己画**，但都保留
+   *     "光标处弹出的垂直列表"这个形态 —— 好看与可预测兼得的唯一已知组合。
+   *   - Apple HIG（Contextual menus）：左上角对齐光标右下 · 贴边翻转 ·
+   *     ≤3 组用分隔线 · 最多一级子菜单 · 常用项离光标最近 · 破坏性项放最后。
+   *   - @murphts/contexto 原话「Replaces Electron's native OS context menu with a
+   *     frameless Chromium overlay」→ 方向有现成实现（只借思路，不装包）。
+   *
+   * 为什么用 HTML 而不是 SVG（轮盘/泡泡都是 SVG）：这两个菜单的失败处都是
+   * **文字放不下**（扇区 44px 塞三行、泡泡直径 46 塞"朗读 关"）。HTML 的
+   * 行盒 + `text-overflow: ellipsis` 让"放不下"变成一个可控的省略号，而不是
+   * 溢出到卡片外。几何仍然只在 card-menu-geom.js 定义，页面只消费下发值。
+   *
+   * 图标来自 Lucide（lucide-static 1.63.0，ISC）—— 不手推 path。ISC 要求保留
+   * 版权声明，README「第三方素材与授权」表已注明。 */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    background: transparent;
+    overflow: hidden;
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: default;
+  }
+  /* 取色沿用轮盘/泡泡验过的那一组（verify-card-menu [H] 在盯 WCAG，改必红）：
+   * 正文 4.5:1（1.4.3）、图标 3:1（1.4.11）、悬停档差 ≥1.35。
+   * ⚠️ 不做半透：Electron 透明窗采不到窗后桌面，半透只会让对比度随壁纸漂
+   *    （Momentum Design 原话「legibility must be verified, not assumed」）。 */
+  :root {
+    --surface: #fafbfe;
+    --line: rgba(0, 0, 0, 0.10);
+    --hot: #adc9ed;
+    --ink: #1d1d1f;
+    --ink-2: #616166;
+    --icon: #5f5e5a;
+  }
+  body.plain { --surface: #ffffff; --hot: #f4f5f5; }
+
+  .card {
+    position: absolute;
+    padding: var(--pad-y) 0;
+    border-radius: 10px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    /* 与对话气泡 / 悬浮气泡同一套两层柔投影：近景贴着桌面，远景轻浮起。
+     * ⚠️ 用 box-shadow 不用 filter: drop-shadow —— 卡片的圆角矩形不需要按
+     *    合成轮廓算，box-shadow 更省一层离屏缓冲（轮盘那圈 6 个扇区才需要）。 */
+    box-shadow:
+      0 1px 2px rgba(25, 25, 28, 0.10),
+      0 4px 12px rgba(25, 25, 28, 0.16);
+    overflow: hidden;
+    transform-origin: 0 0;
+  }
+  .row {
+    height: var(--item-h);
+    display: flex;
+    align-items: center;
+    margin: 0 4px;
+    padding: 0 8px;
+    border-radius: 6px;
+    white-space: nowrap;
+  }
+  .row.hot { background: var(--hot); }
+  .ico {
+    width: var(--icon-w);
+    flex: 0 0 var(--icon-w);
+    display: flex;
+    align-items: center;
+  }
+  .ico svg { width: 16px; height: 16px; display: block; }
+  .ico .sp { stroke: var(--icon); stroke-width: 1.6; fill: none;
+             stroke-linecap: round; stroke-linejoin: round; }
+  .row.hot .ico .sp { stroke: var(--ink); }
+  .lb {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 13px;
+    color: var(--ink);
+  }
+  .val {
+    flex: 0 0 auto;
+    margin-left: 10px;
+    font-size: 12px;
+    color: var(--ink-2);
+  }
+  .row.hot .val { color: var(--ink); }
+  .chev {
+    flex: 0 0 12px;
+    margin-left: 6px;
+    display: flex;
+    justify-content: flex-end;
+    color: var(--ink-2);
+  }
+  .row.hot .chev { color: var(--ink); }
+  .chev svg { width: 12px; height: 12px; display: block; }
+  .chev .sp { stroke: currentColor; stroke-width: 2; fill: none;
+              stroke-linecap: round; stroke-linejoin: round; }
+  /* 分隔线：占 --sep-h 高，线画在正中。位置与几何里的 SEP_H 同一来源。 */
+  .sep {
+    height: var(--sep-h);
+    display: flex;
+    align-items: center;
+    margin: 0 4px;
+  }
+  .sep::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--line); }
+
+  @media (prefers-reduced-motion: no-preference) {
+    /* 只做**入场**（惯例：animate the entry, not the exit —— 关闭要立刻）。 */
+    .card.entry { animation: grow 110ms cubic-bezier(0.2, 0.9, 0.3, 1.15) backwards; }
+    @keyframes grow {
+      from { opacity: 0; transform: scale(0.94); }
+      to { opacity: 1; transform: none; }
+    }
+  }
+  .card.nomotion { animation: none !important; }
+</style>
+</head>
+<body>
+<div class="card" id="main"></div>
+<div class="card" id="sub" style="display:none"></div>
+<script>
+/* Lucide 1.63.0（ISC）：只取用得到的 5 个 + 子菜单箭头。 */
+const ICONS = {
+  smile: '<path d="M15 10V9" /> <path d="M16.472 15a6 6 0 01-8.943 0" /> <path d="M9 10V9" /> <circle cx="12" cy="12" r="10" />',
+  hand: '<path d="M18 11V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2" /> <path d="M14 10V4a2 2 0 0 0-2-2a2 2 0 0 0-2 2v2" /> <path d="M10 10.5V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2v8" /> <path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15" />',
+  zoomIn: '<circle cx="11" cy="11" r="8" /> <line x1="21" x2="16.65" y1="21" y2="16.65" /> <line x1="11" x2="11" y1="8" y2="14" /> <line x1="8" x2="14" y1="11" y2="11" />',
+  volume2: '<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /> <path d="M16 9a5 5 0 0 1 0 6" /> <path d="M19.364 18.364a9 9 0 0 0 0-12.728" />',
+  eyeOff: '<path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49" /> <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242" /> <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143" /> <path d="m2 2 20 20" />'
+};
+const CHEV = '<path d="m9 18 6-6-6-6" />';
+
+const $main = document.getElementById('main');
+const $sub = document.getElementById('sub');
+let cards = { main: [], sub: [] };     // 每张卡的槽位数据（含分隔线），供点击反查
+let hotKey = '';
+
+const svgNS = (paths, cls) =>
+  `<svg viewBox="0 0 24 24"><g class="${cls}">${paths}</g></svg>`;
+
+/* 画一张卡。尺寸从下发值来（规矩 9：常量在 geom，页面不写死）。
+ * ⚠️ 用 `textContent` 逐段塞，不拼 innerHTML —— 标签以后可能来自角色名/配置，
+ *    拼字符串迟早被 `<` 咬一口。 */
+function build(el, spec) {
+  if (!spec) { el.style.display = 'none'; el.textContent = ''; return; }
+  el.style.display = '';
+  el.style.left = spec.x + 'px';
+  el.style.top = spec.y + 'px';
+  el.style.width = spec.w + 'px';
+  el.style.height = spec.h + 'px';
+  el.style.transformOrigin = `${spec.origin.x}px ${spec.origin.y}px`;
+  el.textContent = '';
+  for (const s of spec.slots) {
+    if (s.sep) { el.appendChild(document.createElement('div')).className = 'sep'; continue; }
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.dataset.i = String(s.i);
+    if (s.icon && ICONS[s.icon]) {
+      const ic = document.createElement('span');
+      ic.className = 'ico';
+      ic.innerHTML = svgNS(ICONS[s.icon], 'sp');
+      row.appendChild(ic);
+    } else if (spec.iconCol) {
+      const pad = document.createElement('span');   // 没图标的行也留出图标列
+      pad.className = 'ico';
+      row.appendChild(pad);
+    }
+    const lb = document.createElement('span');
+    lb.className = 'lb';
+    lb.textContent = s.label;
+    row.appendChild(lb);
+    if (s.sub) {
+      const v = document.createElement('span');
+      v.className = 'val';
+      v.textContent = s.sub;
+      row.appendChild(v);
+    }
+    if (s.hasKids) {
+      const c = document.createElement('span');
+      c.className = 'chev';
+      c.innerHTML = svgNS(CHEV, 'sp');
+      row.appendChild(c);
+    }
+    el.appendChild(row);
+  }
+}
+
+function paint() {
+  for (const [name, el] of [['main', $main], ['sub', $sub]]) {
+    for (const r of el.children) {
+      if (r.className !== 'row') continue;
+      r.classList.toggle('hot', hotKey === name + ':' + r.dataset.i);
+    }
+  }
+}
+
+window.menuHost.onShow((d) => {
+  document.body.classList.toggle('plain', d.tint === false);
+  /* 尺寸常量从下发值写进 CSS 变量 —— 页面里没有第二份 30 / 9 / 6。 */
+  const m = d.metric || {};
+  const root = document.documentElement.style;
+  if (m.itemH) root.setProperty('--item-h', m.itemH + 'px');
+  if (m.sepH != null) root.setProperty('--sep-h', m.sepH + 'px');
+  if (m.padY != null) root.setProperty('--pad-y', m.padY + 'px');
+  if (m.iconW) root.setProperty('--icon-w', m.iconW + 'px');
+
+  cards.main = d.main ? d.main.slots : [];
+  cards.sub = d.sub ? d.sub.slots : [];
+  build($main, d.main);
+  build($sub, d.sub);
+  hotKey = '';
+  paint();
+
+  /* 入场只在**第一次**出现时播：进/出子菜单会重发 show，每次都弹一下会很吵。 */
+  if (d.entry) {
+    $main.classList.remove('entry');
+    void $main.getBoundingClientRect();
+    $main.classList.add('entry');
+  }
+});
+
+/* 高亮由主进程轮询算出后下发（命中不靠本层鼠标事件 —— 右键在主窗按下、
+ * 松手时鼠标可能已经跑到别的窗口上，事件归属不确定，轮盘那次踩过）。 */
+window.menuHost.onHover((h) => {
+  hotKey = h && h.i >= 0 ? h.card + ':' + h.i : '';
+  paint();
+});
+
+/* 常驻态：左键点行 = 选中；点卡片空白/圆角/分隔线 = 取消（原生菜单同款）。 */
+function onClick(e) {
+  const row = e.target.closest ? e.target.closest('.row') : null;
+  if (!row) { window.menuHost.cancel(); return; }
+  const card = row.closest('#sub') ? 'sub' : 'main';
+  window.menuHost.pick({ card, i: Number(row.dataset.i) });
+}
+$main.addEventListener('click', onClick);
+$sub.addEventListener('click', onClick);
+
+/* 右键松手也要能提交：划进卡片时鼠标常常已经离开主窗，主窗收不到这个
+ * mouseup。两条路径都归主进程的 done 闩，幂等。 */
+window.addEventListener('mouseup', (e) => { if (e.button === 2) window.menuHost.release(); });
+window.addEventListener('contextmenu', (e) => e.preventDefault());
+</script>
+</body>
+</html>

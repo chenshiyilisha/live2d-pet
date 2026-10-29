@@ -156,6 +156,11 @@
 | W41 | 多套**气泡皮肤**可切换（外观下拉） | dsh-pet 已有 5 套；Live2DPet `selectBubbleImage`。**最大项，最后做** |
 | W42 | ~~气泡**情绪角标**（方案 A）~~ **✅ 2026-10-28**：8 情绪 → 小图形挂气泡右上角；信号走 `emitChatEmotion` 唯一出口双发（规矩 27）；**跟标签不跟衰减**（否则角标自己变淡像坏了）；calm 不挂牌、认不出的收牌；角标**绝对定位不占布局**（实测有/无牌 72px = 72px，否则打乱 A3 与高度上报）。图形取 **Lucide（ISC）**现成路径，**不用 emoji 字符**（字形随系统变 + llm.js 清洗器本来就在丢 emoji） | dsh-dfy 原话「爱心/怒气/问号…均为**视觉特效，不是文字占位**」；位置依 **Material Badge** 规范（默认右上角 + 允许压宿主边） |
 
+| W43 | **动作池配置化**：把 `motion.js` 里硬编码的随机动作改成数据段 `animations{idle, turn, move, categories[{id,weight,actions,noMirror}]}` + `animationWeights{idle,turn,move}`（turn/move 权重按 0 算时**不归一化**，份额自然落到分类）；抽 `pick` / `pickSlot` / `rollKind` / `pickWeightedCategory` 成纯函数（排除当前避免连抽，**排除后池空退回原池**） | `PC2005-cloud/dsh-pet` `assets/config.jsonc:241-361` + `shared/pickers.ts`；见 `open-source-reference.md` 第 18 轮 §18.2 |
+| W44 | **事件档位数组**：`events.workStatus[6]`（thinking/working/result/waiting/success/error）**索引即档位、新档只可追加到末尾**；播完分支抽 `decideEndedCue` 式纯函数（档内轮换 / 续播 / 事件结束 / 回归随机）。正好接第 17 轮待补的 `attention` 档 | 同上 `cues.ts`；⚠️ 与我们「配置逐段逐键合并」（规矩 1）天然契合，但**中间插档 = 静默错位**，写进注释 |
+| W45 | **换源四条硬细节**（对照我们的实现逐条核）：① `loadeddata` ≠ 开始出画，要等 `play()` 兑现才回执；② `ended` 只认前台元素（后台残留 handler 会掐断当前动画）；③ 加载失败/超时**必须释放 pending**，否则防重分支把它永久吞掉 = **「点了没反应」**；④ blob + **世代号**丢弃迟到结果（= 规矩 16） | 同上 `animation.ts` / `asset-loader.ts`；③ 与规矩 24「关掉的入口不许点了没反应」同族 |
+| W46 | **素材链存档为「第二交付路线」**（不换产品线）：20 段核心动作（idle / turn / drag / click×5 / 工作状态×6）≈10MB 就能撑起一个可用形象；管线 = AI 绿幕视频 → 抠像（**手工**，自动 HSV 残边）→ 归一化 → 640×360 webm(VP9-alpha) → Safari 另出 HEVC-alpha `.mov` | `custom-model-plan.md` §11 降档路线；🔴 **许可**：代码 MIT、**素材「禁止商用」**、形象 CC BY-NC-SA 4.0 → **只借结构，一行素材不能进包**（规矩 29） |
+
 **网上已有、我们已有**：番茄 / 提醒 / 开机自启 / 锁屏静默 / 摸头 / 全屏闸门 / 低电降帧 / 工作状态；甩抛/摸头交互形态与 Coopanion 同类。  
 **不抄主线**：亲密度养成、多宠交友、径向技能轮当主 UI、内置捆小模型、会议 Join、打字蒸汽特效；**Computer use 控键鼠当产品主线**（与安静搭子冲突）。
 
@@ -235,10 +240,10 @@
 
 | ID | 项 | 做法草案 |
 |---|---|---|
-| M1 | **本地允许空 Key** | `localhost` / `127.0.0.1` 时：无 key 也走网络；可选占位 `ollama` / `lm-studio`。修 `streamLLM` + `memory.extractViaLlm` + 渲染层 `hasApiKey` 判定 |
-| M2 | **连接预设一键填** | 托盘/小面板：DeepSeek · 魔搭 · Ollama(`:11434/v1`) · LM Studio(`:1234/v1`) · 自定义；产品形态对照 **Coopanion Start 页厂商表**（机制参考，AGPL 不抄码） |
+| M1 | ✅ **本地允许空 Key**（2026-10-29 完成） | 判定收到 `llm-providers.isUsable`：**有 key 或端点在本机**才可用。`streamLLM` / `memory.extractViaLlm` / 主进程记忆闸门 / 渲染层（改读 `llm.usable` 派生字段）四处一起改 |
+| M2 | ✅ **连接预设一键填 + WorkBuddy 导入**（2026-10-29 完成） | 托盘「设置 → 模型接入」：9 条预设（DeepSeek / 通义 / 智谱 / Kimi / 硅基流动 / OpenRouter / Ollama / LM Studio / 自定义）+ 从 `~/.workbuddy/models.json` 导入自定义模型 + 填写 Key 小窗（不扩 IPC 面，同改名对话框套路）+ **真测一句**（M4 提前做掉：按 401/404/429/超时分别给可动手的结论）。⚠️ 切预设**不动** apiKey；旧配置按 baseUrl 反查打勾项 |
 | M3 | **拉模型列表** | `GET …/v1/models` → 下拉选；失败可手填（Ollama/LM Studio 官方兼容端均有） |
-| M4 | **真测一句** | 不只通 `/models`：发极短 chat，成功才标「已就绪」（W16 / Coopanion Test）；区分：连不上 / 无模型 / 401 / 超时 |
+| M4 | ✅ **真测一句**（2026-10-29，随 M2 一起） | `testLlm()` 发极短 chat（max_tokens 32、15s 超时）；失败按状态码翻译：401/403 key 无效 · 404 地址或模型名不对 · 429 限流/额度 · AbortError 超时。→ 只剩 M5（设置页）|
 | M5 | **设置页露出来** | 勿再只靠「打开 JSON」：Base URL、Key（可空提示）、Model、超时、extraBody 高级折叠；引导可叠 W18 |
 
 ### G-LLM 中期
@@ -311,3 +316,9 @@
 | 2026-10-28 | 气泡第一批 **C1/C2/A1/A2/B2/B3 已实施**；第二批 **W36 宽高比多档 + W40 三候选**已实施（含真机验证 + 五条负对照）；🔴 顺手抓出 `hashJitter` 越界 bug（`^` 转回有符号 int32，实测吐 −18/−21/−23 而约定是 ±8） |
 | 2026-10-28 | 气泡第三批 **C3 打字光标 + D1 停留时长随字数**已实施（六条负对照）；**W42 情绪角标**已实施（六条负对照 + 真机）；🔴 抓到并修掉"改注释留下裸文本 → CSS 整块规则被吃掉"（角标一度掉到泡体下方） |
 | 2026-10-28 | 🔴 **「屏幕上一大一小两个她」定位并修复**（此前判为"与底座无关"是**错的**）：底座出现 → `--stats-h` 变化 → `layout()` → canvas resize → 缩放 0.1169↔0.1047 差 11%；`preserveDrawingBuffer:true` 让旧帧被保留拉伸 → 一大一小，**只有一个底座**，且**截图抓不到**。修：resize 后 `clear()` + 立刻补画一帧。回归 `verify-resize-clear.js` |
+| 2026-10-29 | 右键菜单**定稿 = 光标处卡片菜单**（轮盘 / 头顶泡泡归档为技术储备，`interaction.petMenu` 三档可切）。依据：MIT 6.831 的原话是"pie 快 15–20%，但效率优势不足以抵消线性菜单的外部一致性与布局简单性"；Electron 原生菜单不可样式化（issue #4990）。回归 `verify-card-menu.js` |
+| 2026-10-29 | 🔴 **「两个她」的最终修法（用户拍板："始终是加了底座时的大小，这样就不用担心加载底座后大小切换的问题了"）**：`--stats-h` 在 boot 里、**第一次 `layout()` 之前**冻结成"牌摆满"那一档（含没开悬浮显示时），转圈 / 出数 / 开关开关都不再改它 → 底座不再触发 canvas resize，链路从源头断掉；清屏 + 整窗 invalidate 降级为真 resize（窗口 / 换模型 / 改缩放）的保险。回归：`verify-resize-clear.js`（[B] 段 + 3 条负对照全红）+ 真机探针 `probe-stats-freeze.js`（`--stats-h` 恒 34px、canvas 1391×1356 全程不变、首帧后 0 次 resize；含 1 条负对照） |
+| 2026-10-29 | 记 **`PC2005-cloud/dsh-pet`（4733★，视频片段宠物）**：W43–W46。核心判据 = **它的"组合"在时间轴上（换源串行），不在画面上（无图层叠加）**，靠"表情不可组合"换"素材 O(N)"；我们属大状态空间（情绪×动作×朝向×口型）→ **只借调度层**。🔴 同名不同仓：与 `MerZlin/dsh-pet-indesktop` 无关。🔴 许可：代码 MIT / 素材禁商用 / 形象 CC BY-NC-SA。专文 `open-source-reference.md` 第 18 轮；并**订正** `custom-model-plan.md` §10.2 D 行「已批判（状态爆炸）」的判据 |
+| 2026-10-29 | 🔴 **「两个她」第四次 = 真凶（用户第三次报「还是出现了两个模型」）**：底座无辜 —— 真因是**启动期窗口连缩**（宽 324→312→310、高 344→342），每次缩小都 resize 画布，而「缩小」正是合成层残留的唯一来路（旧帧比新视口大）。修法：`syncStageWidth` **只增不减**（`want <= innerWidth+2` 只记账不上报；窗口透明 + 命中测试穿透让多出的空白无害）+ `applyStageWidth` **不调 `refreshWinSize`**（高度只在屏幕真变时变）。实测 `canvasResize` 3 次 → **1 次**；负对照短路该判断立刻回到 3 次。回归 `verify-resize-clear.js` [C] 段 |
+| 2026-10-29 | 🔴 **「幻影参数」大 bug**：框架 `getParameterIndex` 拿字符串和 `CubismId` 对象做 `!=` 比较 → 永远 miss → 写进 `_notExistParameterValues`；`getParameterValueById` 读的是同一张表，所以**读回来自洽、画面不动、零报错**。⇒ whale 的 16 字段情绪、口型、摸头 delta **从未真正画出来过**。修法：`paramIndexOf` 建「名→索引」表（按 model 实例缓存）+ 全走 `set/getParameterValueByIndex`。回归 `verify-param-channel.js`（12 条） |
+| 2026-10-29 | **情绪贴纸（whale）**：44 个 exp3 里挑 7 个「贴纸类专属参数」映射到情绪档（星星眼/吐舌/问号/流汗/阴暗/感叹号/闭眼口水），随 `decayAmt` 淡入淡出；共享参数自动过滤、绝对写 `def+value×强度`、归零写回默认值；开关 `appearance.stickers`。真机五档全亮（happy 星星瞳 / think 红问号 / shy 汗滴 / serious 灰脸 / sleepy 口水）。回归 `verify-stickers.js`（46 条） |

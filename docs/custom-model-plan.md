@@ -250,7 +250,7 @@ PoC（插在 §8 下一步 1 之前）：
 | **A. Spine** 2D 骨骼 | `@esotericsoftware/spine-pixi-v8` v4.3.13，LicenseRef（Spine Runtimes License Agreement，**需持有效编辑器许可**）；runtime 仓 5338★ 仍活跃 | ❌ | ❌ | **排除** |
 | **B. VRM（3D）** | `@pixiv/three-vrm` v3.5.5 **MIT**、2241★、10-22 活跃；`three` MIT | ✅ | ✅ | **唯一真解法** |
 | **C. 分层 PNG + 自研 puppeting** | 现成的 `pixi.js@8` | ⚠️ 需人工差分 | ⚠️ 需画 | 折中 |
-| **D. 序列帧 / WebM** | dsh-pet 路线 | ❌ | ❌ | 已批判（状态爆炸） |
+| **D. 序列帧 / WebM** | `PC2005-cloud/dsh-pet` 路线（106 段视频，MIT 代码） | ❌ | ❌ | 排除（但**理由已订正**，见 `docs/open-source-reference.md` 第 18 轮 §18.6） |
 
 **A. Spine 排除的理由够硬**：官方原话 *「Spine Essential excludes meshes and other advanced features,
 and cannot save or export projects containing Professional features such as meshes or IK」* —— 我们最需要的

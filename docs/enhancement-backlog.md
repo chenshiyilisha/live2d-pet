@@ -160,6 +160,19 @@
 | W44 | **事件档位数组**：`events.workStatus[6]`（thinking/working/result/waiting/success/error）**索引即档位、新档只可追加到末尾**；播完分支抽 `decideEndedCue` 式纯函数（档内轮换 / 续播 / 事件结束 / 回归随机）。正好接第 17 轮待补的 `attention` 档 | 同上 `cues.ts`；⚠️ 与我们「配置逐段逐键合并」（规矩 1）天然契合，但**中间插档 = 静默错位**，写进注释 |
 | W45 | **换源四条硬细节**（对照我们的实现逐条核）：① `loadeddata` ≠ 开始出画，要等 `play()` 兑现才回执；② `ended` 只认前台元素（后台残留 handler 会掐断当前动画）；③ 加载失败/超时**必须释放 pending**，否则防重分支把它永久吞掉 = **「点了没反应」**；④ blob + **世代号**丢弃迟到结果（= 规矩 16） | 同上 `animation.ts` / `asset-loader.ts`；③ 与规矩 24「关掉的入口不许点了没反应」同族 |
 | W46 | **素材链存档为「第二交付路线」**（不换产品线）：20 段核心动作（idle / turn / drag / click×5 / 工作状态×6）≈10MB 就能撑起一个可用形象；管线 = AI 绿幕视频 → 抠像（**手工**，自动 HSV 残边）→ 归一化 → 640×360 webm(VP9-alpha) → Safari 另出 HEVC-alpha `.mov` | `custom-model-plan.md` §11 降档路线；🔴 **许可**：代码 MIT、**素材「禁止商用」**、形象 CC BY-NC-SA 4.0 → **只借结构，一行素材不能进包**（规矩 29） |
+| W47 | **TTS 加 OpenAI 兼容 provider**（借 gsv-rvc-voice-bridge 的网关模式，MIT）：
+  `tts.provider='winrt'\|'openai'` + `baseUrl` / `apiKey` / `model` / `voice` 四个键，
+  结构照抄 `llm-providers.js`（预设 + 一键测试）。🔴 **连不上网关必须静默回落 WinRT**
+  （否则她变哑巴），且回落只记一行日志不弹窗 —— 她不该因为一个可选功能报错 |
+  `InariNGT-Ofiicial/gsv-rvc-voice-bridge` MIT；网关无认证、只听 127.0.0.1、串行合成
+（防并发抢 GPU）；`maxChars` 是**文本**限制不是音频时长限制 |
+| W48 | **proactive 加「决策 AI」**（借 group_chat_plus 的**决策 AI / 回复 AI 分离**，
+  ⚠️ 该仓 **AGPL-3.0 → 只借思想自己写，不复制代码**）：判断"要不要插嘴"走
+  **独立的轻量 LLM 调用**，不拼完整人格 + 全部记忆 + 全部历史 —— 把最贵的资源
+  花在会被丢弃的判断上是浪费。现在是三道规则闸（quietHours / maxUnanswered /
+  media），决策 AI 作为**可选增强**叠在闸门之后 |
+  `Him666233/astrbot_plugin_group_chat_plus` 191★ AGPL-3.0；另两个可借机制：
+  GWW（按**用户粒度**隔离等待窗口，不劫持他人消息）· 频率调整 AI（按活跃度自适应概率）|
 
 **网上已有、我们已有**：番茄 / 提醒 / 开机自启 / 锁屏静默 / 摸头 / 全屏闸门 / 低电降帧 / 工作状态；甩抛/摸头交互形态与 Coopanion 同类。  
 **不抄主线**：亲密度养成、多宠交友、径向技能轮当主 UI、内置捆小模型、会议 Join、打字蒸汽特效；**Computer use 控键鼠当产品主线**（与安静搭子冲突）。

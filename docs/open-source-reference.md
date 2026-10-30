@@ -2862,3 +2862,126 @@ https://github.com/Axiaohungry/dsh-llm-workbuddy          88★ MIT（网关地�
 https://www.workbuddy.cn/docs/cli/models                 models.json 官方 schema（url 是完整路径）
 https://github.com/linguo2625469/workbuddy2api-panel    4609★（账号池转 OpenAI 兼容网关，第三方代理路线）
 ```
+
+---
+
+# 20. AstrBot / NapCat / 语音网关调研（2026-10-30，第 20 轮）
+
+> 触发：用户甩了四条链接问「有没有值得参考的」。
+> 🔴 本轮最重要的收获是**许可核查**，不是技术：两个高星项目**不能碰**。
+
+## 20.1 许可核查（规矩 29 的直接命中）
+
+| 仓库 | star | GitHub API 标注 | LICENSE 第一行/实质 | 结论 |
+|---|---|---|---|---|
+| `AstrBotDevs/AstrBot` | 44767 | AGPL-3.0 | AGPL-3.0 | ⚠️ **强传染**，抄码要求整个项目 AGPL |
+| `AstrBotDevs/astrbot-launcher` | 2425 | MIT | MIT | ✅ 可用（但无参考价值） |
+| `NapNeko/NapCatQQ` | **11969** | `NOASSERTION` | **Limited Redistribution License** | 🚫 **禁止** |
+| `InariNGT-Ofiicial/gsv-rvc-voice-bridge` | 1 | MIT | MIT | ✅ 可用 |
+| `InariNGT-Ofiicial/astrbot_plugin_gsv_rvc_voice` | 1 | MIT | MIT | ✅ 可用 |
+| `Him666233/astrbot_plugin_group_chat_plus` | 191 | AGPL-3.0 | AGPL-3.0 | ⚠️ 只借设计，不搬码 |
+
+### NapCat 的许可原文（11969★ 但**不是开源**）
+
+```
+Limited Redistribution License for NapCat
+Copyright © 2024 Mlikiowa
+
+1. Usage and Reproduction:
+   - Unauthorized use, reproduction, modification, or distribution of this code
+     is prohibited without explicit permission from the main author.
+2. Redistribution:
+   - Redistribution of this code is permitted, provided that the full text of
+     this license is included, and the source and copyright information is
+   clearly stated.
+   - Minor modifications and extensions are allowed for redistribution purposes,
+     but the modified code must not be publicly released.
+3. Non-Commercial Use: ...
+```
+
+🔴 **条款 2 明确「修改后的代码不得公开发布」**。我们仓库是 public 的 →
+一旦带上它的代码或改过的副本就是违规。再加上它是**逆向 NTQQ 协议**的
+协议端，本身踩在平台条款灰色地带。
+
+> 这条再次坐实规矩 29 的价值：GitHub REST 给的 `spdx_id` **只给 `NOASSERTION`**，
+> 而实际是一份限制再分发的自定义许可。**11969★ 不等于可以自由使用**。
+
+## 20.2 唯一值得落地的：gsv-rvc-voice-bridge 的「本地网关 + OpenAI 兼容端点」
+
+**它做了什么**：把两个 Python 推理服务串成一条链，对外伪装成 OpenAI 语音接口。
+
+```
+GPT-SoVITS (127.0.0.1:9881)  生成源语音
+        ↓
+RVC (127.0.0.1:8789, 模型常驻)  转换音色
+        ↓
+网关 (127.0.0.1:8790)
+  POST /say              → JSON：音频绝对路径 / 格式 / 时长 / 分段耗时
+  POST /v1/audio/speech  → WAV 字节      ← OpenAI TTS 兼容
+  GET  /v1/models        → 当前模型 ID
+  GET  /health           → 网关与上游存活
+```
+
+**对我们的价值**：桌宠现在的 TTS 是 **WinRT 系统语音**（`src/renderer/tts.js`
+双引擎）。这套网关模式意味着——
+
+> 只要给 TTS 加一个 **OpenAI 兼容 provider**（`tts.provider='openai'`，
+> baseUrl 指向网关 `/v1`），她就能用**自己的角色音色**说话，
+> 且**不需要在 Electron 里跑任何 Python 环境**。
+
+这跟第 19 轮刚做完的 `llm-providers.js` 是**同一套模式**（预设 + baseUrl +
+apiKey + 一键测试），照抄结构即可，成本很低。
+
+**它自曝的边界也值得抄（都是工程教训不是缺陷）**：
+- 网关**没有内建认证**，默认只监听 `127.0.0.1` → 不能暴露公网
+- **串行合成**：避免多个请求同时占 GPU（我们桌宠只有一个声音，天然串行）
+- `maxChars` 是**文本**限制不是音频时长限制；发送能力由平台适配器决定
+- 健康检查（`/health`）**不等于**完整推理成功 —— 我们「真测一句」（M4）
+  正是为了避免这个陷阱，两者是同一个教训的两个面
+
+## 20.3 值得记进 backlog 的：group_chat_plus 的「决策 AI / 回复 AI 分离」
+
+⚠️ 它整个项目是 **AGPL-3.0**，抄一行代码都会要求我们整个项目转 AGPL，
+我们是 MIT，两者不兼容 → **只能借设计思想，自己实现，不复制粘贴**。
+
+它跑**两次独立的 LLM 调用**，走完全不同的路径：
+
+| | 决策 AI（"读空气"） | 回复 AI（"生成回复"） |
+|---|---|---|
+| 调用 | `provider.text_chat()` 直连 | `event.request_llm()` 走平台 |
+| Hook | **不经过任何 Hook**，不受其他插件影响 | 经过 Hook 链 |
+| 系统提示 | 人格（可选）+ 决策指令 | 人格 + 其他插件注入 + 工具提醒 |
+| 上下文 | **近期消息摘要（较短）** | **完整格式化历史 + 记忆 + 工具** |
+| 输出 | YES / NO | 回复文本 |
+
+**可借的点**：判断"要不要说话"不该拼装完整人格 + 全部记忆 + 全部历史，
+那会把最贵的资源浪费在最多数会被丢弃的判断上。
+
+映射到我们：proactive 现在是三道**规则闸**（`quietHours` / `maxUnanswered` /
+`media`），可以加一条**可选的决策 AI**——用便宜模型判断"这句话值不值得插嘴"。
+正是 backlog ⑧「主动时机加信息增益」。
+
+另两个机制也可借：**群聊等待窗口 GWW**（按**用户粒度**隔离等待窗口，不会
+劫持他人消息）→ 对应我们的并发聚合；**频率调整 AI**（按活跃度自适应概率）
+→ 比固定 `maxUnanswered` 更贴人。
+
+## 20.4 明确不碰的
+
+- **NapCatQQ**：见 20.1，许可禁止 + 逆向协议双重风险。桌宠是单机桌面应用，
+  为接 QQ 引入这个风险，性价比不成立。
+- **astrbot-launcher**：MIT 没问题，但它解决的是"用户装不上 Python/AstrBot"
+  的问题（引导式安装 + 多实例管理）。我们有 electron-builder + 自动更新，
+  没有这个问题 → 参考价值 ≈ 0。
+- **AstrBot 主仓 / group_chat_plus 的代码**：AGPL-3.0，只借设计不搬码。
+  （这与第 19 轮对 Cursor 逆向协议那条的处理是同一条判据。）
+
+## 20.5 来源
+
+```
+https://github.com/AstrBotDevs/AstrBot                           44767★ AGPL-3.0（主仓：插件机制 / 多平台适配）
+https://github.com/AstrBotDevs/astrbot-launcher                   2425★ MIT（Rust 启动器 / 多实例管理）
+https://github.com/NapNeko/NapCatQQ                              11969★ NOASSERTION → **Limited Redistribution License**（禁止未经授权使用/修改/分发）
+https://github.com/InariNGT-Ofiicial/gsv-rvc-voice-bridge             1★ MIT（GSV→RVC 本地网关 + DSH 插件）
+https://github.com/InariNGT-Ofiicial/astrbot_plugin_gsv_rvc_voice      1★ MIT（AstrBot 适配：/voice /语音 /voice_health）
+https://github.com/Him666233/astrbot_plugin_group_chat_plus         191★ AGPL-3.0（「AI 读空气」：决策 AI / 回复 AI 分离 + GWW）
+```

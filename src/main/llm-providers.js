@@ -74,6 +74,18 @@ const PROVIDERS = [
     keyUrl: 'https://cloud.siliconflow.cn/account/ak'
   },
   {
+    /* 讯飞星辰 MaaS（2026-10-30 用户接入 Spark-X2.6 时实测）：
+     * OpenAI 兼容端点 `…/v2/chat/completions`，baseUrl 到 /v2 这一级。
+     * 默认带思维链：请求体顶层 `enable_thinking:false` 可关（extraBody
+     * 正是顶层平铺，现有配置里的 `{enable_thinking:false}` 直接生效；
+     * ⚠️ 流式下 `extra_body` 里的同名键被忽略，只能走顶层）。 */
+    id: 'xfyun',
+    label: '讯飞星辰 MaaS',
+    baseUrl: 'https://maas-api.cn-huabei-1.xf-yun.com/v2',
+    model: 'spark-x2.6',
+    keyUrl: 'https://maas.xfyun.cn/modelService'
+  },
+  {
     id: 'openrouter',
     label: 'OpenRouter',
     baseUrl: 'https://openrouter.ai/api/v1',

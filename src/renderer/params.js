@@ -16,6 +16,7 @@
 
 import { HIYORI } from './profiles/hiyori.js';
 import { WHALE } from './profiles/whale.js';
+import { DEEPFISH } from './profiles/deepfish.js';
 
 /* ============================================================
  *  模型注册表 + 当前模型
@@ -24,10 +25,10 @@ import { WHALE } from './profiles/whale.js';
  *  注册进 MODELS。MODEL_NAME 只在这里写一次当前用的档案键。
  * ========================================================== */
 
-export const MODELS = { [HIYORI.name]: HIYORI.model, [WHALE.name]: WHALE.model };
+export const MODELS = { [HIYORI.name]: HIYORI.model, [WHALE.name]: WHALE.model, [DEEPFISH.name]: DEEPFISH.model };
 
 /* 完整档案表（含 param/emotion…）。applyProfile 从这里取数热换。 */
-const PROFILE_PACKS = { [HIYORI.name]: HIYORI, [WHALE.name]: WHALE };
+const PROFILE_PACKS = { [HIYORI.name]: HIYORI, [WHALE.name]: WHALE, [DEEPFISH.name]: DEEPFISH };
 
 /* 各模型的「情绪 → exp3 表情」映射（whale 独有，hiyori 是 undefined）。
  * 消费方 pet.js 的加载器用它拼 expressions/ 下的文件名。
@@ -39,16 +40,17 @@ const PROFILE_PACKS = { [HIYORI.name]: HIYORI, [WHALE.name]: WHALE };
  * ⚠️ 旧键 stickers 仍然认（hiyori 那边没有，只是留个后路，别两处都写）。 */
 export const EXPRESSIONS = {
   [HIYORI.name]: HIYORI.expressions,
-  [WHALE.name]: WHALE.expressions
+  [WHALE.name]: WHALE.expressions,
+  [DEEPFISH.name]: DEEPFISH.expressions
 };
 /** @deprecated 用 EXPRESSIONS。留这个名字是因为已有断言与注释在引用。 */
 export const STICKERS = EXPRESSIONS;
 
 /* 事件表情：{ 模型: { 事件名: exp3 文件名 } }。不绑情绪，由 emote() 临时播。 */
-export const EMOTES = { [WHALE.name]: WHALE.emotes };
+export const EMOTES = { [WHALE.name]: WHALE.emotes, [DEEPFISH.name]: DEEPFISH.emotes };
 
 /* 道具池：{ 模型: [ { file, w, ms } ] }。闲置时随机冒出来，见 prop-pool.js。 */
-export const PROPS = { [WHALE.name]: WHALE.props };
+export const PROPS = { [WHALE.name]: WHALE.props, [DEEPFISH.name]: DEEPFISH.props };
 
 /* 默认档案键（配置缺失 / 校验脚本兜底）。运行时以 appearance.model 为准，
  * 经 applyProfile 热换下面的 let 表 —— 别再靠改这一行切模型。 */

@@ -143,21 +143,31 @@ if (fs.existsSync(localCore)) {
 const modelDir = path.join(APP, 'src', 'assets', 'models');
 const localModels = path.join(ROOT, 'src', 'assets', 'models');
 if (fs.existsSync(localModels)) {
-  const count = (d) => {
+  const count = (d, exclude = []) => {
     let n = 0;
     /* ⚠️ 手工备份（*.orig / *.bak / *.rej / *~）不算 —— 打包流程本来就不拷它们。
      *    拿它们当基准会让这条校验永远差几个文件：本地留过一个 .orig，
      *    就报「产物 20 / 源码 21」，看着像模型丢了，其实是拿草稿在量成品。 */
     const isBackup = (name) => /\.(orig|bak|rej)$|~$/.test(name);
+    const isExcluded = (name) => exclude.includes(name);
     const walk = (p) => { for (const e of fs.readdirSync(p, { withFileTypes: true })) {
-      if (e.isDirectory()) walk(path.join(p, e.name));
-      else if (!isBackup(e.name)) n++; } };
+      if (e.isDirectory()) { if (!isExcluded(e.name)) walk(path.join(p, e.name)); }
+      else if (!isBackup(e.name) && !isExcluded(e.name)) n++; } };
     if (fs.existsSync(d)) walk(d);
     return n;
   };
   const w = count(localModels), g = count(modelDir);
   if (g === w && w > 0) ok(`模型齐（${g} 个文件，与源码一致）`);
-  else no(`模型数量对不上：产物 ${g} 个 / 源码 ${w} 个`);
+  else {
+    /* 🔴 deepfish（大肥鱼）是第三方禁分发素材（素材自带"禁止二次分发"条款），
+     *    本地开发用可以、但**不进 npm 安装包**。源码里多出来的 42 个文件
+     *    是它 + 原始下载目录，不该计入对比基准。
+     *    DeepSeek免费公皮.zip 同理（原始下载包，不是模型素材）。 */
+    const excluded = ['deepfish', 'DeepSeek免费公皮', 'DeepSeek免费公皮.zip'];
+    const realW = count(localModels, excluded);
+    if (g === realW && realW > 0) ok(`模型齐（${g} 个文件，与源码一致（排除 deepfish 禁分发素材）`);
+    else no(`模型数量对不上：产物 ${g} 个 / 源码 ${w} 个（排除禁分发素材后 ${realW}）`);
+  }
 } else {
   console.log('   ℹ️  本地没有模型素材，跳过（打包产物本应带上它们）');
 }

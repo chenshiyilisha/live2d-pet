@@ -2171,7 +2171,10 @@ function personalitySubmenu(cfg) {
 
 const APPEARANCE_MODELS = [
   { id: 'hiyori', label: '日和' },
-  { id: 'whale', label: '鲸鱼娘' }
+  { id: 'whale', label: '鲸鱼娘' },
+  /* deepfish（大肥鱼）是第三方免费公开模型：禁二次分发 + 署名要求
+   * （神宫凉子 / 霓虹猫）。不上架默认、仅作本地可选。 */
+  { id: 'deepfish', label: '大肥鱼' }
 ];
 
 function applyAppearanceModel(id) {
@@ -2183,6 +2186,8 @@ function applyAppearanceModel(id) {
   const row = APPEARANCE_MODELS.find((m) => m.id === want);
   if (want === 'whale') {
     toast('已切到鲸鱼娘 · 素材源自 VTube Studio 模型包（Andersen216 补 model3）');
+  } else if (want === 'deepfish') {
+    toast('已切到大肥鱼 · 素材源自神宫凉子 / 霓虹猫 免费公开模型，禁止二次分发');
   } else {
     toast(`已切到「${row ? row.label : want}」`);
   }

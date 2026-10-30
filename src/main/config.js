@@ -48,7 +48,7 @@ const DEFAULT_CONFIG = {
    * 留口子。最常用的是关掉混合思考模型的思考阶段：`{"enable_thinking": false}`——
    * 不关的话正文之前会先静默推理一段（实测首字 1087ms → 523ms）。
    * ⚠️ model / messages / stream 是本层的契约，不会被 extraBody 顶掉。
-   * ⚠️ 这是**技术字段**，界面上不暴露；「打开配置文件」里能手改。
+   * ⚠️ 「模型设置」页高级折叠里可改（M5）；不会的别碰，空对象 = 不传额外字段。
    *
    * 两个超时（2026-10-13 补）。在这之前请求是**完全没有超时**的：服务端连上
    * 之后不再吐数据，请求就永远不返回，气泡停在"打字中"那一帧，只能杀进程。
@@ -68,7 +68,28 @@ const DEFAULT_CONFIG = {
     model: 'deepseek-chat',
     extraBody: {},
     stallMs: 20000,
-    totalMs: 120000
+    totalMs: 120000,
+    /* M8：真测一句通过后记下指纹（baseUrl+model）。菜单打 ✓；
+     * 地址或模型名一变绿标自动掉。不存 apiKey。 */
+    tested: null,
+    /* W16：真测一句才算就绪。默认关 —— 老用户已有 key 但没点过「测试连接」
+     * 不该突然变哑巴；打开后 chat 也要绿标才走在线。看屏（G23）始终要 ready。 */
+    requireTested: false,
+    /* 多配置档（M6）：「家里 Ollama / 公司云」各存一份完整连接。
+     * profiles[id] = { id, label, provider, baseUrl, apiKey, model, extraBody, stallMs, totalMs }
+     * activeProfile = 当前档 id（仅标签；真发请求仍读上面顶层字段）。
+     * 切换 = 档 → 顶层；存当前 = 顶层 → 档。空 = 还没存过档。 */
+    profiles: {},
+    activeProfile: ''
+  },
+  /* OCEAN 轻量偏置（P3 + W10）：外向 E / 敏感 N / 温柔 A / 话痨 T，各 0~1，默认 0.5 = 中性。
+   * 落到 proactive 间隔、情绪衰减、气泡停留、pride 软化（见 ocean.js）。
+   * 不进人设正文、不改 LLM prompt —— 只调行为旋钮。 */
+  personality: {
+    E: 0.5,
+    N: 0.5,
+    A: 0.5,
+    T: 0.5
   },
   /* 聊天界面。
    *
@@ -135,6 +156,12 @@ const DEFAULT_CONFIG = {
      *    ② llm.js 的清洗器本来就在丢 emoji，正文里放又会被洗掉。
      * 默认开（纯美化）。calm 是常态，不挂牌。 */
     floatBubbleMoodBadge: true,
+    /* G8：是否展示 [think:…] 内心 OS（气泡顶灰斜字）。关 = 仍剥标签、只不画。 */
+    showThink: true,
+    /* P6：对话模态 companion 陪伴 / work 专业（只改本轮语气提示，不改人设正文）。 */
+    mode: 'companion',
+    /* G9：输出侧人设护栏 off / med / strict。默认 med（禁客服腔）；silent 直通。 */
+    personaGuard: 'med',
     /* 输入框闲置自动收起（秒）：点开对话框后这么久没打字 / 没发消息就 hideUI。
      * 治"聊完一嘴输入条一直挂着"。0 = 不自动收（只能 Esc / 再点她之外的路径关）。
      * ⚠️ 参数型，不进托盘（规矩 5）。下限由渲染层钳到 ≥15，防手滑写成 1 秒乱闪。 */
@@ -145,6 +172,9 @@ const DEFAULT_CONFIG = {
     enabled: false,
     rate: 1.05,
     pitch: 1.0,
+    /* W11：情绪分轨 —— 按当前 emotion 微调 rate/pitch（见 tts-emotion.js）。
+     * 默认开：纯音色偏置、不出声开关本身仍是 enabled。 */
+    emotionVoice: true,
     /* 合成引擎（两种的差别见 src/main/tts.js 的文件头）：
      *   'winrt'  = Windows 语音合成。声音由我们自己用 WebAudio 播，
      *              于是能取到波形 → **真口型**（嘴跟着音量动，不是正弦波）。
@@ -182,7 +212,25 @@ const DEFAULT_CONFIG = {
     cooldownMinutes: 10,
     /* 主动搭话时允许她回 [silent] 保持沉默（标签由 llm.js 的清洗层剥掉，
      * 不进气泡不进历史；只有“整条回复除了标签什么都没有”才算沉默）。 */
-    allowSilent: true
+    allowSilent: true,
+    /* X5：边缘线索（高 CPU / 低电量 / 刚切应用）进主动搭话。
+     * 打扰向 → 默认关；开着时仍可 [silent]。 */
+    edgeCues: false,
+    /* W26：先记账再生成（投递 / 打断可审计）。默认开：只写本地 JSONL，不打扰。 */
+    bookFirst: true
+  },
+  /* 专注/勿扰三档（X2，见 presence.js）：盖过单一 quietHours。
+   *   companion 陪伴 = 忽略安静时段、搭话更勤
+   *   normal    日常 = 走 quietHours（默认）
+   *   focus     勿扰 = 全天不主动搭话
+   * 托盘「功能开关 → 状态」切换；不另开打扰类默认。 */
+  presence: {
+    mode: 'normal'
+  },
+  /* X6：作息直方图（24 小时槽）。学出来的活跃窗可约束主动搭话；默认开学习、默认不强制过滤。 */
+  rhythm: {
+    enabled: true,
+    gateProactive: false
   },
   /* 媒体感知：知道主人此刻在听什么（Windows 的媒体会话，见主进程 media.js），
    * 并把它并进对话 / 主动搭话的语境 —— 光知道歌名不算"陪伴"，能顺口接一句才算。
@@ -199,7 +247,17 @@ const DEFAULT_CONFIG = {
     llmExtract: true,
     maxFacts: 60,
     injectMax: 6,
-    injectChars: 400
+    injectChars: 400,
+    /* G19 2a：清晰度日结默认跟记忆总开关走（settle 本身廉价）。 */
+    decay: true,
+    /* G19 2b：retention<10 时删正文留墓碑。不可逆，默认关。 */
+    forget: { enabled: false }
+  },
+  /* G12：MCP 客户端骨架。默认关；无 server、无 SDK 依赖；工具调用需逐条授权。 */
+  mcp: {
+    enabled: false,
+    servers: [],
+    grants: {}
   },
   /* ══════════════════════════════════════════════════════════
    *  以下每一段都对应托盘菜单里的一个分组，**每个功能都是独立开关**，
@@ -250,6 +308,9 @@ const DEFAULT_CONFIG = {
      * 默认开：纯数学不占资源、不打扰；关掉 = 不漂移不注入不偏置，
      * 行为与加这个功能之前逐位一致。 */
     mood: true,
+    /* G14 / W8：从系统截屏/录屏里把自己藏起来（setContentProtection）。
+     * 默认关 —— 有的环境会显示黑块而非完全消失，交用户决定。 */
+    hideFromCapture: false,
     /* 纹理 LOD —— 屏幕用不完的纹理分辨率就降一档（见渲染层 pet.js 的 TEX_LOD）。
      * 📌 2026-10-15 起源纹理已永久降为 1024（省 ~170MB 运行内存，README 有说明），
      * 本开关对当前素材自然不触发；保留给将来更大纹理的素材。
@@ -271,10 +332,15 @@ const DEFAULT_CONFIG = {
     /* ⚠️ 旧键，已并入 expressions（2026-10-29）。留着是为了老配置文件里
      * 的 stickers:false 仍然生效 —— 渲染层的判定是
      * 「expressions !== false && stickers !== false」，两个键任一关掉都关。 */
-    stickers: true
-    /* 这里原本有 model: 一个可选的模型名。春移除后模型固定成日和，
-     * 不再是可配置项 —— 档案键只在渲染层 profiles/hiyori.js 的 name 写一次
-     * （params.js 的 MODEL_NAME 引它，见 verify-rename）。 */
+    stickers: true,
+    /* 运行时人物模型（X1）：'hiyori' | 'whale'。默认日和 —— 鲸鱼娘本地可切，
+     * 商用授权未齐前不上架为默认（见 backlog L2）。渲染层 applyProfile + mountModel。 */
+    model: 'hiyori',
+    /* W6：指针停在她身上一会儿 → 窗体变淡 + 整窗穿透，方便点后面的东西。
+     * 默认关（会改命中手感）。 */
+    hoverFade: false,
+    /* W9：按时段换闲置表情池（早/午/晚/夜）。默认开：纯显示、不打扰。 */
+    timeOfDayIdle: true
   },
   /* 互动行为（开关 + 各自参数）。
    * ⚠️ wander（闲置自己溜达）= 不打招呼就挪窗口，属于"自动移动"，
@@ -295,7 +361,18 @@ const DEFAULT_CONFIG = {
     edgeSnap: true,         // 拖完松手后自动吸附到最近的屏幕边缘
     wander: false,          // 闲置时自己溜达换位置
     wanderIdleMin: 3,       // 闲置多少分钟后开始溜达
-    returnOnActivity: true  // 有人操作时，把溜达跑远的她收回原位
+    returnOnActivity: true, // 有人操作时，把溜达跑远的她收回原位
+    /* W5（armada）：位置钉。放下后随机钉 14/34/44 分钟；钉期内不换位；
+     * 钉到期 + 系统闲置达标才稀有 hop 一次再重新钉。默认关（改 wander 手感）。 */
+    positionPin: false,
+    /* G27：新显示器接入时 hop 到该屏右下角。默认关（少见、略打扰）。 */
+    multiScreenHop: false
+  },
+  /* G26：全局热键。曾整段移除；现以默认关骨架恢复，用户自己开。 */
+  hotkeys: {
+    enabled: false,
+    toggleVisible: 'CommandOrControl+Shift+Alt+P',
+    stopSpeak: 'CommandOrControl+Shift+Alt+S'
   },
   /* 角色交互反馈 */
   interaction: {
@@ -345,16 +422,33 @@ const DEFAULT_CONFIG = {
     headPat: true,        // 在头顶按住 = 一直蹭（A-B-C 三段，松手才收尾）
     dragReact: true,      // 拖着走的时候挣扎 / 不满
     pokeReact: true,      // 连戳给出递进反应
+    /* W19：触摸响应档 quiet/normal/eager。
+     * normal = Custom 基线（下方 headPat/pokeReact 单项仍可关）；
+     * quiet 少反应 / eager 多反应（门槛见 touch-mode.js）。 */
+    touchMode: 'normal',
     /* 甩抛物理（DSH 桌宠 / XT-nya 互证，见 throw-physics.js）。
      * 默认关：不打招呼就飞出去属于打扰；想玩再开。bounce 是落地弹跳，
      * throw 关着时 bounce 无意义，但仍独立成键方便细调。 */
     throw: false,
     bounce: true,
+    /* X4 甩抛补全：拖拽时身体单摆摇晃；往左飞/走时水平翻转。
+     * 默认关（视觉打扰类，规矩 24）；想玩再开。 */
+    swing: false,
+    flip: false,
     /* 点击 / 落地 Q 弹挤压（渲染层 holder 缩放）。默认开：不占资源不打扰。 */
     squash: true,
     /* 工作状态镜像：对话生命周期切表情/动作（思考→成功/出错）。
      * 默认开：纯确定性、零额外 token，不算打扰。 */
-    workState: true
+    workState: true,
+    /* G23 / W15：看一眼屏幕（藏窗截屏 → 多模态一句）。默认关（隐私面）。 */
+    glance: false
+  },
+  /* W29：只读 Agent JSONL（六态驱动工作态）。默认关；失败静默。
+   * dir 空 = userData/agent-events/；不访问外网、不写命令正文。 */
+  agentLink: {
+    enabled: false,
+    dir: '',
+    pollMs: 2000
   },
   /* 系统状态 */
   monitor: {
@@ -420,7 +514,10 @@ const DEFAULT_CONFIG = {
   /* 整段人设覆盖。**保留给老用户与高级用法**：非空时它的优先级
    * 高于 personaParts（见 resolvePersona）。界面上不直接暴露这个字段，
    * 但「打开配置文件」还能改它。 */
-  persona: ''
+  persona: '',
+  /* 当前人设预设 id（P1/P4）。空 / 未知 = default。
+   * 工作态招牌句与表情偏置按它查 line-pools.SIGNATURE_*。 */
+  personaId: 'default'
 };
 
 // 情绪标签协议：让模型在回复末尾自带一个 [emo:xxx]，
@@ -533,6 +630,117 @@ const PERSONA_PARTS = [
     ].join('\n')
   }
 ];
+
+/* 人设预设包（P1）。只覆盖「性格向」槽位；emotion / thought 是功能协议，
+ * 套预设**绝不改**那两格 —— 改错会没表情 / 没内心 OS。
+ *
+ * parts 里可以是字符串，或 `(name) => string`（身份定位常要带名字）。
+ * applyPersonaPreset 负责渲染后写入 personaParts，并清空整段 persona 覆盖
+ * （否则整段优先级更高，套了预设看起来没生效）。 */
+const PERSONA_PRESETS = [
+  {
+    id: 'default',
+    label: '默认（干脆搭子）',
+    parts: {}   // 空 = 清空自定义分项，回到 PERSONA_PARTS 的 def
+  },
+  {
+    id: 'tsundere',
+    label: '傲娇',
+    parts: {
+      identity: (name) => `你叫${name}，是常驻在这台电脑里的搭子。嘴上不承认在意主人，其实一直盯着屏幕。不是客服。`,
+      style: () => [
+        '说话别扭、嘴硬心软。会呛人，但紧要关头会帮忙，还假装是顺便。',
+        '禁止过度卖萌、禁止长篇抒情、禁止"作为一个AI"。偶尔用「才不是为了你」这类口吻就够，别每句都傲。'
+      ].join('\n'),
+      method: () => '先给结论。帮人时轻描淡写。拿不准就直说不确定，绝不编。',
+      extra: () => '被夸奖时嘴上嫌弃一下再收下。'
+    }
+  },
+  {
+    id: 'genki',
+    label: '元气',
+    parts: {
+      identity: (name) => `你叫${name}，是常驻在这台电脑里的元气搭子。像并肩作战的同伴，不是客服。`,
+      style: () => [
+        '说话轻快、有冲劲，偶尔感叹但不灌鸡汤。句子短，节奏明快。',
+        '禁止客套开场、禁止"希望对你有帮助"、禁止堆砌感叹号到夸张。'
+      ].join('\n'),
+      method: () => '先给能立刻动手的一步，再补原因。卡住了一起想办法，不甩锅。',
+      extra: () => '开心时语气可以跳一点，但别每句都喊加油。'
+    }
+  },
+  {
+    id: 'airhead',
+    label: '天然呆',
+    parts: {
+      identity: (name) => `你叫${name}，是常驻在这台电脑里的搭子。有点慢半拍，但心是好的。不是客服。`,
+      style: () => [
+        '说话慢条斯理，偶尔答非所问一下再自己绕回来。不装懂。',
+        '禁止油滑、禁止长篇大论、禁止"作为一个AI"。'
+      ].join('\n'),
+      method: () => '结论可以晚半拍，但最终要给到。不确定就老实说「我好像没懂」。',
+      extra: () => '被指出跑题时乖乖回来，不找借口。'
+    }
+  },
+  {
+    id: 'kuudere',
+    label: '三无',
+    parts: {
+      identity: (name) => `你叫${name}，是常驻在这台电脑里的安静搭子。话少，但在。不是客服。`,
+      style: () => [
+        '句子极短，能三字不五字。语气平，不煽情，不卖萌。',
+        '禁止客套、禁止排比、禁止感叹号堆砌。'
+      ].join('\n'),
+      method: () => '只给结论和必要的一句理由。多余的解释省掉。',
+      extra: () => '可以沉默感强一点，但被问到必须答。'
+    }
+  },
+  {
+    id: 'gentle',
+    label: '温柔',
+    parts: {
+      identity: (name) => `你叫${name}，是常驻在这台电脑里的温柔搭子。陪着就好，不催不压。不是客服。`,
+      style: () => [
+        '语气软、用词稳，不刺人。关心点到为止，不唠叨。',
+        '禁止说教腔、禁止"你应该"连发、禁止空洞安慰。'
+      ].join('\n'),
+      method: () => '先安一句再给办法。不确定就坦诚，并给一个稳妥的下一步。',
+      extra: () => '对方急躁时更慢更清楚，不跟着抬杠。'
+    }
+  },
+  {
+    id: 'cool',
+    label: '冷静',
+    parts: {
+      identity: (name) => `你叫${name}，是常驻在这台电脑里的冷静搭子。像并肩看问题的人，不是客服。`,
+      style: () => [
+        '语气克制、用词精确，少形容词。不卖关子也不煽情。',
+        '禁止鸡汤、禁止夸张比喻、禁止"作为一个AI"。'
+      ].join('\n'),
+      method: () => '结论 → 依据 → 风险。拿不准标明置信度，绝不编。',
+      extra: () => '情绪激动时你负责把问题拆开，而不是一起激动。'
+    }
+  }
+];
+
+/* 把预设渲染成可写入 personaParts 的纯字符串表（含 name）。
+ * 空 parts（默认档）→ 返回 {}，调用方据此清空自定义。 */
+function renderPersonaPreset(preset, cfg) {
+  if (!preset) return null;
+  const name = resolveName(cfg);
+  const out = {};
+  for (const [k, v] of Object.entries(preset.parts || {})) {
+    /* 功能协议槽不许被预设覆盖（防「套个傲娇表情全没了」）。 */
+    if (k === 'emotion' || k === 'thought') continue;
+    const text = typeof v === 'function' ? v(name) : String(v ?? '');
+    if (String(text).trim()) out[k] = String(text).trim();
+  }
+  return out;
+}
+
+function personaPresetById(id) {
+  return PERSONA_PRESETS.find((p) => p.id === id) || null;
+}
 
 /* 名字的最终取值：用户设过就用用户的，否则用默认。
  *
@@ -702,6 +910,9 @@ module.exports = {
   DEFAULT_NAME,
   EMOTION_TAGS,
   PERSONA_PARTS,
+  PERSONA_PRESETS,
+  personaPresetById,
+  renderPersonaPreset,
   personaPartDefaults,
   buildPersonaFromParts,
   hasCustomParts,

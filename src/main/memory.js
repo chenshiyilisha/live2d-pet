@@ -21,6 +21,11 @@ const { isUsable } = require('./llm-providers');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const {
+  scoreImportance, isPinned, retentionOf, clarityFromRetention,
+  clarityIndex, localDayIndex, displayPrefix, CLARITY_ORDER, CLARITY, RETENTION,
+  INITIAL, initialProbability, isFirstEncounter
+} = require('./memory-score');
 
 const KINDS = Object.freeze(['name', 'pref', 'boundary', 'relation', 'other']);
 const KIND_BOOST = Object.freeze({
@@ -66,11 +71,30 @@ const HEURISTICS = [
 const SKIP_MARKERS = /开玩笑|随便说说|骗你的|当我没说|临时|今天先|算了吧/;
 
 let getPath = () => null;
+let getForgetEnabled = () => false;
 let cache = null;   // { facts: Fact[] } | null
 
-function configureMemory({ getPath: gp } = {}) {
+function configureMemory({ getPath: gp, getForgetEnabled: gfe } = {}) {
   if (typeof gp === 'function') getPath = gp;
+  if (typeof gfe === 'function') getForgetEnabled = gfe;
   cache = null;
+}
+
+function isTombstone(f) {
+  return !!(f && f.forgotten === true && typeof f.id === 'string');
+}
+
+function toTombstone(f, now = Date.now()) {
+  return {
+    id: f.id,
+    kind: KINDS.includes(f.kind) ? f.kind : 'other',
+    forgotten: true,
+    text: '',
+    /* 正文已删，留 normalizeKey 供 upsert 复活匹配（不能只靠 id：旧档 id 可能不是 makeId）。 */
+    key: normalizeKey(f.text || f.key || ''),
+    at: Number(f.at) || now,
+    forgottenAt: now
+  };
 }
 
 function trimFact(s) {
@@ -91,8 +115,87 @@ function makeId(text) {
   return crypto.createHash('sha1').update(normalizeKey(text)).digest('hex').slice(0, 12);
 }
 
+/** W25：稳定 0..1（sha1(id+'first') 前 4 字节 / 2^32）。同 id 永远同值。 */
+function hashUnit(id) {
+  const buf = crypto.createHash('sha1').update(String(id || '') + 'first').digest();
+  return buf.readUInt32BE(0) / 4294967296;
+}
+
+/**
+ * W25：在 firstAt 起 30 天窗口内，按稳定散列打 firstEncounter（最多 3 条）。
+ * 已打标的不撤销；同一份档永远同一批。
+ */
+function refreshFirstEncounters(store) {
+  if (!store || !Array.isArray(store.facts)) return store;
+  const firstAt = Number(store.firstAt) || 0;
+  if (!firstAt) return store;
+  const live = store.facts.filter((f) => !isTombstone(f));
+  const already = live.filter(isFirstEncounter);
+  if (already.length >= INITIAL.MAX_MARK) return store;
+  const cands = [];
+  for (const f of live) {
+    if (isFirstEncounter(f)) continue;
+    const ageDays = (Number(f.at) - firstAt) / 86400000;
+    if (ageDays < 0 || ageDays >= INITIAL.WINDOW_DAYS) continue;
+    const u = hashUnit(f.id);
+    if (u < initialProbability(ageDays)) cands.push({ f, u });
+  }
+  cands.sort((a, b) => a.u - b.u || String(a.f.id).localeCompare(String(b.f.id)));
+  const need = INITIAL.MAX_MARK - already.length;
+  for (const { f } of cands.slice(0, need)) f.firstEncounter = true;
+  return store;
+}
+
 function emptyStore() {
-  return { version: 1, facts: [] };
+  return {
+    version: 2,
+    facts: [],
+    decayDay: localDayIndex(),
+    firstAt: 0,
+    stats: { forgotten: 0, dropped: 0 }
+  };
+}
+
+/* G19 2a：v1 → v2 迁移（幂等；不追溯降档）。 */
+function migrateStore(raw) {
+  const rawFacts = Array.isArray(raw?.facts) ? raw.facts : [];
+  const tombs = rawFacts.filter(isTombstone);
+  const factsIn = rawFacts.filter(isFact);
+  const today = localDayIndex();
+  const facts = factsIn.map((f) => {
+    if (f.migrated && typeof f.importance === 'number' && f.clarity) return f;
+    const hits = Number(f.hits) || 0;
+    const scored = scoreImportance(f.text, f.kind, f.source);
+    const kindFloor = (f.kind === 'name' ? 45 : f.kind === 'boundary' ? 40 : 0) + hits * 4;
+    const importance = Math.max(scored, kindFloor, 1);
+    return {
+      ...f,
+      importance,
+      clarity: f.clarity || 'clear',
+      lastSeen: Number(f.lastSeen) || 0,
+      recallCount: Number(f.recallCount) || 0,
+      pinned: isPinned({ ...f, importance }),
+      firstEncounter: !!f.firstEncounter,
+      migrated: true
+    };
+  }).concat(tombs);
+  const firstAt = facts.reduce((m, f) => {
+    const t = Number(f.at) || 0;
+    if (!t) return m;
+    return m === 0 ? t : Math.min(m, t);
+  }, Number(raw?.firstAt) || 0);
+  const store = {
+    version: 2,
+    facts,
+    decayDay: Number.isFinite(Number(raw?.decayDay)) ? Number(raw.decayDay) : today,
+    firstAt,
+    stats: {
+      forgotten: Number(raw?.stats?.forgotten) || 0,
+      dropped: Number(raw?.stats?.dropped) || 0
+    }
+  };
+  refreshFirstEncounters(store);
+  return store;
 }
 
 function loadStore() {
@@ -104,8 +207,8 @@ function loadStore() {
   }
   try {
     const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
-    const facts = Array.isArray(raw?.facts) ? raw.facts.filter(isFact) : [];
-    cache = { version: 1, facts };
+    cache = migrateStore(raw);
+    if (Number(raw?.version) !== 2 || !raw?.decayDay) saveStore(cache);
   } catch {
     cache = emptyStore();
   }
@@ -180,32 +283,89 @@ function upsertFacts(drafts, opts = {}) {
     if (text.length < 2) continue;
     if (SKIP_MARKERS.test(text)) continue;
 
-    let found = store.facts.find((f) => similarFact(f.text, text));
+    const id = makeId(text + kind);
+    const key = normalizeKey(text);
+    /* 2b：同 id / 同 key 墓碑 → 复活（恢复正文，不算「新记」）。 */
+    const tombIdx = store.facts.findIndex((f) =>
+      isTombstone(f) && (f.id === id || (f.key && f.key === key)));
+    if (tombIdx >= 0) {
+      const tomb = store.facts[tombIdx];
+      const source = d.source === 'llm' ? 'llm' : 'heuristic';
+      const importance = scoreImportance(text, kind, source);
+      const fact = {
+        id: tomb.id,
+        text,
+        kind,
+        at: Number(tomb.at) || now,
+        updated: now,
+        hits: 0,
+        source,
+        importance,
+        clarity: 'vivid',
+        lastSeen: 0,
+        recallCount: 0,
+        pinned: false,
+        firstEncounter: false,
+        migrated: false,
+        forgotten: false
+      };
+      fact.pinned = isPinned(fact);
+      store.facts[tombIdx] = fact;
+      updated++;
+      continue;
+    }
+
+    let found = store.facts.find((f) => !isTombstone(f) && similarFact(f.text, text));
     if (found) {
       /* 新的更具体就替换文案；种类取更「硬」的（name > boundary > …） */
       if (text.length > found.text.length) found.text = text;
       if ((KIND_BOOST[kind] || 0) > (KIND_BOOST[found.kind] || 0)) found.kind = kind;
       found.updated = now;
       found.hits = (found.hits || 0) + 1;
+      const imp = scoreImportance(found.text, found.kind, found.source);
+      found.importance = Math.max(Number(found.importance) || 0, imp);
+      found.pinned = isPinned(found);
       updated++;
     } else {
-      store.facts.push({
-        id: makeId(text + kind),
+      const source = d.source === 'llm' ? 'llm' : 'heuristic';
+      const importance = scoreImportance(text, kind, source);
+      const fact = {
+        id,
         text,
         kind,
         at: now,
         updated: now,
         hits: 0,
-        source: d.source === 'llm' ? 'llm' : 'heuristic'
-      });
+        source,
+        importance,
+        clarity: 'vivid',
+        lastSeen: 0,
+        recallCount: 0,
+        pinned: false,
+        firstEncounter: false,
+        migrated: false
+      };
+      fact.pinned = isPinned(fact);
+      store.facts.push(fact);
+      if (!store.firstAt) store.firstAt = now;
       added++;
     }
   }
 
-  /* 超限：按 salience 升序丢掉最弱的 */
-  if (store.facts.length > maxFacts) {
-    store.facts.sort((a, b) => scoreFact(a, '') - scoreFact(b, ''));
-    store.facts = store.facts.slice(store.facts.length - maxFacts);
+  /* W25：入库后刷新初次相遇打标（稳定散列，幂等）。 */
+  refreshFirstEncounters(store);
+
+  /* 超限：按 salience 升序丢掉最弱的（墓碑不占容量；初次相遇永不淘汰）。 */
+  const live = store.facts.filter((f) => !isTombstone(f));
+  const tombs = store.facts.filter(isTombstone);
+  if (live.length > maxFacts) {
+    const protected_ = live.filter((f) => isFirstEncounter(f));
+    const rest = live.filter((f) => !isFirstEncounter(f));
+    rest.sort((a, b) => scoreFact(a, '') - scoreFact(b, ''));
+    const keep = Math.max(0, maxFacts - protected_.length);
+    store.facts = protected_.concat(rest.slice(Math.max(0, rest.length - keep))).concat(tombs);
+    store.stats = store.stats || { forgotten: 0, dropped: 0 };
+    store.stats.dropped = (Number(store.stats.dropped) || 0) + Math.max(0, rest.length - keep);
   }
 
   saveStore(store);
@@ -252,57 +412,181 @@ function recall(userText, opts = {}) {
   const injectMax = Math.max(1, Math.min(12, Number(opts.injectMax) || 6));
   const expand = opts.forceExpand || needsExpandedRecall(userText);
   const q = String(userText || '');
+  const live = store.facts.filter((f) => !isTombstone(f));
 
-  const core = store.facts
+  /* W25：初次相遇单独成区，常驻少量（不挤掉 name/boundary）。 */
+  const origin = live
+    .filter(isFirstEncounter)
+    .sort((a, b) => scoreFact(b, q) - scoreFact(a, q))
+    .slice(0, 2);
+
+  const core = live
     .filter((f) => f.kind === 'name' || f.kind === 'boundary')
     .sort((a, b) => scoreFact(b, q) - scoreFact(a, q))
     .slice(0, 2);
 
   let extra = [];
   if (expand || opts.alwaysExtra) {
-    extra = store.facts
-      .filter((f) => !core.includes(f))
+    extra = live
+      .filter((f) => !core.includes(f) && !origin.includes(f))
       .map((f) => ({ f, s: scoreFact(f, q) }))
       .filter((x) => x.s > 4 || expand)
       .sort((a, b) => b.s - a.s)
-      .slice(0, Math.max(0, injectMax - core.length))
+      .slice(0, Math.max(0, injectMax - core.length - origin.length))
       .map((x) => x.f);
   }
 
-  const picked = [...core];
-  for (const f of extra) {
+  const picked = [];
+  for (const f of [...origin, ...core, ...extra]) {
     if (picked.length >= injectMax) break;
     if (!picked.includes(f)) picked.push(f);
   }
 
-  /* 命中计数（下次更优先） */
+  /* hits = 注入次数；复习（lastSeen）只在 query token 真重叠时涨 */
   if (picked.length) {
     const now = Date.now();
+    const qTok = new Set(tokenize(q));
     for (const f of picked) {
       f.hits = (f.hits || 0) + 1;
-      f.updated = f.updated || now;
+      if (q) {
+        const fTok = tokenize(f.text);
+        if (fTok.some((tok) => qTok.has(tok))) {
+          f.recallCount = (f.recallCount || 0) + 1;
+          f.lastSeen = now;
+        }
+      }
     }
     saveStore(store);
   }
 
-  return picked;
+  return picked.filter((f) => {
+    const c = f.clarity || 'clear';
+    if (c === 'trace') return expand; // trace 只在扩召时
+    return true;
+  });
 }
 
-/** 拼进 system 的那一行。空 = 不要插。 */
+/** 拼进 system 的那一行。空 = 不要插。模糊档带前缀并计入 budget。
+ *  W25：初次相遇单独成段「最初的日子」，不与普通重要混排。 */
 function formatMemoryLine(facts, budget = 400) {
   const list = Array.isArray(facts) ? facts : [];
   if (!list.length) return '';
+  const origin = list.filter(isFirstEncounter);
+  const rest = list.filter((f) => !isFirstEncounter(f));
   const parts = [];
   let used = 0;
-  for (const f of list) {
-    const bit = f.text;
-    if (used + bit.length + 1 > budget) break;
+  let hasFuzzy = false;
+  const pushBit = (bit) => {
+    if (used + bit.length + 1 > budget) return false;
     parts.push(bit);
     used += bit.length + 1;
+    return true;
+  };
+  if (origin.length) {
+    const bits = [];
+    for (const f of origin) {
+      const clarity = f.clarity || 'clear';
+      const prefix = displayPrefix(clarity);
+      if (prefix) hasFuzzy = true;
+      bits.push(prefix + f.text);
+    }
+    const block = '最初的日子：' + bits.join('；');
+    if (!pushBit(block)) { /* budget 不够就跳过 origin */ }
+  }
+  for (const f of rest) {
+    const clarity = f.clarity || 'clear';
+    const prefix = displayPrefix(clarity);
+    if (prefix) hasFuzzy = true;
+    if (!pushBit(prefix + f.text)) break;
   }
   if (!parts.length) return '';
-  return '【你记得的关于主人的事（别主动罗列，用得上再顺口提；别编造这里没有的）：' +
+  const guard = hasFuzzy
+    ? '标了「记不清/好像」的不要当事实硬说，也别否认。'
+    : '';
+  return '【你记得的关于主人的事（别主动罗列，用得上再顺口提；别编造这里没有的）' +
+    (guard ? '；' + guard : '') + '：' +
     parts.join('；') + '】';
+}
+
+/**
+ * 每天最多降一档；离线补跑 ≤30 天。
+ * 2a：只降档不删。2b（opts.forgetEnabled）：retention<10 且非钉住、非迁移背填 → 墓碑。
+ * @returns {{ store, dropped, risen, forgotten, awayDays }}
+ */
+function settle(storeIn, now = Date.now(), opts = {}) {
+  const store = storeIn && typeof storeIn === 'object' ? storeIn : emptyStore();
+  const forgetOn = opts.forgetEnabled === true;
+  const today = localDayIndex(now);
+  let decayDay = Number(store.decayDay);
+  if (!Number.isFinite(decayDay) || decayDay > today) {
+    store.decayDay = today;
+    return { store, dropped: 0, risen: 0, forgotten: 0, awayDays: 0 };
+  }
+  if (decayDay === today) {
+    return { store, dropped: 0, risen: 0, forgotten: 0, awayDays: 0 };
+  }
+  const step = Math.min(today - decayDay, RETENTION.CATCHUP_MAX_DAYS);
+  let dropped = 0;
+  let risen = 0;
+  let forgotten = 0;
+  const nextFacts = [];
+  for (const f of store.facts) {
+    if (isTombstone(f)) {
+      nextFacts.push(f);
+      continue;
+    }
+    const ret = retentionOf(f, now);
+    /* G19 2b：只忘「本版新记」的弱条目；migrated 背填分不准，不许据此删。
+     * W25：初次相遇永不遗忘。 */
+    if (forgetOn && !isPinned(f) && !isFirstEncounter(f) && f.migrated !== true && ret < CLARITY.trace) {
+      nextFacts.push(toTombstone(f, now));
+      forgotten++;
+      continue;
+    }
+    const target = clarityFromRetention(ret, isPinned(f) || isFirstEncounter(f));
+    const iCur = clarityIndex(f.clarity || 'clear');
+    const iTarget = clarityIndex(target);
+    const iFloor = (isPinned(f) || isFirstEncounter(f))
+      ? clarityIndex('clear')
+      : clarityIndex('trace');
+    /* 降：一天最多一档 × step；升：一次结算最多一档 */
+    let iNext;
+    if (iTarget > iCur) {
+      iNext = Math.min(iCur + 1, iTarget);
+      if (iNext > iCur) risen++;
+    } else if (iTarget < iCur) {
+      iNext = Math.max(iCur - step, iTarget, iFloor);
+      if (iNext > iCur) { /* impossible */ }
+      else if (iNext < iCur) dropped++;
+    } else {
+      iNext = iCur;
+    }
+    iNext = Math.max(iNext, iFloor);
+    f.clarity = CLARITY_ORDER[iNext] || 'clear';
+    f.pinned = isPinned(f);
+    nextFacts.push(f);
+  }
+  store.facts = nextFacts;
+  if (forgotten) {
+    store.stats = store.stats || { forgotten: 0, dropped: 0 };
+    store.stats.forgotten = (Number(store.stats.forgotten) || 0) + forgotten;
+  }
+  store.decayDay = today;
+  store.version = 2;
+  return { store, dropped, risen, forgotten, awayDays: step };
+}
+
+function settleAndSave(now = Date.now()) {
+  const store = loadStore();
+  const r = settle(store, now, { forgetEnabled: !!getForgetEnabled() });
+  if (r.awayDays > 0 || r.dropped || r.risen || r.forgotten) {
+    if (saveStore(r.store)) {
+      console.log('[memory] settle', JSON.stringify({
+        away: r.awayDays, dropped: r.dropped, risen: r.risen, forgotten: r.forgotten
+      }));
+    }
+  }
+  return r;
 }
 
 /**
@@ -381,7 +665,7 @@ async function extractViaLlm(userText, assistantText, llm = {}) {
 }
 
 function listFacts() {
-  return loadStore().facts.slice();
+  return loadStore().facts.filter((f) => !isTombstone(f));
 }
 
 function clearFacts() {
@@ -423,6 +707,13 @@ module.exports = {
   listFacts,
   clearFacts,
   loadStore,
+  settle,
+  settleAndSave,
+  migrateStore,
+  isTombstone,
+  toTombstone,
+  refreshFirstEncounters,
+  hashUnit,
   /* 测试用 */
   _resetCache: () => { cache = null; },
   normalizeKey,

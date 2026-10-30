@@ -65,14 +65,29 @@ let readyWaiters = [];
 
 let dir = null;
 
-/* ---- 串行化 ----
- * 渲染层的朗读队列本来就是串行的，但「合成」这一层不能指望调用方守规矩
- * （将来接别的出口时很容易忘）。用一条 Promise 链把请求排好。 */
-let chain = Promise.resolve();
+/* ---- 有限并发（G10）----
+ * 渲染层入队即 prefetch：多句会同时调 synthWav。旧实现用单 Promise 链把合成
+ * **完全串行**，prefetch 形同虚设（下一句要等上一句 DONE 才写 req）。
+ * PS 侧一拍能扫多个 req-*.json 并顺序吐 DONE；JS 侧放开到 MAX_PARALLEL，
+ * 让多句请求文件先落盘，播完上句时下句 wav 往往已好。
+ * ⚠️ 仍要限流：无上限会一次砸几十个 req，超时/杀进程时 waiting 一起炸。 */
+const MAX_PARALLEL = 3;
+let inflight = 0;
+const waitQ = [];
+function acquire() {
+  if (inflight < MAX_PARALLEL) {
+    inflight++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => { waitQ.push(resolve); }).then(() => { inflight++; });
+}
+function release() {
+  inflight = Math.max(0, inflight - 1);
+  const next = waitQ.shift();
+  if (next) next();
+}
 function enqueue(fn) {
-  const p = chain.then(fn, fn);
-  chain = p.then(() => {}, () => {});
-  return p;
+  return acquire().then(() => Promise.resolve().then(fn)).finally(release);
 }
 
 function ensureDir() {
@@ -443,6 +458,6 @@ function synthVoices() { return voices.slice(); }
 function synthReady() { return ready; }
 
 module.exports = {
-  SCAN_MS, SYNTH_TIMEOUT, MAX_RESTARTS,
+  SCAN_MS, SYNTH_TIMEOUT, MAX_RESTARTS, MAX_PARALLEL,
   startSynth, stopSynth, synthWav, synthVoices, synthReady
 };

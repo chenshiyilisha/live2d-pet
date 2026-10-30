@@ -21,26 +21,36 @@
  *     才知道（见 main.js 的 testLlm）—— 别在 UI 上给未验证的条目打勾。
  * ========================================================== */
 
+/* 场景默认超时（M9）。云端首字快、本地冷启动慢 —— 切预设时带上，
+ * 用户仍可在「模型设置」里改。数值与 llm.js 的 LLM_TIMEOUT 对齐。 */
+const TIMEOUT_CLOUD = { stallMs: 20000, totalMs: 120000 };
+const TIMEOUT_LOCAL = { stallMs: 45000, totalMs: 180000 };
+
 /* 预设目录。顺序 = 菜单顺序，把最常用的放前面。
  *
  * 选谁进这张表的标准：① 国内可直接访问 ② 有 OpenAI 兼容端点
  * ③ 名字稳定（不随版本改名）。故意**不**放需要额外协议适配的家
  * （Gemini 原生 / Anthropic 原生）—— 那要另写一套客户端，违反
- * 「非 OpenAI 协议不各写一套」的既定取舍。 */
+ * 「非 OpenAI 协议不各写一套」的既定取舍。
+ *
+ * M8：featured = 托盘顶层直接露出；其余收进「更多…」。
+ *     默认露出 DeepSeek / 通义兼容 / 两家本地 / 自定义。 */
 const PROVIDERS = [
   {
     id: 'deepseek',
     label: 'DeepSeek',
     baseUrl: 'https://api.deepseek.com/v1',
     model: 'deepseek-chat',
-    keyUrl: 'https://platform.deepseek.com/api_keys'
+    keyUrl: 'https://platform.deepseek.com/api_keys',
+    featured: true
   },
   {
     id: 'qwen',
     label: '通义千问（兼容模式）',
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     model: 'qwen-plus',
-    keyUrl: 'https://bailian.console.aliyun.com/'
+    keyUrl: 'https://bailian.console.aliyun.com/',
+    featured: true
   },
   {
     id: 'zhipu',
@@ -77,18 +87,20 @@ const PROVIDERS = [
     label: 'Ollama（本地）',
     baseUrl: 'http://127.0.0.1:11434/v1',
     model: 'qwen2.5:7b',
-    local: true
+    local: true,
+    featured: true
   },
   {
     id: 'lmstudio',
     label: 'LM Studio（本地）',
     baseUrl: 'http://127.0.0.1:1234/v1',
     model: 'local-model',
-    local: true
+    local: true,
+    featured: true
   },
   /* 兜底：地址与模型名都自己填。切到它只改 provider 标签，
    * 不覆盖用户已经手填好的 baseUrl / model —— 否则一次误点就把配置清了。 */
-  { id: 'custom', label: '自定义（手填地址）', baseUrl: '', model: '', custom: true }
+  { id: 'custom', label: '自定义（手填地址）', baseUrl: '', model: '', custom: true, featured: true }
 ];
 
 function providerById(id) {
@@ -125,6 +137,12 @@ function isUsable(llm) {
   return isLocalUrl(baseUrl);
 }
 
+/* W16：就绪 = 可用 + 真测绿标（Coopanion / Nexus「测一句才算连上」）。
+ * 看屏（G23）始终要 ready；普通对话仅当 llm.requireTested 时才卡。 */
+function isLlmReady(llm) {
+  return isUsable(llm) && isTestGreen(llm);
+}
+
 /* 当前生效的是哪条预设。
  *
  * 优先信 `llm.provider`；**旧配置没有这个键**（这个字段是 2026-10-29 才加的），
@@ -142,12 +160,48 @@ function currentProviderId(llm) {
   return 'custom';
 }
 
+/* 场景超时建议（M9）：本机抬 stall/total，云端用短默认。 */
+function suggestTimeouts(baseUrlOrLocal) {
+  const local = typeof baseUrlOrLocal === 'boolean'
+    ? baseUrlOrLocal
+    : isLocalUrl(baseUrlOrLocal);
+  return local ? { ...TIMEOUT_LOCAL } : { ...TIMEOUT_CLOUD };
+}
+
 /* 把一条预设转成要写进 config.llm 的那几个键。
- * custom 不覆盖地址/模型（见表里的注释）。 */
+ * custom 不覆盖地址/模型（见表里的注释）。
+ * 非 custom 顺带写场景超时（M9）—— 用户仍可在设置页改。 */
 function toPatch(provider) {
   if (!provider || typeof provider !== 'object') return null;
   if (provider.custom) return { provider: provider.id };
-  return { provider: provider.id, baseUrl: provider.baseUrl, model: provider.model };
+  return {
+    provider: provider.id,
+    baseUrl: provider.baseUrl,
+    model: provider.model,
+    ...suggestTimeouts(!!provider.local)
+  };
+}
+
+/* M8：自测绿标指纹。只认 baseUrl+model（key 轮换不该掉绿）。 */
+function testFingerprint(llm) {
+  const base = typeof llm?.baseUrl === 'string' ? llm.baseUrl.trim().replace(/\/+$/, '') : '';
+  const model = typeof llm?.model === 'string' ? llm.model.trim() : '';
+  return `${base}\u0000${model}`;
+}
+
+function isTestGreen(llm) {
+  const t = llm?.tested;
+  if (!t || typeof t !== 'object') return false;
+  const fp = testFingerprint(llm);
+  return !!fp && fp !== '\u0000' && testFingerprint(t) === fp;
+}
+
+function featuredProviders() {
+  return PROVIDERS.filter((p) => p.featured);
+}
+
+function moreProviders() {
+  return PROVIDERS.filter((p) => !p.featured);
 }
 
 /* WorkBuddy（与 CodeBuddy）的自定义模型文件 → 我们的条目。
@@ -210,10 +264,18 @@ function fromWorkBuddyModels(raw) {
 
 module.exports = {
   PROVIDERS,
+  TIMEOUT_CLOUD,
+  TIMEOUT_LOCAL,
   providerById,
   currentProviderId,
   isLocalUrl,
   isUsable,
+  isLlmReady,
   toPatch,
+  suggestTimeouts,
+  testFingerprint,
+  isTestGreen,
+  featuredProviders,
+  moreProviders,
   fromWorkBuddyModels
 };

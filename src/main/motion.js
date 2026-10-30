@@ -39,10 +39,14 @@ let throwAnim = null;          // 甩抛飞行定时器（与 moveAnim 互斥）
 let throwSamples = [];         // 拖拽采样 [{t,x,y}]
 let onThrowSquash = () => {};  // (intensity) => void —— 落地 Q 弹回调
 let onThrowSettled = () => {}; // () => void —— 停稳后（落盘 / 贴边）
+let onDragTilt = () => {};     // (rad) => void —— X4 单摆
+let onFacing = () => {};       // (dir ±1) => void —— X4 翻转
 
-function configureThrowHooks({ onSquash, onSettled } = {}) {
+function configureThrowHooks({ onSquash, onSettled, onTilt, onFace } = {}) {
   if (typeof onSquash === 'function') onThrowSquash = onSquash;
   if (typeof onSettled === 'function') onThrowSettled = onSettled;
+  if (typeof onTilt === 'function') onDragTilt = onTilt;
+  if (typeof onFace === 'function') onFacing = onFace;
 }
 
 /* 「暂停」= 全屏 / 游戏静默期间冻结一切自动移动（见 main.js 的 setQuiet）。
@@ -204,8 +208,31 @@ function edgeSnap() {
  *    moved 处理器：溜达 / 回位期间不保存窗口位置，否则下次启动的"家"
  *    就是她上一轮溜达到的随机点，越跑越偏。 */
 let homePos = null;
+/* W5：位置钉到期时刻（0 = 未钉 / 关着钉）。armada：放下后随机 14/34/44 分。 */
+let pinUntil = 0;
+const PIN_MINUTES = [14, 34, 44];
+
+function rollPositionPin() {
+  const cfg = loadConfig();
+  if (cfg.motion?.positionPin !== true) {
+    pinUntil = 0;
+    return 0;
+  }
+  const mins = PIN_MINUTES[Math.floor(Math.random() * PIN_MINUTES.length)];
+  pinUntil = Date.now() + mins * 60000;
+  console.log('[motion] position-pin', mins, 'min');
+  return mins;
+}
+
+function isPositionPinned() {
+  const cfg = loadConfig();
+  if (cfg.motion?.positionPin !== true) return false;
+  return Date.now() < pinUntil;
+}
+
 function setHome(x, y) {
   homePos = { x: Math.round(x), y: Math.round(y) };
+  rollPositionPin();
 }
 
 /* 位置是不是**被她自己**挪过。
@@ -320,8 +347,10 @@ function pickTarget() {
 }
 
 /* 走的循环：一步 → 歇一会儿 → 再一步，直到被取消。
- * 「走走停停」是用户 2026-10-13 选的节奏（另一条路是"一口气游走一段"）。 */
+ * 「走走停停」是用户 2026-10-13 选的节奏（另一条路是"一口气游走一段"）。
+ * W5 positionPin：只 hop 一步就重新钉住停下（稀有换位，不是持续遛）。 */
 async function wanderLoop(gen) {
+  const pinMode = loadConfig().motion?.positionPin === true;
   while (gen === GEN && mode === 'wander' && !paused) {
     const w = win();
     if (!w || !w.isVisible()) break;
@@ -331,6 +360,12 @@ async function wanderLoop(gen) {
     if (gen !== GEN) return;
     wanderMoved = true;
     if (!ok) return;
+    if (pinMode) {
+      /* 稀有换位：走完这一步就钉住，等下一枚钉到期再说。 */
+      rollPositionPin();
+      if (gen === GEN) mode = 'idle';
+      return;
+    }
     await sleep(Math.round(REST_MIN + Math.random() * (REST_MAX - REST_MIN)));
     if (gen !== GEN) return;
   }
@@ -341,6 +376,8 @@ function startWander() {
   if (paused || mode !== 'idle') return;
   const cfg = loadConfig();
   if (cfg.motion?.enabled === false || cfg.motion?.wander === false) return;
+  /* W5：钉期内不许换位。 */
+  if (cfg.motion?.positionPin === true && isPositionPinned()) return;
   if (!win()) return;
   GEN++;
   mode = 'wander';
@@ -424,9 +461,15 @@ function idleTick() {
 
   if (cfg.motion?.wander === false) return;
   if (mode !== 'idle') return;
+  /* W5：钉还没到期 → 站着。 */
+  if (cfg.motion?.positionPin === true && isPositionPinned()) return;
 
   const needMs = clamp(Number(cfg.motion?.wanderIdleMin) || 3, 0.2, 120) * 60000;
-  if (idleSec * 1000 >= needMs && Date.now() - armedAt >= needMs) startWander();
+  /* 稀有换位再加一道：至少闲置 60s（armada），避免钉刚到期就立刻 hop。 */
+  const rareMs = cfg.motion?.positionPin === true ? 60 * 1000 : 0;
+  if (idleSec * 1000 >= Math.max(needMs, rareMs) && Date.now() - armedAt >= needMs) {
+    startWander();
+  }
 }
 
 function startIdleWatcher() {
@@ -464,6 +507,19 @@ function onUserDragEnd() {
   mode = 'idle';
   cancelMoveAnim();
   cancelThrowFlight();
+  /* W5：钉模式里「放下 = 搬家 + 重新钉」（armada）；普通溜达仍不改家。 */
+  try {
+    if (loadConfig().motion?.positionPin === true) {
+      const w = win();
+      if (w && !w.isDestroyed()) {
+        const b = w.getBounds();
+        homePos = { x: Math.round(b.x), y: Math.round(b.y) };
+        rollPositionPin();
+      }
+    }
+  } catch { /* ignore */ }
+  /* 松手 → 倾角回正（甩抛起飞后由飞行环接管翻转）。 */
+  try { onDragTilt(0); } catch { /* ignore */ }
   /* throwSamples 留给紧跟着的 tryStartThrow */
 }
 
@@ -483,6 +539,13 @@ function recordDragSample() {
   /* 只留最近 ~120ms，估速够用又省内存 */
   while (throwSamples.length > 1 && now - throwSamples[0].t > 120) {
     throwSamples.shift();
+  }
+  /* X4 单摆：按水平速度给渲染层一个倾角（弧度，约 ±13°）。 */
+  const cfg = loadConfig();
+  if (cfg.interaction?.swing === true && throwSamples.length >= 2) {
+    const { vx } = estimateVelocity(throwSamples);
+    const ang = Math.max(-0.22, Math.min(0.22, vx / 2800));
+    try { onDragTilt(ang); } catch { /* ignore */ }
   }
 }
 
@@ -506,6 +569,8 @@ function tryStartThrow() {
   cancelThrow();
 
   const bounce = cfg.interaction?.bounce !== false;
+  const doFlip = cfg.interaction?.flip === true;
+  const doSwing = cfg.interaction?.swing === true;
   const wa = currentDisplay().workArea;
   let state = {
     x: w.getBounds().x,
@@ -516,11 +581,13 @@ function tryStartThrow() {
   };
   let lastT = Date.now();
   let settledOnce = false;
+  let lastFace = 0;
 
   throwAnim = setInterval(() => {
     const cur = win();
     if (!cur || paused) {
       cancelThrow();
+      try { onFacing(1); onDragTilt(0); } catch { /* ignore */ }
       return;
     }
     const now = Date.now();
@@ -534,12 +601,24 @@ function tryStartThrow() {
       cancelThrow();
       return;
     }
+    /* X4：飞行中按 vx 翻转；单摆用水平速度做小倾角（动画轮换感）。 */
+    if (doFlip) {
+      const face = state.vx < -40 ? -1 : 1;
+      if (face !== lastFace) {
+        lastFace = face;
+        try { onFacing(face); } catch { /* ignore */ }
+      }
+    }
+    if (doSwing) {
+      try { onDragTilt(Math.max(-0.18, Math.min(0.18, state.vx / 3200))); } catch { /* ignore */ }
+    }
     if (next.squash > 0.05) {
       try { onThrowSquash(next.squash); } catch { /* ignore */ }
     }
     if (next.stopped && !settledOnce) {
       settledOnce = true;
       cancelThrow();
+      try { onFacing(1); onDragTilt(0); } catch { /* ignore */ }
       try { onThrowSettled(); } catch { /* ignore */ }
     }
   }, 16);
@@ -584,8 +663,13 @@ module.exports = {
   startWander,
   stopWander,
   setIdleOverride,
-  /* 诊断用：看当前在干嘛 / 家在哪儿 / 待不待回位 */
-  wanderState: () => ({ mode, wanderMoved, homePos, gen: GEN, armed: armedAt, idleOverrideSec }),
+  /* 诊断用：看当前在干嘛 / 家在哪儿 / 待不待回位 / 钉 */
+  wanderState: () => ({
+    mode, wanderMoved, homePos, gen: GEN, armed: armedAt, idleOverrideSec,
+    pinUntil, pinned: isPositionPinned()
+  }),
+  rollPositionPin,
+  isPositionPinned,
   currentDisplay,
   disposeMotion
 };

@@ -295,6 +295,22 @@ let stopped = true;
 let hyst = null;
 let restartTimer = null;
 let restarts = 0;
+/* 最近一次前台进程名（G2）。采样失败 / 无前台 → ''。
+ * 只给 prompt / 诊断用，不进配置、不落盘。 */
+let lastForeground = { name: '', at: 0 };
+
+function getForeground() {
+  return { name: lastForeground.name, at: lastForeground.at };
+}
+
+/** 清洗进程名进 prompt：只留字母数字 .-_，最长 24。 */
+function sanitizeFgName(raw) {
+  const s = String(raw || '').trim().slice(0, 40);
+  if (!s) return '';
+  const cleaned = s.replace(/[^A-Za-z0-9._\-]/g, '');
+  if (!cleaned || cleaned.toLowerCase() === 'explorer') return '';
+  return cleaned.slice(0, 24);
+}
 
 /* 连续重启上限。
  * ⚠️ 不能无脑重启：如果这台机器上 PowerShell 被组策略禁了（或被安全软件拦了），
@@ -322,6 +338,9 @@ function startFullscreenWatch(onChange, opts = {}) {
     if (!s || s[0] !== '{') return;
     let sample;
     try { sample = JSON.parse(s); } catch { return; }   // 半行/杂音，丢
+    const fg = sanitizeFgName(sample?.n);
+    if (fg) lastForeground = { name: fg, at: Date.now() };
+    else if (!sample?.r) lastForeground = { name: '', at: Date.now() };
     const r = evaluateSample(sample, process.pid);
     try { onSample?.(sample, r); } catch { /* 诊断钩子不许影响主流程 */ }
     hyst?.push(r.full, r.why);
@@ -386,6 +405,7 @@ function stopFullscreenWatch() {
   restartTimer = null;
   hyst?.stop();
   hyst = null;
+  lastForeground = { name: '', at: 0 };
   if (child) {
     const proc = child;
     child = null;
@@ -402,5 +422,7 @@ module.exports = {
   evaluateSample,
   Hysteresis,
   startFullscreenWatch,
-  stopFullscreenWatch
+  stopFullscreenWatch,
+  getForeground,
+  sanitizeFgName
 };

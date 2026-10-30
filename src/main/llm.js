@@ -269,7 +269,10 @@ function hitAssistantTone(text) {
  *     用户看的默认值，改一处必须改两处（verify-llm 有断言拦这条）。 */
 const LLM_TIMEOUT = {
   stallMs: 20000, stallMin: 500, stallMax: 120000,
-  totalMs: 120000, totalMin: 1000, totalMax: 600000
+  totalMs: 120000, totalMin: 1000, totalMax: 600000,
+  /* M9：本地冷启动首字慢，切 Ollama/LM Studio 时用这对默认（见 llm-providers）。 */
+  localStallMs: 45000,
+  localTotalMs: 180000
 };
 
 function clampInt(v, def, min, max) {

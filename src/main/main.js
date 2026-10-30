@@ -1,8 +1,8 @@
 'use strict';
 
 const {
-  app, BrowserWindow, ipcMain, Tray, Menu,
-  screen, nativeImage, shell, powerMonitor
+  app, BrowserWindow, ipcMain, Tray, Menu, dialog,
+  screen, nativeImage, shell, powerMonitor, globalShortcut, desktopCapturer
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -38,7 +38,8 @@ const clampScale = (v) => clamp(Number(v) || 1, LIMITS.scale.min, LIMITS.scale.m
 const clampOpacity = (v) => clamp(Number(v) || 1, LIMITS.opacity.min, LIMITS.opacity.max);
 const {
   LIMITS, NAME_LIMITS, getConfigPath, DEFAULT_CONFIG,
-  PERSONA_PARTS, personaPartDefaults,
+  PERSONA_PARTS, PERSONA_PRESETS, personaPresetById, renderPersonaPreset,
+  personaPartDefaults,
   resolveName, resolvePersona, loadConfig, saveConfig, cfgReadBlocked
 } = require('./config');
 const { startLocalServer } = require('./server');
@@ -48,12 +49,23 @@ const { streamLLM, createStreamFilter } = require('./llm');
 /* 模型目录（预设 + 端点判定 + WorkBuddy models.json 解析）。
  * 纯数据/纯函数，断言见 debug/verify-llm-providers.js。 */
 const {
-  PROVIDERS, providerById, currentProviderId, isLocalUrl, isUsable, toPatch, fromWorkBuddyModels
+  PROVIDERS, providerById, currentProviderId, isLocalUrl, isUsable, isLlmReady, toPatch, fromWorkBuddyModels,
+  featuredProviders, moreProviders, isTestGreen, TIMEOUT_LOCAL
 } = require('./llm-providers');
+const oneshot = require('./oneshot');
+const { toJson: historyToJson, toMarkdown: historyToMarkdown } = require('./chat-export');
+const { edgeCueFrom } = require('./edge-cues');
+const {
+  listProfiles, getProfile, applySnapToLlm, saveCurrentAs, overwriteProfile
+} = require('./llm-profiles');
+const { DIMS: OCEAN_DIMS, LEVELS: OCEAN_LEVELS, normalize: normalizeOcean, nearestLevel, derive: deriveOcean } = require('./ocean');
 const { analyzeRepetition, REPEAT_WINDOW } = require('./repetition-guard');
+const { workLine, signatureEmo } = require('./line-pools');
+const { probeLocalEndpoints, summarizeProbes } = require('./local-guide');
 const {
   setReminderSink, addReminder, clearReminders, reminderCount,
-  listReminders, startPomodoro, stopPomodoro, pomodoroStatus, disposeReminders
+  listReminders, startPomodoro, stopPomodoro, pomodoroStatus, disposeReminders,
+  onScreenLock: onReminderScreenLock, onScreenUnlock: onReminderScreenUnlock
 } = require('./reminder');
 const {
   configureMotion, configureThrowHooks, cancelMoveAnim, cancelAutoMotion,
@@ -65,19 +77,45 @@ const {
   disposeMotion, currentDisplay
 } = require('./motion');
 const {
-  startFullscreenWatch, stopFullscreenWatch
+  startFullscreenWatch, stopFullscreenWatch, getForeground
 } = require('./fullscreen');
+const {
+  MODES: PRESENCE_MODES, normalizeMode,
+  ignoreQuietHours, presenceIdleMul
+} = require('./presence');
 const {
   startMediaWatch, stopMediaWatch, getMedia, mediaKey, describeMedia
 } = require('./media');
 const { startSynth, stopSynth, synthWav } = require('./tts');
+const {
+  isGlancePhrase, buildGlanceUserMessage, captureGlanceScreen
+} = require('./glance');
+const {
+  GRANT_PRESETS_MS, configureGlanceGrant, isGlanceAllowed, grantFor, revoke: revokeGlanceGrant,
+  grantSnapshot
+} = require('./glance-grant');
+const { workStatusIndex } = require('./work-cues');
+const petEvents = require('./pet-events');
+const {
+  stateToWorkPhase, readAgentTail, listAgentFiles
+} = require('./agent-link');
 const { configureUpdater, checkForUpdates, updaterStatus } = require('./updater');
 const bubble = require('./bubble');
 const wheel = require('./wheel');
 const bubbleMenu = require('./bubble-menu');
 const cardMenu = require('./card-menu');
-const { createMoodEngine } = require('./mood');
+const { createMoodEngine, setPrideSoftMul, setRateMul } = require('./mood');
+const { createTemperament } = require('./temperament');
+const { shouldProactiveSpeak } = require('./info-gain');
+const {
+  configureLedger, bookDelivery, settleDelivery, previewProactive
+} = require('./proactive-ledger');
+const { cardToPersonaDraft } = require('./character-card');
+const { checkPersonaOutput, normalizeLevel: guardLevel } = require('./persona-guard');
+const { distillPersonaParts, PROMPT_FIELDS: DISTILL_FIELDS } = require('./persona-distill');
+const rhythm = require('./rhythm');
 const memory = require('./memory');
+const mcp = require('./mcp');
 
 // 项目根目录，本地服务与托盘图标、诊断截图都以它为基准
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
@@ -175,6 +213,20 @@ configureThrowHooks({
       }
     } catch { /* ignore */ }
   },
+  onTilt: (rad) => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('pet:tilt', { rad });
+      }
+    } catch { /* ignore */ }
+  },
+  onFace: (dir) => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('pet:facing', { dir });
+      }
+    } catch { /* ignore */ }
+  },
   onSettled: () => {
     /* 甩抛停稳 = 用户明确甩到的位置 → 可落盘（规矩 25 只管自动移动）。
      * 可选再贴边（配置开了才）。 */
@@ -187,7 +239,11 @@ configureThrowHooks({
   }
 });
 memory.configureMemory({
-  getPath: () => path.join(app.getPath('userData'), 'memory-facts.json')
+  getPath: () => path.join(app.getPath('userData'), 'memory-facts.json'),
+  getForgetEnabled: () => !!(loadConfig().memory?.forget?.enabled)
+});
+mcp.configureMcp({
+  getCfg: () => loadConfig().mcp || { enabled: false, servers: [], grants: {} }
 });
 
 setReminderSink((payload) => {
@@ -221,10 +277,13 @@ function patchConfig(section, patch) {
       ? `配置读不了（${blocked}），这次改动没能保存`
       : '设置没能写入磁盘，重启后可能不生效');
   }
+  syncOceanFromConfig(next);        // personality 改了立刻喂 mood / 供下次读
+  try { refreshAgentLinkWatch(); } catch { /* ignore */ }
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.webContents.send('config:changed'); } catch { /* 窗口在销毁 */ }
   }
   bubble.refreshConfig();           // 气泡开关切到关：立刻把浮窗收掉
+  if (!section || section === 'hotkeys') refreshHotkeys();
   refreshTrayMenu();
   return next;
 }
@@ -468,6 +527,9 @@ function startCursorPolling() {
  *  外观 / 窗口控制
  * ========================================================== */
 
+/* W6：悬停渐隐进行中 —— syncAppearance 要把透明度压低，别被配置值顶回去。 */
+let hoverFadeActive = false;
+
 /* 把 appearance 配置同步到窗口与渲染层。
  * 托盘、渲染层右键菜单、手改 config.json 后的重载 —— 全部收敛到这里，
  * 保证「配置 / 窗口实际状态 / 渲染层看到的」三处永远一致。 */
@@ -475,7 +537,11 @@ function syncAppearance() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const a = loadConfig().appearance || {};
 
-  const opacity = clampOpacity(a.opacity);
+  /* 关了悬停渐隐就立刻熄掉进行中状态，别让旧透明度粘着。 */
+  if (!a.hoverFade) hoverFadeActive = false;
+  const baseOp = clampOpacity(a.opacity);
+  /* W6：悬停渐隐时压到 ≤0.32，松手/离开后恢复 baseOp。 */
+  const opacity = hoverFadeActive ? Math.min(baseOp, 0.32) : baseOp;
   /* ⚠️ 全屏静默期间**强制取消置顶**（用户配置只在这一条上被临时覆盖）：
    *    独占全屏的游戏会盖住她，置不置顶看不出来；但**无边框窗口化的游戏**
    *    （现在绝大多数）里，一个 alwaysOnTop 的窗口会一直浮在游戏画面上，
@@ -486,9 +552,31 @@ function syncAppearance() {
 
   try { mainWindow.setOpacity(opacity); } catch { /* 某些合成模式下不支持 */ }
   try { mainWindow.setAlwaysOnTop(onTop, 'floating'); } catch { /* ignore */ }
+  /* W30：explorer 重启后 skipTaskbar 可能丢 —— 跟置顶一起重申。 */
+  try { mainWindow.setSkipTaskbar(true); } catch { /* ignore */ }
+  const model = APPEARANCE_MODELS.some((m) => m.id === a.model) ? a.model : 'hiyori';
   try {
-    mainWindow.webContents.send('appearance:changed', { scale, opacity, onTop });
+    mainWindow.webContents.send('appearance:changed', { scale, opacity: baseOp, onTop, model });
   } catch { /* 窗口正在销毁 */ }
+}
+
+/* W30：置顶看门狗。explorer / DPI / 休眠后 WS_EX_TOPMOST 偶发丢失。 */
+let topWatchTimer = null;
+function refreshTopWatchdog() {
+  if (topWatchTimer) { clearInterval(topWatchTimer); topWatchTimer = null; }
+  topWatchTimer = setInterval(() => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (quiet) return;
+    const a = loadConfig().appearance || {};
+    if (a.alwaysOnTop === false) return;
+    try {
+      if (!mainWindow.isAlwaysOnTop()) {
+        mainWindow.setAlwaysOnTop(true, 'floating');
+        console.log('[top-watch] 置顶已丢失，已重申');
+      }
+      mainWindow.setSkipTaskbar(true);
+    } catch { /* ignore */ }
+  }, 30000);
 }
 
 /* ---- 悬浮显示：按配置定期把状态推给渲染层 ---- */
@@ -588,6 +676,9 @@ let screenLocked = false;
  * 在 llm.js 的源头断流，chunk 不再往外走，晚到的主动话不会
  * 从新对话的气泡里冒出来。 */
 let proactiveAbort = null;
+/* 在途的普通对话（G3）：新一轮 chat:send 要掐掉上一轮流，
+ * 否则 busy 期间打断只会在渲染层换气泡，主进程还在往外吐旧回复。 */
+let chatAbort = null;
 
 function quietPayload() {
   const q = loadConfig().quiet || {};
@@ -635,6 +726,28 @@ function refreshTTS() {
   const want = t.enabled === true && (t.engine ?? 'winrt') === 'winrt';
   if (want) startSynth();
   else stopSynth();
+}
+
+/* G26：全局热键（默认关）。accelerator 冲突时静默跳过，不挡启动。 */
+function refreshHotkeys() {
+  try { globalShortcut.unregisterAll(); } catch { /* ignore */ }
+  const hk = loadConfig().hotkeys || {};
+  if (hk.enabled !== true) return;
+  const reg = (acc, fn, label) => {
+    const a = String(acc || '').trim();
+    if (!a) return;
+    try {
+      if (!globalShortcut.register(a, fn)) {
+        console.warn('[hotkeys] 注册失败（可能冲突）:', label, a);
+      }
+    } catch (err) {
+      console.warn('[hotkeys]', label, err?.message || err);
+    }
+  };
+  reg(hk.toggleVisible, () => toggleVisible(), 'toggleVisible');
+  reg(hk.stopSpeak, () => {
+    try { mainWindow?.webContents.send('pet:stop-speak'); } catch { /* ignore */ }
+  }, 'stopSpeak');
 }
 
 /* 媒体采样进程，按配置起停（同 refreshTTS 的形态）。
@@ -719,9 +832,21 @@ function isOn(section, key, def = true) {
   return v === undefined || v === null ? def : !!v;
 }
 
+/* 操作反馈：优先进悬浮气泡（status 级），不再用主窗琥珀色 #status 条。
+ * 浮窗总开关关着时才回退 #status；对话流占用气泡时静默丢掉，别再冒那条提示。 */
 function toast(text) {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  try { mainWindow.webContents.send('pet:toast', { text }); } catch { /* ignore */ }
+  const t = String(text || '').trim();
+  if (!t) return;
+  const ms = Math.max(2800, Math.min(6000, 2000 + t.length * 40));
+  try {
+    if (bubble.showStatus(t, ms)) return;
+  } catch { /* ignore */ }
+  try {
+    if (loadConfig().chat?.floatBubble === false) {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      mainWindow.webContents.send('pet:toast', { text: t });
+    }
+  } catch { /* ignore */ }
 }
 
 /* 模型素材不随仓库分发（版权归 Live2D Inc.，放在 Release 的 models.zip 里），
@@ -901,6 +1026,142 @@ function personaStateLabel(cfg) {
   return n ? `（已改 ${n} 项）` : '（默认）';
 }
 
+/* 套用人设预设（P1）。空 parts = 恢复分项默认；并清掉整段 persona，
+ * 否则整段优先级更高，套了像没套。emotion/thought 协议槽由 render 端跳过。 */
+function applyPersonaPreset(id) {
+  const preset = personaPresetById(id);
+  if (!preset) return false;
+  const cfg = loadConfig();
+  const rendered = renderPersonaPreset(preset, cfg) || {};
+  /* 默认档：清空全部分项。其它档：只写预设给出的键，其余槽恢复默认
+   * （避免「先傲娇再元气」残留傲娇的 extra）。 */
+  const nextParts = {};
+  if (preset.id !== 'default') {
+    for (const p of PERSONA_PARTS) {
+      if (p.key === 'emotion' || p.key === 'thought') continue;
+      if (rendered[p.key]) nextParts[p.key] = rendered[p.key];
+    }
+  }
+  patchConfig(null, { personaParts: nextParts, persona: '', personaId: preset.id });
+  toast(preset.id === 'default'
+    ? '角色设定已恢复默认'
+    : `已套用「${preset.label}」人设`);
+  return true;
+}
+
+/* G6 药盒：托盘子菜单。挂着的药显示在标签上；选一颗 / 手写 / 清空。 */
+function oneshotSubmenu() {
+  const pending = oneshot.getPending();
+  return {
+    label: pending ? `下一句指令（已挂）` : '下一句指令…',
+    submenu: [
+      ...oneshot.listPills().map((p) => ({
+        label: p.label,
+        click: () => {
+          oneshot.setPending(p.text);
+          toast(`已挂「${p.label}」：只影响下一句`);
+          refreshTrayMenu();
+        }
+      })),
+      { type: 'separator' },
+      {
+        label: '手写一句…',
+        click: async () => {
+          const t = await promptOneshot();
+          if (t === undefined) return;
+          if (!t) {
+            oneshot.clearPending();
+            toast('已清空下一句指令');
+          } else {
+            oneshot.setPending(t);
+            toast('已挂自定义指令：只影响下一句');
+          }
+          refreshTrayMenu();
+        }
+      },
+      {
+        label: '清空',
+        enabled: !!pending,
+        click: () => {
+          oneshot.clearPending();
+          toast('已清空下一句指令');
+          refreshTrayMenu();
+        }
+      }
+    ]
+  };
+}
+
+/* 手写药盒文案：与改名同一套路，取消 = undefined，空串 = 清空。 */
+function promptOneshot() {
+  const current = oneshot.getPending();
+  return new Promise((resolve) => {
+    const w = new BrowserWindow({
+      width: 400,
+      height: 190,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      frame: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
+      modal: !!mainWindow && !mainWindow.isDestroyed(),
+      show: false,
+      backgroundColor: '#1e1e22',
+      webPreferences: { contextIsolation: true, nodeIntegration: false }
+    });
+    const html = `<!doctype html><meta charset="utf-8"><style>
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{background:#1e1e22;color:#e8e8ea;font:13px/1.5 "Microsoft YaHei",system-ui,sans-serif;padding:18px 20px;user-select:none}
+      h2{font-size:13px;font-weight:500;margin-bottom:6px}
+      p{font-size:12px;color:#9a9aa0;margin-bottom:10px}
+      input{width:100%;height:32px;padding:0 10px;border-radius:6px;border:1px solid #3a3a40;background:#2a2a30;color:#fff;font:14px/1 inherit;outline:none}
+      input:focus{border-color:#5a5a66}
+      .row{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+      button{height:28px;padding:0 14px;border-radius:6px;border:1px solid #3a3a40;background:#2a2a30;color:#e8e8ea;font-size:13px;cursor:pointer}
+      button.primary{background:#4a6cf7;border-color:#4a6cf7;color:#fff}
+    </style>
+    <h2>对下一句下指令</h2>
+    <p>只用一次，说完就丢。留空确定 = 清空。</p>
+    <input id="n" maxlength="200" autofocus>
+    <div class="row">
+      <button id="c">取消</button><button class="primary" id="k">确定</button>
+    </div>
+    <script>
+      const inp = document.getElementById('n');
+      inp.value = ${JSON.stringify(current)};
+      inp.focus(); inp.select();
+      const send = (v) => { window.__oneshotResult = v; };
+      document.getElementById('k').onclick = () => send(inp.value.trim());
+      document.getElementById('c').onclick = () => send(null);
+      inp.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') send(inp.value.trim());
+        if (ev.key === 'Escape') send(null);
+      });
+      window.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') send(null); });
+    <\/script>`;
+    w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    w.once('ready-to-show', () => w.show());
+    let finished = false;
+    const finish = (val) => {
+      if (finished) return;
+      finished = true;
+      clearInterval(timer);
+      if (!w.isDestroyed()) w.destroy();
+      resolve(val);
+    };
+    const timer = setInterval(async () => {
+      if (w.isDestroyed()) { finish(undefined); return; }
+      try {
+        const v = await w.webContents.executeJavaScript('window.__oneshotResult ?? undefined');
+        if (v !== undefined) finish(v === null ? undefined : v);
+      } catch { /* loading */ }
+    }, 120);
+    w.on('closed', () => { if (!finished) { finished = true; clearInterval(timer); resolve(undefined); } });
+  });
+}
+
 /* 改名入口：菜单里点「重命名」走这里。返回是否真的改成功了。 */
 async function promptRename() {
   const next = await renameDialog();
@@ -970,11 +1231,12 @@ function readWorkBuddyModels() {
   return { file, list: fromWorkBuddyModels(raw) };
 }
 
-/* 切到某条预设。custom 不覆盖地址（见 llm-providers 的 toPatch）。 */
+/* 切到某条预设。custom 不覆盖地址（见 llm-providers 的 toPatch）。
+ * 手切预设 ≠ 配置档：清掉 activeProfile，避免菜单还勾着「家里」实际已是云端。 */
 function applyLlmProvider(id) {
   const p = providerById(id);
   if (!p) return;
-  patchConfig('llm', toPatch(p));
+  patchConfig('llm', { ...toPatch(p), activeProfile: '' });
   const llm = loadConfig().llm || {};
   if (p.custom) {
     toast('已切到自定义：填地址与模型名');
@@ -997,7 +1259,7 @@ function applyLlmProvider(id) {
  * 地址/模型/key 一起搬 —— 那条模型在 WorkBuddy 里能跑，搬过来就该能跑。 */
 function importWorkBuddyModel(entry) {
   if (!entry) return;
-  const patch = { provider: 'workbuddy', baseUrl: entry.baseUrl, model: entry.model };
+  const patch = { provider: 'workbuddy', baseUrl: entry.baseUrl, model: entry.model, activeProfile: '' };
   if (entry.apiKey) patch.apiKey = entry.apiKey;
   patchConfig('llm', patch);
   toast(entry.keyIsRef
@@ -1010,12 +1272,16 @@ function importWorkBuddyModel(entry) {
  *
  * 为什么要真发而不是打 /models：/models 通了但模型名写错的情况极常见
  * （各家模型 id 命名完全不同），只有真发 chat 才能同时验证地址+key+模型名。
- * 超时给 15 秒：本地模型首次加载权重要十几秒，云端一般 2 秒内。 */
-async function testLlm() {
-  const llm = loadConfig().llm || {};
+ * 超时给 15 秒：本地模型首次加载权重要十几秒，云端一般 2 秒内。
+ *
+ * @param {object} [override] 设置页里「先测再存」：用表单当前值，不强制已落盘。 */
+async function testLlm(override) {
+  const llm = { ...(loadConfig().llm || {}), ...(override && typeof override === 'object' ? override : {}) };
   if (!isUsable(llm)) {
-    toast('还没填 key：先在「模型接入 → 填写 / 修改 Key」里填');
-    return;
+    toast(isLocalUrl(llm.baseUrl)
+      ? '本机地址看起来不对：检查接口地址是否到 /v1'
+      : '还没填 key：本机端点可以留空，云端必须填');
+    return false;
   }
   const url = `${String(llm.baseUrl || '').replace(/\/+$/, '')}/chat/completions`;
   const ac = new AbortController();
@@ -1045,34 +1311,112 @@ async function testLlm() {
         res.status === 429 ? '：限流 / 额度用完' : '';
       toast(`模型连不通（HTTP ${res.status}）${hint}`);
       console.log('[llm-test] fail', res.status, body.slice(0, 300));
-      return;
+      return false;
     }
     const data = await res.json().catch(() => null);
     const text = data?.choices?.[0]?.message?.content ?? '';
     toast(text ? `模型已就绪：「${String(text).trim().slice(0, 20)}」` : '模型已连通（没解析到正文）');
     console.log('[llm-test] ok', JSON.stringify({ url, model: llm.model, chars: String(text).length }));
+    /* M8：自测通过才绿 —— 只记 baseUrl+model 指纹（不动 apiKey）。
+     * override 测通也落盘：用户常「先测再存」，绿标应对准刚测过的那对。 */
+    try {
+      patchConfig('llm', {
+        tested: {
+          baseUrl: String(llm.baseUrl || '').trim().replace(/\/+$/, ''),
+          model: String(llm.model || '').trim(),
+          at: Date.now()
+        }
+      });
+    } catch (err) {
+      console.warn('[llm-test] 绿标落盘失败', err?.message || err);
+    }
+    return true;
   } catch (err) {
     toast(err?.name === 'AbortError' ? '模型超时：15 秒没回' : `模型连不上：${err?.message || err}`);
+    return false;
   } finally {
     clearTimeout(timer);
   }
 }
 
-/* 填地址 / 模型 / key 的小窗。与改名对话框同一套路（BrowserWindow + data: URL +
- * 轮询取值），不扩 IPC 面。
+/* 拉模型列表（M3）。GET `${baseUrl}/models`，OpenAI / Ollama / LM Studio 都兼容。
+ * 失败可手填 —— 列表只是省抄写，不是硬门槛。返回 string[]（id），失败 []。 */
+async function listLlmModels(override) {
+  const llm = { ...(loadConfig().llm || {}), ...(override && typeof override === 'object' ? override : {}) };
+  const base = String(llm.baseUrl || '').replace(/\/+$/, '');
+  if (!base) { toast('先填接口地址'); return []; }
+  if (!isUsable(llm)) {
+    toast(isLocalUrl(base) ? '地址不像本机端点' : '拉列表也要 key（本机可留空）');
+    return [];
+  }
+  const url = `${base}/models`;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 12000);
+  toast('正在拉取模型列表…');
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      signal: ac.signal,
+      headers: {
+        ...(llm.apiKey ? { Authorization: `Bearer ${llm.apiKey}` } : {})
+      }
+    });
+    if (!res.ok) {
+      toast(`拉列表失败（HTTP ${res.status}）：可继续手填模型名`);
+      return [];
+    }
+    const data = await res.json().catch(() => null);
+    const raw = Array.isArray(data?.data) ? data.data
+      : (Array.isArray(data?.models) ? data.models : []);
+    const ids = [];
+    const seen = new Set();
+    for (const it of raw) {
+      const id = typeof it === 'string' ? it
+        : (it && (it.id || it.name || it.model));
+      const s = String(id || '').trim();
+      if (!s || seen.has(s)) continue;
+      seen.add(s);
+      ids.push(s);
+      if (ids.length >= 80) break;   // datalist 太长反而难找
+    }
+    if (!ids.length) {
+      toast('列表是空的：这个端点可能不支持 /models，请手填');
+      return [];
+    }
+    toast(`拉到 ${ids.length} 个模型，点模型名框选`);
+    return ids;
+  } catch (err) {
+    toast(err?.name === 'AbortError' ? '拉列表超时，请手填模型名' : `拉列表失败：${err?.message || err}`);
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* 模型设置页（M5）。与改名 / 人设同一套路（BrowserWindow + data: URL + 轮询），
+ * 不扩 IPC 面。比旧「只填 Key」小窗多：超时两档 + extraBody 高级折叠 + 页内测试。
+ * M3：页内「拉取列表」填入模型名 datalist，失败仍可手填。
  *
- * 为什么不做成"完整设置页"：那是 M5 的活（要排版、校验、折叠高级项）。
- * 这里只解决"选完预设后 key 没地方填"这一个卡点。 */
+ * 界面秒数 ↔ 配置毫秒；保存时再 ×1000，并钳到 llm.js 的 LLM_TIMEOUT 上下限。 */
 function llmDialog() {
+  const { LLM_TIMEOUT } = require('./llm');
   const cfg = loadConfig();
   const llm = cfg.llm || {};
-  const p = providerById(llm.provider);
+  const p = providerById(currentProviderId(llm));
+  const stallSec = Math.round((Number(llm.stallMs) || LLM_TIMEOUT.stallMs) / 1000);
+  const totalSec = Math.round((Number(llm.totalMs) || LLM_TIMEOUT.totalMs) / 1000);
+  let extraText = '{}';
+  try {
+    extraText = JSON.stringify(llm.extraBody && typeof llm.extraBody === 'object' ? llm.extraBody : {}, null, 2);
+  } catch { extraText = '{}'; }
 
   return new Promise((resolve) => {
     const w = new BrowserWindow({
-      width: 460,
-      height: 320,
-      resizable: false,
+      width: 520,
+      height: 580,
+      minWidth: 440,
+      minHeight: 480,
+      resizable: true,
       minimizable: false,
       maximizable: false,
       frame: false,
@@ -1087,63 +1431,115 @@ function llmDialog() {
 
     const html = `<!doctype html><meta charset="utf-8"><style>
       *{box-sizing:border-box;margin:0;padding:0}
+      html,body{height:100%}
       body{background:#1e1e22;color:#e8e8ea;font:13px/1.5 "Microsoft YaHei",system-ui,sans-serif;
-           padding:16px 20px;user-select:none}
-      h2{font-size:13px;font-weight:500;margin-bottom:4px}
-      .sub{font-size:12px;color:#9a9aa4;margin-bottom:12px}
-      label{display:block;font-size:12px;color:#9a9aa4;margin:10px 0 4px}
-      input{width:100%;height:30px;padding:0 10px;border-radius:6px;border:1px solid #3a3a40;
-            background:#2a2a30;color:#fff;font:13px/1 inherit;outline:none}
-      input:focus{border-color:#5a5a66}
-      .row{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+           padding:16px 20px 12px;user-select:none;display:flex;flex-direction:column}
+      h2{font-size:14px;font-weight:500;margin-bottom:2px}
+      .sub{font-size:12px;color:#9a9aa4;margin-bottom:10px}
+      label{display:block;font-size:12px;color:#9a9aa4;margin:8px 0 3px}
+      input,textarea{width:100%;padding:0 10px;border-radius:6px;border:1px solid #3a3a40;
+            background:#2a2a30;color:#fff;font:13px/1.4 "Cascadia Mono",Consolas,monospace;outline:none}
+      input{height:30px}
+      textarea{height:72px;padding:8px 10px;resize:vertical}
+      input:focus,textarea:focus{border-color:#5a5a66}
+      .pair{display:flex;gap:10px}
+      .pair>div{flex:1}
+      details{margin-top:10px;border:1px solid #2f2f36;border-radius:8px;padding:6px 10px 10px;background:#232328}
+      summary{cursor:pointer;font-size:12px;color:#b0b0ba;user-select:none;outline:none}
+      summary:hover{color:#e8e8ea}
+      .hint{font-size:11px;color:#7d7d88;margin-top:4px;line-height:1.5}
+      .tipline{font-size:11px;color:#7d7d88;margin-top:8px;line-height:1.6}
+      .grow{flex:1}
+      .row{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap}
       button{height:28px;padding:0 14px;border-radius:6px;border:1px solid #3a3a40;
              background:#2a2a30;color:#e8e8ea;font-size:13px;cursor:pointer}
       button.primary{background:#4a6cf7;border-color:#4a6cf7;color:#fff}
       button:hover{filter:brightness(1.15)}
       .row .left{margin-right:auto}
-      .tipline{font-size:11px;color:#7d7d88;margin-top:10px;line-height:1.6}
     </style>
-    <h2>模型接入</h2>
+    <h2>模型设置</h2>
     <div class="sub" id="cur"></div>
-    <label>接口地址（到 /v1 这一级）</label>
+    <label>接口地址（到 /v1 这一级，不要带 /chat/completions）</label>
     <input id="u" spellcheck="false">
-    <label>模型名</label>
-    <input id="m" spellcheck="false">
-    <label>API Key</label>
+    <label>模型名 <button type="button" id="list" style="height:22px;padding:0 8px;margin-left:6px;vertical-align:middle">拉取列表</button></label>
+    <input id="m" spellcheck="false" list="models">
+    <datalist id="models"></datalist>
+    <label>API Key<span id="kHint"></span></label>
     <input id="k" type="password" spellcheck="false" autocomplete="off">
+    <div class="pair">
+      <div>
+        <label>卡住超时（秒）</label>
+        <input id="stall" type="number" min="1" max="120" step="1">
+        <div class="hint">多久没新数据就中断；正常长回答不会被掐</div>
+      </div>
+      <div>
+        <label>整轮上限（秒）</label>
+        <input id="total" type="number" min="5" max="600" step="1">
+        <div class="hint">整轮最久等多久；本地可调高</div>
+      </div>
+    </div>
+    <details id="adv">
+      <summary>高级 · extraBody（JSON，透传给服务方）</summary>
+      <label style="margin-top:8px">例如 {"enable_thinking": false}</label>
+      <textarea id="extra" spellcheck="false"></textarea>
+      <div class="hint">空对象 {} = 不传额外字段。model / messages / stream 不会被这里顶掉。</div>
+    </details>
     <div class="tipline" id="tip"></div>
+    <div class="grow"></div>
     <div class="row">
       <button class="left" id="open">去申请 Key</button>
+      <button id="test">测试连接</button>
       <button id="c">取消</button><button class="primary" id="s">保存</button>
     </div>
     <script>
       const U = ${JSON.stringify(String(llm.baseUrl || ''))};
       const M = ${JSON.stringify(String(llm.model || ''))};
       const K = ${JSON.stringify(String(llm.apiKey || ''))};
+      const STALL = ${JSON.stringify(stallSec)};
+      const TOTAL = ${JSON.stringify(totalSec)};
+      const EXTRA = ${JSON.stringify(extraText)};
       const KEY_URL = ${JSON.stringify((p && p.keyUrl) || '')};
       const LOCAL = ${JSON.stringify(!!(p && p.local))};
+      const LABEL = ${JSON.stringify(p ? p.label : '自定义')};
       document.getElementById('u').value = U;
       document.getElementById('m').value = M;
-      const kEl = document.getElementById('k');
-      kEl.value = K;
-      document.getElementById('cur').textContent = ${JSON.stringify(`${p ? p.label : '自定义'}${LOCAL ? '（本机端点，key 可以留空）' : ''}`)};
+      document.getElementById('k').value = K;
+      document.getElementById('stall').value = String(STALL);
+      document.getElementById('total').value = String(TOTAL);
+      document.getElementById('extra').value = EXTRA;
+      document.getElementById('cur').textContent = LABEL + (LOCAL ? ' · 本机端点，Key 可留空' : '');
+      document.getElementById('kHint').textContent = LOCAL ? '（可留空）' : '';
       document.getElementById('tip').textContent = LOCAL
-        ? '本机端点不需要 API Key。保存后点「模型接入 → 测试连接」确认能聊。'
-        : (KEY_URL ? '还没有 Key？点左下角按钮打开申请页，复制后粘贴到这里。' : '保存后点「模型接入 → 测试连接」确认能聊。');
+        ? '本机端点不需要 API Key。改完可先「测试连接」，再保存。'
+        : (KEY_URL ? '还没有 Key？左下角打开申请页，复制后粘贴。建议先测再存。' : '改完建议先「测试连接」再保存。');
       const openBtn = document.getElementById('open');
       if (!KEY_URL) openBtn.style.visibility = 'hidden';
-      document.getElementById('open').onclick = () => { window.__llmResult = { open: KEY_URL }; };
-      document.getElementById('s').onclick = () => {
-        window.__llmResult = {
+      function fields() {
+        return {
           baseUrl: document.getElementById('u').value.trim(),
           model: document.getElementById('m').value.trim(),
-          apiKey: kEl.value.trim()
+          apiKey: document.getElementById('k').value.trim(),
+          stallSec: Number(document.getElementById('stall').value),
+          totalSec: Number(document.getElementById('total').value),
+          extraText: document.getElementById('extra').value
         };
-      };
+      }
+      document.getElementById('open').onclick = () => { window.__llmResult = { open: KEY_URL }; };
+      document.getElementById('list').onclick = () => { window.__llmResult = { list: true, ...fields() }; };
+      document.getElementById('test').onclick = () => { window.__llmResult = { test: true, ...fields() }; };
+      document.getElementById('s').onclick = () => { window.__llmResult = { save: true, ...fields() }; };
       document.getElementById('c').onclick = () => { window.__llmResult = { cancel: true }; };
+      window.__fillModels = (ids) => {
+        const dl = document.getElementById('models');
+        dl.innerHTML = '';
+        for (const id of ids || []) {
+          const o = document.createElement('option');
+          o.value = id;
+          dl.appendChild(o);
+        }
+      };
       window.addEventListener('keydown', (ev) => {
         if (ev.key === 'Escape') window.__llmResult = { cancel: true };
-        if (ev.key === 'Enter') document.getElementById('s').click();
       });
       document.getElementById('u').focus();
     <\/script>`;
@@ -1166,11 +1562,46 @@ function llmDialog() {
         if (v === undefined) return;
         if (v.open) {
           /* 只开申请页，**不关窗** —— 用户复制完 key 还要回来粘贴。 */
-          w.webContents.executeJavaScript('window.__llmResult = undefined');
+          await w.webContents.executeJavaScript('window.__llmResult = undefined');
           try { shell.openExternal(v.open); } catch { /* ignore */ }
           return;
         }
-        finish(v.cancel ? undefined : v);
+        if (v.list) {
+          await w.webContents.executeJavaScript('window.__llmResult = undefined');
+          const ids = await listLlmModels({ baseUrl: v.baseUrl, model: v.model, apiKey: v.apiKey });
+          if (ids.length && !w.isDestroyed()) {
+            await w.webContents.executeJavaScript(
+              `window.__fillModels(${JSON.stringify(ids)})`
+            );
+          }
+          return;
+        }
+        if (v.test) {
+          await w.webContents.executeJavaScript('window.__llmResult = undefined');
+          await testLlm({ baseUrl: v.baseUrl, model: v.model, apiKey: v.apiKey });
+          return;
+        }
+        if (v.cancel) { finish(undefined); return; }
+        if (v.save) {
+          /* JSON 不合法就留在页里改 —— 关了再 toast 等于白填一遍。 */
+          if (typeof v.extraText === 'string' && v.extraText.trim()) {
+            try {
+              const parsed = JSON.parse(v.extraText);
+              if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                await w.webContents.executeJavaScript('window.__llmResult = undefined');
+                toast('extraBody 必须是 JSON 对象，例如 {"enable_thinking": false}');
+                return;
+              }
+            } catch (err) {
+              await w.webContents.executeJavaScript('window.__llmResult = undefined');
+              toast('extraBody JSON 解析失败：' + (err?.message || err));
+              return;
+            }
+          }
+          finish(v);
+          return;
+        }
+        finish(v);
       } catch { /* 页面还在加载 */ }
     }, 120);
     w.on('closed', () => { if (!finished) { finished = true; clearInterval(timer); resolve(undefined); } });
@@ -1181,15 +1612,233 @@ async function promptLlm() {
   const next = await llmDialog();
   if (!next) return false;
   const before = loadConfig().llm || {};
+  const { LLM_TIMEOUT } = require('./llm');
+  let extraBody = before.extraBody && typeof before.extraBody === 'object' ? before.extraBody : {};
+  if (typeof next.extraText === 'string' && next.extraText.trim()) {
+    try {
+      const parsed = JSON.parse(next.extraText);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        toast('extraBody 必须是 JSON 对象，例如 {"enable_thinking": false}');
+        return false;
+      }
+      extraBody = parsed;
+    } catch (err) {
+      toast('extraBody JSON 解析失败：' + (err?.message || err));
+      return false;
+    }
+  } else {
+    extraBody = {};
+  }
+  const stallMs = Math.min(LLM_TIMEOUT.stallMax, Math.max(LLM_TIMEOUT.stallMin,
+    Math.round((Number(next.stallSec) || LLM_TIMEOUT.stallMs / 1000) * 1000)));
+  const totalMs = Math.min(LLM_TIMEOUT.totalMax, Math.max(LLM_TIMEOUT.totalMin,
+    Math.round((Number(next.totalSec) || LLM_TIMEOUT.totalMs / 1000) * 1000)));
   patchConfig('llm', {
     baseUrl: next.baseUrl || before.baseUrl,
     model: next.model || before.model,
-    apiKey: next.apiKey
+    apiKey: next.apiKey,
+    stallMs,
+    totalMs,
+    extraBody,
+    activeProfile: ''   // 手改顶层 ≠ 仍挂在某一档上
   });
   toast('模型配置已保存');
   return true;
 }
 
+/* ============================================================
+ *  多配置档（M6）—— 家里 Ollama / 公司云 一键切
+ * ========================================================== */
+
+function profileNameDialog(title, initial) {
+  return new Promise((resolve) => {
+    const w = new BrowserWindow({
+      width: 360, height: 170, resizable: false, minimizable: false, maximizable: false,
+      frame: false, alwaysOnTop: true, skipTaskbar: true,
+      parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
+      modal: !!mainWindow && !mainWindow.isDestroyed(),
+      show: false, backgroundColor: '#1e1e22',
+      webPreferences: { contextIsolation: true, nodeIntegration: false }
+    });
+    const html = `<!doctype html><meta charset="utf-8"><style>
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{background:#1e1e22;color:#e8e8ea;font:13px/1.5 "Microsoft YaHei",system-ui,sans-serif;padding:18px 20px;user-select:none}
+      h2{font-size:13px;font-weight:500;margin-bottom:10px}
+      input{width:100%;height:32px;padding:0 10px;border-radius:6px;border:1px solid #3a3a40;background:#2a2a30;color:#fff;font:14px/1 inherit;outline:none}
+      input:focus{border-color:#5a5a66}
+      .row{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+      button{height:28px;padding:0 14px;border-radius:6px;border:1px solid #3a3a40;background:#2a2a30;color:#e8e8ea;font-size:13px;cursor:pointer}
+      button.primary{background:#4a6cf7;border-color:#4a6cf7;color:#fff}
+      button:hover{filter:brightness(1.15)}
+      .err{color:#ff7b7b;font-size:12px;height:15px;margin-top:6px}
+    </style>
+    <h2>${String(title || '配置档名称').replace(/</g, '')}</h2>
+    <input id="n" maxlength="16" autofocus>
+    <div class="err" id="e"></div>
+    <div class="row"><button id="c">取消</button><button class="primary" id="k">确定</button></div>
+    <script>
+      const inp = document.getElementById('n'), err = document.getElementById('e');
+      inp.value = ${JSON.stringify(String(initial || ''))};
+      inp.focus(); inp.select();
+      const send = (v) => { window.__pfResult = v; };
+      const commit = () => {
+        const v = inp.value.trim();
+        if (!v) { err.textContent = '名字不能空'; return; }
+        if (v.length > 16) { err.textContent = '最多 16 个字'; return; }
+        send(v);
+      };
+      document.getElementById('k').onclick = commit;
+      document.getElementById('c').onclick = () => send(null);
+      inp.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') commit();
+        if (ev.key === 'Escape') send(null);
+      });
+    <\/script>`;
+    w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    w.once('ready-to-show', () => w.show());
+    let finished = false;
+    const finish = (val) => {
+      if (finished) return;
+      finished = true;
+      clearInterval(timer);
+      if (!w.isDestroyed()) w.destroy();
+      resolve(val);
+    };
+    const timer = setInterval(async () => {
+      if (w.isDestroyed()) { finish(undefined); return; }
+      try {
+        const v = await w.webContents.executeJavaScript('window.__pfResult ?? undefined');
+        if (v !== undefined) finish(v === null ? undefined : v);
+      } catch { /* loading */ }
+    }, 120);
+    w.on('closed', () => { if (!finished) { finished = true; clearInterval(timer); resolve(undefined); } });
+  });
+}
+
+function switchLlmProfile(id) {
+  const llm = loadConfig().llm || {};
+  const snap = getProfile(llm, id);
+  if (!snap) { toast('这档已经没了'); return false; }
+  const next = applySnapToLlm(llm, snap);
+  patchConfig('llm', next);
+  toast(`已切到配置档「${snap.label}」`);
+  return true;
+}
+
+async function saveLlmProfileAs() {
+  const label = await profileNameDialog('给当前连接起个档名', '家里');
+  if (label === undefined) return false;
+  const llm = loadConfig().llm || {};
+  const snap = saveCurrentAs(llm, label);
+  const profiles = { ...(llm.profiles && typeof llm.profiles === 'object' ? llm.profiles : {}), [snap.id]: snap };
+  patchConfig('llm', { profiles, activeProfile: snap.id });
+  toast(`已存成配置档「${snap.label}」`);
+  return true;
+}
+
+function overwriteActiveLlmProfile() {
+  const llm = loadConfig().llm || {};
+  const id = llm.activeProfile;
+  if (!id || !getProfile(llm, id)) {
+    toast('还没有选中的配置档，先「存成新档」');
+    return false;
+  }
+  const snap = overwriteProfile(llm, id);
+  const profiles = { ...(llm.profiles || {}), [snap.id]: snap };
+  patchConfig('llm', { profiles, activeProfile: snap.id });
+  toast(`已覆盖配置档「${snap.label}」`);
+  return true;
+}
+
+function deleteActiveLlmProfile() {
+  const llm = loadConfig().llm || {};
+  const id = llm.activeProfile;
+  const prev = getProfile(llm, id);
+  if (!prev) { toast('没有可删的配置档'); return false; }
+  const profiles = { ...(llm.profiles || {}) };
+  delete profiles[id];
+  patchConfig('llm', { profiles, activeProfile: '' });
+  toast(`已删除配置档「${prev.label}」（顶层连接还在）`);
+  return true;
+}
+
+function llmProfilesSubmenu(cfg) {
+  const llm = cfg?.llm || {};
+  const profiles = listProfiles(llm);
+  const active = llm.activeProfile || '';
+  const items = profiles.map((p) => ({
+    label: p.label,
+    type: 'radio',
+    checked: active === p.id,
+    click: () => { switchLlmProfile(p.id); }
+  }));
+  if (items.length) items.push({ type: 'separator' });
+  items.push(
+    { label: '把当前存成新档…', click: () => { saveLlmProfileAs(); } },
+    { label: '用当前覆盖本档', enabled: !!getProfile(llm, active), click: () => { overwriteActiveLlmProfile(); } },
+    { label: '删除本档', enabled: !!getProfile(llm, active), click: () => { deleteActiveLlmProfile(); } }
+  );
+  return items;
+}
+
+/* ============================================================
+ *  OCEAN 性格微调（P3）
+ * ========================================================== */
+
+function syncOceanFromConfig(cfg = loadConfig()) {
+  const d = deriveOcean(cfg?.personality);
+  setPrideSoftMul(d.prideSoftMul);
+}
+
+function setOceanDim(key, value) {
+  const cur = normalizeOcean(loadConfig().personality);
+  if (!Object.prototype.hasOwnProperty.call(cur, key)) return;
+  cur[key] = value;
+  patchConfig('personality', cur);
+  syncOceanFromConfig();
+  const dim = OCEAN_DIMS.find((d) => d.key === key);
+  const lv = nearestLevel(value);
+  toast(`${dim ? dim.label : key} → ${lv.label}`);
+}
+
+function personalitySubmenu(cfg) {
+  const p = normalizeOcean(cfg?.personality);
+  return OCEAN_DIMS.map((dim) => {
+    const cur = nearestLevel(p[dim.key]);
+    return {
+      label: `${dim.label}（${cur.label}）`,
+      submenu: OCEAN_LEVELS.map((lv) => ({
+        label: `${lv.label} · ${lv.id === 'low' ? dim.low : lv.id === 'high' ? dim.high : '适中'}`,
+        type: 'radio',
+        checked: cur.id === lv.id,
+        click: () => { setOceanDim(dim.key, lv.value); }
+      }))
+    };
+  });
+}
+
+/* ============================================================
+ *  运行时切模型（X1）
+ * ========================================================== */
+
+const APPEARANCE_MODELS = [
+  { id: 'hiyori', label: '日和' },
+  { id: 'whale', label: '鲸鱼娘' }
+];
+
+function applyAppearanceModel(id) {
+  const want = APPEARANCE_MODELS.some((m) => m.id === id) ? id : 'hiyori';
+  const cur = loadConfig().appearance?.model || 'hiyori';
+  if (cur === want) return;
+  patchConfig('appearance', { model: want });
+  syncAppearance();
+  const row = APPEARANCE_MODELS.find((m) => m.id === want);
+  if (want === 'whale') {
+    toast('已切到鲸鱼娘 · 素材源自 VTube Studio 模型包（Andersen216 补 model3）');
+  } else {
+    toast(`已切到「${row ? row.label : want}」`);
+  }
+}
 
 /* ============================================================
  *  角色设定（人设）对话框
@@ -1579,11 +2228,12 @@ function toggleTTS() {
  * 而且两边的标题写法都漂了（`大小（100%）` vs `大小 100%`）。
  * 现在共用一份，托盘与右键菜单的内容完全一致。
  *
- * 原来的第三项「人物模型」随春一起移除 —— 只剩日和，再摆一个永远只有
- * 一条的单选菜单纯属噪音（托盘顶层还等着省行数）。 */
+ * 人物模型（X1）重新回来：日和 / 鲸鱼娘 radio；鲸鱼娘本地可切、不默认上架。 */
 function appearanceSubmenu(cfg) {
   const scale = Math.round(clampScale(cfg.appearance?.scale) * 100);
   const opacity = clampOpacity(cfg.appearance?.opacity);
+  const modelId = APPEARANCE_MODELS.some((m) => m.id === cfg.appearance?.model)
+    ? cfg.appearance.model : 'hiyori';
 
   return [
     {
@@ -1603,7 +2253,45 @@ function appearanceSubmenu(cfg) {
         checked: Math.abs(opacity - v) < 0.02,
         click: () => setOpacity(v)
       }))
-    }
+    },
+    {
+      label: '人物模型',
+      submenu: APPEARANCE_MODELS.map((m) => ({
+        label: m.label,
+        type: 'radio',
+        checked: modelId === m.id,
+        click: () => { applyAppearanceModel(m.id); }
+      }))
+    },
+    {
+      /* W8 = G14：OS 级 setContentProtection（截屏/录屏排除）。 */
+      label: '截屏/录屏排除自己',
+      type: 'checkbox',
+      checked: !!cfg.appearance?.hideFromCapture,
+      click: (item) => {
+        patchConfig('appearance', { hideFromCapture: !!item.checked });
+        applyHideFromCapture(!!item.checked);
+        toast(item.checked ? '已对截屏/录屏隐藏（OS 排除）' : '已取消截屏隐藏');
+      }
+    },
+    {
+      label: '藏 3 秒方便截屏',
+      click: () => { hidePetBriefly(3000); }
+    },
+    /* G18：鲸鱼娘表情槽预览（本地包体验）。仅当前模型是 whale 时出现。 */
+    ...(modelId === 'whale' ? [{
+      label: '表情槽预览',
+      submenu: [
+        '星星眼', '吐舌', '爱心眼', '心跳', '哭', '晕晕', '问号', '脸红', '花花', '呆眼'
+      ].map((name) => ({
+        label: name,
+        click: () => {
+          try {
+            mainWindow?.webContents.send('pet:emote', { name, ms: 2800 });
+          } catch { /* ignore */ }
+        }
+      }))
+    }] : [])
   ];
 }
 
@@ -1611,6 +2299,12 @@ function buildMenuTemplate() {
   const cfg = loadConfig();
   const login = app.getLoginItemSettings();
   const pomo = pomodoroStatus();
+
+  /* W31：不可用入口置灰 + 行内写明原因（规矩 24：不许点了没反应）。 */
+  const unavailable = (label, reason) => ({
+    label: `${label}（${reason}）`,
+    enabled: false
+  });
 
   // 配置开关的统一构造：勾选 → 落盘 + 广播 + 重画菜单（patchConfig 全包了）
   const flag = (section, key, label, def = true) => ({
@@ -1652,23 +2346,64 @@ function buildMenuTemplate() {
     },
     flag('appearance', 'props', '闲置时摆弄道具'),
     flag('appearance', 'textureLod', '纹理降档（省显存）'),
-    flag('appearance', 'alwaysOnTop', '窗口置顶')
+    flag('appearance', 'alwaysOnTop', '窗口置顶'),
+    flag('appearance', 'hoverFade', '悬停渐隐穿透（挡点击时）', false)
   ];
 
   /* ---------- 互动与行为 ---------- */
+  const touchModeRaw = String(cfg?.interaction?.touchMode || 'normal').toLowerCase();
+  const touchMode = touchModeRaw === 'quiet' || touchModeRaw === 'eager' ? touchModeRaw : 'normal';
+  const touchModeLabel = touchMode === 'quiet' ? '安静' : touchMode === 'eager' ? '热情' : '平常';
+  const touchModeItem = {
+    label: `触摸响应（${touchModeLabel}）`,
+    submenu: [
+      {
+        label: '安静 · 少反应',
+        type: 'radio',
+        checked: touchMode === 'quiet',
+        click: () => {
+          patchConfig('interaction', { touchMode: 'quiet' });
+          toast('触摸：安静（连戳门槛更高、摸头更快挣脱）');
+        }
+      },
+      {
+        label: '平常 · Custom 基线',
+        type: 'radio',
+        checked: touchMode === 'normal',
+        click: () => {
+          patchConfig('interaction', { touchMode: 'normal' });
+          toast('触摸：平常（单项开关仍可细调）');
+        }
+      },
+      {
+        label: '热情 · 多反应',
+        type: 'radio',
+        checked: touchMode === 'eager',
+        click: () => {
+          patchConfig('interaction', { touchMode: 'eager' });
+          toast('触摸：热情（连戳更敏感、摸头更耐蹭）');
+        }
+      }
+    ]
+  };
   const interactMenu = [
     flag('motion', 'enabled', '互动总开关'),
     { type: 'separator' },
     flag('motion', 'edgeSnap', '拖动后贴屏幕边缘'),
     flag('motion', 'wander', '闲置时自己溜达'),
+    flag('motion', 'positionPin', '位置钉（稀有换位）', false),
     flag('motion', 'returnOnActivity', '有人操作时回到原位'),
+    flag('appearance', 'timeOfDayIdle', '时段闲置表情'),
     flag('chat', 'floatBubble', '对话气泡悬浮在头顶'),
     flag('interaction', 'rightMenu', '在角色身上右键出菜单'),
+    touchModeItem,
     flag('interaction', 'headPat', '按住头顶会一直蹭'),
     flag('interaction', 'dragReact', '拖着走会挣扎'),
-    flag('interaction', 'pokeReact', '连戳有递进反应'),
+    flag('interaction', 'pokeReact', '连戳/过摸有递进反应'),
     flag('interaction', 'throw', '甩出去会抛物线飞行', false),
     flag('interaction', 'bounce', '落地会弹一下'),
+    flag('interaction', 'swing', '拖着走会单摆摇晃', false),
+    flag('interaction', 'flip', '往左飞时左右翻转', false),
     flag('interaction', 'squash', '点击/落地会 Q 弹'),
     flag('interaction', 'workState', '对话时脸上跟着干活')
   ];
@@ -1689,21 +2424,24 @@ function buildMenuTemplate() {
     label: `语音朗读${ttsOn ? `（${ttsEngine === 'winrt' ? '真口型' : '系统音色'}）` : '（已关闭）'}`,
     submenu: [
       flag('tts', 'enabled', '启用语音朗读'),
+      flag('tts', 'emotionVoice', '情绪分轨语速/音调', true),
       { type: 'separator' },
-      {
-        label: 'Windows 合成（嘴跟着声音动）',
-        type: 'radio',
-        checked: ttsEngine === 'winrt',
-        click: () => {
-          patchConfig('tts', { engine: 'winrt' });
-          refreshTTS();
-          toast('已切到 Windows 合成：说话时嘴跟着声音动');
-        }
-      },
+      process.platform === 'win32'
+        ? {
+            label: 'Windows 合成（嘴跟着声音动）',
+            type: 'radio',
+            checked: ttsEngine === 'winrt',
+            click: () => {
+              patchConfig('tts', { engine: 'winrt' });
+              refreshTTS();
+              toast('已切到 Windows 合成：说话时嘴跟着声音动');
+            }
+          }
+        : unavailable('Windows 合成', '仅 Windows'),
       {
         label: '系统内置音色（开口最快）',
         type: 'radio',
-        checked: ttsEngine === 'system',
+        checked: ttsEngine === 'system' || process.platform !== 'win32',
         click: () => {
           patchConfig('tts', { engine: 'system' });
           refreshTTS();
@@ -1713,16 +2451,129 @@ function buildMenuTemplate() {
     ]
   };
 
+  const presenceMode = normalizeMode(cfg?.presence?.mode);
+  const presenceItem = {
+    label: `状态（${PRESENCE_MODES.find((m) => m.id === presenceMode)?.label || '日常'}）`,
+    submenu: PRESENCE_MODES.map((m) => ({
+      label: m.id === 'companion' ? '陪伴（忽略安静时段）'
+        : m.id === 'focus' ? '勿扰（不主动搭话）'
+        : '日常（走安静时段）',
+      type: 'radio',
+      checked: presenceMode === m.id,
+      click: () => {
+        patchConfig('presence', { mode: m.id });
+        toast(m.id === 'focus' ? '已切到勿扰：她不会主动开口'
+          : m.id === 'companion' ? '已切到陪伴：安静时段先放一边'
+          : '已切到日常');
+      }
+    }))
+  };
+
+  const chatMode = cfg.chat?.mode === 'work' ? 'work' : 'companion';
+  const modeItem = {
+    label: `对话模态（${chatMode === 'work' ? '专业' : '陪伴'}）`,
+    submenu: [
+      {
+        label: '陪伴',
+        type: 'radio',
+        checked: chatMode === 'companion',
+        click: () => { patchConfig('chat', { mode: 'companion' }); toast('已切到陪伴语气'); }
+      },
+      {
+        label: '专业',
+        type: 'radio',
+        checked: chatMode === 'work',
+        click: () => { patchConfig('chat', { mode: 'work' }); toast('已切到专业语气'); }
+      }
+    ]
+  };
+
   const featureMenu = [
     ttsItem,
     flag('proactive', 'enabled', '主动搭话'),
+    flag('proactive', 'edgeCues', '边缘线索（电量/CPU/切应用）', false),
+    flag('chat', 'showThink', '内心 OS（[think:]）', true),
+    {
+      label: `人设护栏（${guardLevel(cfg.chat?.personaGuard)}）`,
+      submenu: ['off', 'med', 'strict'].map((lv) => ({
+        label: lv === 'off' ? '关' : lv === 'med' ? '中（禁客服腔）' : '严（+伪造角色标记）',
+        type: 'radio',
+        checked: guardLevel(cfg.chat?.personaGuard) === lv,
+        click: () => { patchConfig('chat', { personaGuard: lv }); toast(`人设护栏：${lv}`); }
+      }))
+    },
+    modeItem,
+    flag('rhythm', 'enabled', '作息学习', true),
+    flag('rhythm', 'gateProactive', '作息门控主动搭话', false),
+    presenceItem,
     quietItem,
     lowPowerItem,
     flag('memory', 'enabled', '长期记忆（记住关于你的事）'),
+    {
+      label: '记忆会慢慢变淡',
+      type: 'checkbox',
+      checked: cfg.memory?.decay !== false,
+      click: (item) => {
+        patchConfig('memory', { decay: !!item.checked });
+        toast(item.checked ? '记忆会慢慢变淡' : '记忆不再变淡');
+      }
+    },
+    {
+      label: '到期遗忘正文（默认关）',
+      type: 'checkbox',
+      checked: !!cfg.memory?.forget?.enabled,
+      click: (item) => {
+        const forget = { ...(cfg.memory?.forget || {}), enabled: !!item.checked };
+        patchConfig('memory', { forget });
+        toast(item.checked ? '已开启到期遗忘（不可逆）' : '已关闭到期遗忘');
+      }
+    },
+    {
+      label: 'MCP 工具（默认关）',
+      submenu: [
+        {
+          label: '启用 MCP 骨架',
+          type: 'checkbox',
+          checked: !!cfg.mcp?.enabled,
+          click: (item) => {
+            patchConfig('mcp', { enabled: !!item.checked });
+            toast(item.checked ? 'MCP 骨架已开（尚无 server）' : 'MCP 已关');
+          }
+        },
+        { type: 'separator' },
+        ...(mcp.listServers().length
+          ? mcp.listServers().map((s) => ({ label: s.name || s.id, enabled: false }))
+          : [{ label: '（未配置 server）', enabled: false }])
+      ]
+    },
     flag('monitor', 'floating', '系统状态悬浮显示', false),
     flag('reminder', 'enabled', '定时提醒'),
-    flag('asr', 'enabled', '语音输入（离线识别）', false),
-    flag('media', 'enabled', '媒体感知（知道你在听什么）', false)
+    process.platform === 'win32'
+      ? flag('asr', 'enabled', '语音输入（离线识别）', false)
+      : unavailable('语音输入', '仅 Windows'),
+    process.platform === 'win32'
+      ? flag('media', 'enabled', '媒体感知（知道你在听什么）', false)
+      : unavailable('媒体感知', '仅 Windows'),
+    {
+      label: '全局热键（默认关）',
+      type: 'checkbox',
+      checked: !!cfg.hotkeys?.enabled,
+      click: (item) => {
+        patchConfig('hotkeys', { enabled: !!item.checked });
+        toast(item.checked
+          ? '热键已开：显隐 / 停朗读（见配置 hotkeys）'
+          : '热键已关');
+      }
+    },
+    {
+      label: '新屏接入时跳过去',
+      type: 'checkbox',
+      checked: !!cfg.motion?.multiScreenHop,
+      click: (item) => {
+        patchConfig('motion', { multiScreenHop: !!item.checked });
+        toast(item.checked ? '新屏接入会 hop 过去' : '新屏接入不再 hop');
+      }
+    }
   ];
 
   /* ---------- 小工具 ---------- */
@@ -1754,6 +2605,64 @@ function buildMenuTemplate() {
         ]
       };
 
+  /* G23 / W1：看一眼。永久开关 OR 限时授权；关着时托盘给启用 + 限时档。 */
+  const glanceOn = isOn('interaction', 'glance', false);
+  const grantSnap = grantSnapshot();
+  const glanceAllowed = isGlanceAllowed(glanceOn);
+  const grantLeftMin = Math.max(1, Math.ceil(grantSnap.remainingMs / 60000));
+  const runGlanceClick = () => {
+    (async () => {
+      try {
+        bubble.beginStream();
+        const r = await runGlance({});
+        if (r?.ok) bubble.endStream(); else bubble.abortStream();
+      } catch (err) {
+        bubble.abortStream();
+        toast('看屏失败：' + (err?.message || err));
+      }
+    })();
+  };
+  const glanceGrantSub = [
+    ...GRANT_PRESETS_MS.map((p) => ({
+      label: `限时授权 ${p.label}`,
+      click: () => {
+        grantFor(p.ms);
+        toast(`看屏授权 ${p.label}，到期自动收回`);
+        refreshTrayMenu();
+      }
+    })),
+    {
+      label: grantSnap.active ? `收回授权（剩约 ${grantLeftMin} 分）` : '收回授权',
+      enabled: grantSnap.active,
+      click: () => {
+        revokeGlanceGrant('manual');
+        toast('看屏授权已收回');
+        refreshTrayMenu();
+      }
+    }
+  ];
+  const glanceItem = glanceAllowed
+    ? {
+        label: grantSnap.active && !glanceOn
+          ? `看一眼屏幕（限时 · 剩 ${grantLeftMin} 分）`
+          : '看一眼屏幕',
+        click: runGlanceClick
+      }
+    : {
+        label: '看一眼屏幕（已关闭）',
+        submenu: [
+          {
+            label: '永久启用（隐私：会截屏给模型）',
+            click: () => {
+              patchConfig('interaction', { glance: true });
+              toast('已开启「看一眼」· 也可说「看看」');
+            }
+          },
+          { type: 'separator' },
+          ...glanceGrantSub
+        ]
+      };
+
   const toolsMenu = [
     {
       label: pomo ? `番茄钟（${pomo.phase === 'work' ? '专注' : '休息'}中 · 剩 ${Math.ceil(pomo.leftSec / 60)} 分）` : '番茄钟',
@@ -1764,8 +2673,20 @@ function buildMenuTemplate() {
         { label: '停止', enabled: !!pomo, click: () => { stopPomodoro(); toast('番茄钟已停'); } }
       ]
     },
-    reminderItem
-  ];
+    reminderItem,
+    glanceItem,
+    glanceOn || grantSnap.active
+      ? {
+          label: '看屏授权',
+          submenu: [
+            flag('interaction', 'glance', '永久允许看一眼屏幕', false),
+            { type: 'separator' },
+            ...glanceGrantSub
+          ]
+        }
+      : null,
+    flag('agentLink', 'enabled', 'Agent 事件联动（只读 JSONL）', false)
+  ].filter(Boolean);
 
   /* ---------- 设置 ---------- */
   /* 更新做成一个子菜单而不是平铺两项：设置组本来就长，再往上加会挤到
@@ -1783,15 +2704,27 @@ function buildMenuTemplate() {
   /* 打勾的那一条要按 currentProviderId 算（旧配置没有 provider 字段，
    * 按 baseUrl 反查）—— 否则老用户打开菜单会一条都不勾。 */
   const activeProvider = currentProviderId(cfg.llm);
+  /* M8：顶层只露 featured；其余收「更多…」。当前选中若在更多里，
+   * 顶层 radio 不会勾中 —— 靠「更多」子项的 checked 表达。 */
+  const green = isTestGreen(cfg.llm);
+  const requireTested = !!cfg.llm?.requireTested;
+  const providerItem = (p) => ({
+    label: p.label + (activeProvider === p.id && green ? ' ✓' : ''),
+    type: 'radio',
+    checked: activeProvider === p.id,
+    click: () => applyLlmProvider(p.id)
+  });
+  const more = moreProviders();
   const llmMenu = {
-    label: `模型接入（${llmLabelText(cfg)}${llmReady ? '' : ' · 没 key'}）`,
+    label: `模型接入（${llmLabelText(cfg)}${green ? ' ✓' : llmReady ? (requireTested ? ' · 未测' : '') : ' · 没 key'}）`,
     submenu: [
-      ...PROVIDERS.map((p) => ({
-        label: p.label,
-        type: 'radio',
-        checked: activeProvider === p.id,
-        click: () => applyLlmProvider(p.id)
-      })),
+      ...featuredProviders().map(providerItem),
+      ...(more.length
+        ? [{
+            label: '更多…',
+            submenu: more.map(providerItem)
+          }]
+        : []),
       { type: 'separator' },
       /* WorkBuddy 里配好的自定义模型：为什么值得接 —— 同一套 key 复用到桌宠，
        * 不用为"再填一遍"回去翻控制台。文件不存在/为空时给出可操作提示。 */
@@ -1808,15 +2741,77 @@ function buildMenuTemplate() {
             enabled: false
           },
       { type: 'separator' },
-      { label: '填写 / 修改 Key…', click: () => { promptLlm(); } },
-      { label: '测试连接', click: () => { testLlm(); } }
+      {
+        label: `配置档${listProfiles(cfg.llm).length ? `（${listProfiles(cfg.llm).length}）` : ''}`,
+        submenu: llmProfilesSubmenu(cfg)
+      },
+      { label: '模型设置…', click: () => { promptLlm(); } },
+      llmReady
+        ? { label: green ? '测试连接 ✓' : '测试连接', click: () => { testLlm(); } }
+        : unavailable('测试连接', '没 key / 未配端点'),
+      {
+        label: '真测一句才算就绪',
+        type: 'checkbox',
+        checked: requireTested,
+        click: (item) => {
+          patchConfig('llm', { requireTested: !!item.checked });
+          toast(item.checked ? '未测通时走离线话术' : '有 key/本机即可聊（不必先测）');
+        }
+      },
+      {
+        label: '检测本机端点…',
+        click: async () => {
+          toast('正在侦测 Ollama / LM Studio…');
+          try {
+            const results = await probeLocalEndpoints();
+            const sum = summarizeProbes(results);
+            toast(sum.toast);
+            for (const line of sum.lines.slice(0, 2)) {
+              console.log('[local-guide]', line);
+            }
+            const hit = results.find((r) => r.ok);
+            if (hit) {
+              /* 探测到了就一键填预设（不动已有 apiKey）；本地超时用 M9 默认。 */
+              patchConfig('llm', {
+                provider: hit.id === 'ollama' ? 'ollama' : 'lmstudio',
+                baseUrl: hit.baseUrl,
+                model: hit.model,
+                activeProfile: '',
+                stallMs: TIMEOUT_LOCAL.stallMs,
+                totalMs: TIMEOUT_LOCAL.totalMs
+              });
+            }
+          } catch (err) {
+            toast('检测失败：' + (err?.message || err));
+          }
+        }
+      }
     ]
   };
 
   const settingsMenu = [
     // 当前名字写进标签里，不用点进去就知道现在叫什么
     { label: `重命名（当前：${resolveName(cfg)}）`, click: () => { promptRename(); } },
-    { label: `角色设定${personaStateLabel(cfg)}`, click: () => { promptPersona(); } },
+    {
+      label: `角色设定${personaStateLabel(cfg)}`,
+      submenu: [
+        { label: '自定义编辑…', click: () => { promptPersona(); } },
+        { label: '导入角色卡…', click: () => { importCharacterCard(); } },
+        { label: '视角蒸馏…', click: () => { promptPersonaDistill(); } },
+        { type: 'separator' },
+        ...PERSONA_PRESETS.map((p) => ({
+          label: p.label,
+          click: () => { applyPersonaPreset(p.id); }
+        })),
+        { type: 'separator' },
+        {
+          label: '性格微调',
+          submenu: personalitySubmenu(cfg)
+        },
+        { type: 'separator' },
+        oneshotSubmenu()
+      ]
+    },
     llmMenu,
     { type: 'separator' },
     {
@@ -1858,6 +2853,22 @@ function buildMenuTemplate() {
     },
     { label: '打开配置目录', click: () => shell.openPath(app.getPath('userData')) },
     { type: 'separator' },
+    (() => {
+      const histPath = path.join(app.getPath('userData'), 'chat-history.json');
+      let hasHist = false;
+      try {
+        hasHist = fs.existsSync(histPath) && fs.statSync(histPath).size > 2;
+      } catch { /* ignore */ }
+      return hasHist
+        ? {
+            label: '导出对话',
+            submenu: [
+              { label: 'Markdown…', click: () => { exportChatHistory('md'); } },
+              { label: 'JSON…', click: () => { exportChatHistory('json'); } }
+            ]
+          }
+        : unavailable('导出对话', '暂无记录');
+    })(),
     {
       label: '清空聊天记录',
       click: () => {
@@ -1956,10 +2967,81 @@ function fmtMinutes(mins) {
  *    渲染层判据 `cfg?.appearance?.mood !== false` 兜底，行为与从前逐位一致。
  * ========================================================== */
 const moodEngine = createMoodEngine();
+const temperament = createTemperament();
 const moodFile = () => path.join(app.getPath('userData'), 'mood.json');
+const temperamentFile = () => path.join(app.getPath('userData'), 'temperament.json');
 let moodTimer = null;
 let moodSaveAt = 0;
 let moodDragging = false;   // drag-move 的边沿判定用（帧级事件 → 一次性事件）
+
+function loadTemperament() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(temperamentFile(), 'utf8'));
+    temperament.hydrate(raw);
+    setRateMul(temperament.rateMul());
+  } catch { /* first run */ }
+}
+
+function saveTemperament() {
+  try {
+    fs.mkdirSync(app.getPath('userData'), { recursive: true });
+    fs.writeFileSync(temperamentFile(), JSON.stringify(temperament.snapshot()), 'utf8');
+  } catch (err) {
+    console.warn('[temperament] save failed', err?.message || err);
+  }
+}
+
+/* X6 作息直方图 */
+const rhythmFile = () => path.join(app.getPath('userData'), 'rhythm.json');
+let rhythmState = rhythm.empty();
+
+function loadRhythm() {
+  try {
+    rhythmState = rhythm.hydrate(JSON.parse(fs.readFileSync(rhythmFile(), 'utf8')));
+  } catch {
+    rhythmState = rhythm.empty();
+  }
+}
+
+function saveRhythm() {
+  try {
+    fs.mkdirSync(app.getPath('userData'), { recursive: true });
+    fs.writeFileSync(rhythmFile(), JSON.stringify(rhythm.snapshot(rhythmState)), 'utf8');
+  } catch (err) {
+    console.warn('[rhythm] save failed', err?.message || err);
+  }
+}
+
+function recordRhythmHit() {
+  if (!isOn('rhythm', 'enabled', true)) return;
+  rhythmState = rhythm.record(rhythmState);
+  saveRhythm();
+}
+
+/* X8：PET_SNAPSHOT=memory 时把召回解释打到日志（零副作用）。 */
+function dumpMemorySnapshot(query = '') {
+  const cfg = loadConfig();
+  const facts = memory.recall(query || '记得', {
+    injectMax: cfg.memory?.injectMax,
+    forceExpand: true
+  });
+  const line = memory.formatMemoryLine(facts, cfg.memory?.injectChars);
+  const rows = facts.map((f) => ({
+    kind: f.kind,
+    clarity: f.clarity || 'clear',
+    importance: f.importance,
+    hits: f.hits,
+    recallCount: f.recallCount,
+    text: String(f.text || '').slice(0, 40)
+  }));
+  console.log('[memory-snapshot]', JSON.stringify({
+    query: query || '(expand)',
+    count: rows.length,
+    line: line.slice(0, 200),
+    facts: rows
+  }, null, 2));
+  return { facts: rows, line };
+}
 
 function pushMoodSnapshot() {
   if (!isOn('appearance', 'mood')) return;
@@ -1970,11 +3052,15 @@ function moodTick() {
   moodTimer = null;
   if (isOn('appearance', 'mood')) {
     moodEngine.step(10, -1);
+    /* P5：日均采样 → 气质乘子 */
+    temperament.observe(moodEngine.axes);
+    setRateMul(temperament.rateMul());
     pushMoodSnapshot();
     const now = Date.now();
     if (now - moodSaveAt >= 60 * 1000) {
       moodSaveAt = now;
       moodEngine.save(moodFile());
+      saveTemperament();
     }
   }
   moodTimer = setTimeout(moodTick, 10 * 1000);
@@ -1984,11 +3070,16 @@ function stopMoodTimer() {
   if (moodTimer) { clearTimeout(moodTimer); moodTimer = null; }
 }
 
-/* 心境人话（进 prompt 用）。开关关 = 空串 = 调用方不注入（零侵入）。 */
+/* 心境人话（进 prompt 用）。开关关 = 空串 = 调用方不注入（零侵入）。
+ * P5：气质慢层提示拼在后面（仍不进 persona 正文）。 */
 function moodLine() {
   if (!isOn('appearance', 'mood')) return '';
   const line = moodEngine.promptLine();
-  return line ? `（她此刻的心境，用来把握语气，别复述给用户：${line}。）` : '';
+  const temper = temperament.promptHint();
+  const bits = [line, temper].filter(Boolean);
+  return bits.length
+    ? `（她此刻的心境，用来把握语气，别复述给用户：${bits.join('；')}。）`
+    : '';
 }
 
 /* 长期记忆注入行。从本轮 messages 里取最后一条 user 做召回 query。 */
@@ -2045,30 +3136,101 @@ function rememberAfterTurn(messages, assistantText) {
   });
 }
 
-/* 工作状态镜像（DSH 桌宠长处）：thinking / working / success / error / idle。
+/* 工作状态镜像（DSH 桌宠长处）：thinking / working / success / error / idle / attention。
+ * W44：档位表见 work-cues.WORK_STATUS（索引即档位，只可追加）。
  * 渲染层按 profiles.motionSlots 播动作 + 切表情；status 气泡低优先级不抢对话。 */
 let workPhase = 'idle';
 let workChunkSeen = false;
 
+/* W29：Agent JSONL 尾读。默认关；失败静默。 */
+let agentLinkTimer = null;
+/** @type {Map<string, { path: string, offset: number, pending: string }>} */
+const agentCursors = new Map();
+let agentLastPhase = '';
+
+function agentLinkDir() {
+  const d = String(loadConfig().agentLink?.dir || '').trim();
+  if (d) return d;
+  try { return path.join(app.getPath('userData'), 'agent-events'); } catch { return ''; }
+}
+
+function stopAgentLinkWatch() {
+  if (agentLinkTimer) { clearTimeout(agentLinkTimer); agentLinkTimer = null; }
+}
+
+function tickAgentLink() {
+  agentLinkTimer = null;
+  const cfg = loadConfig();
+  if (!cfg.agentLink?.enabled) return;
+  const dir = agentLinkDir();
+  if (!dir) return;
+  let files = [];
+  try { files = listAgentFiles(dir); } catch { files = []; }
+  for (const file of files) {
+    let prev = agentCursors.get(file);
+    if (!prev) prev = { path: file, offset: 0, pending: '' };
+    let out;
+    try { out = readAgentTail(prev); } catch { continue; }
+    agentCursors.set(file, out.cursor);
+    for (const ev of out.events) {
+      const phase = stateToWorkPhase(ev.state);
+      if (phase === agentLastPhase && phase !== 'working') continue;
+      agentLastPhase = phase;
+      emitWorkState(phase, { source: 'agent-link', agent: ev.agent, tool: ev.tool });
+    }
+  }
+  const ms = Math.max(500, Math.min(30000, Number(cfg.agentLink?.pollMs) || 2000));
+  agentLinkTimer = setTimeout(tickAgentLink, ms);
+  if (typeof agentLinkTimer.unref === 'function') agentLinkTimer.unref();
+}
+
+function refreshAgentLinkWatch() {
+  stopAgentLinkWatch();
+  if (!isOn('agentLink', 'enabled', false)) return;
+  tickAgentLink();
+}
+
 function emitWorkState(phase, extra = {}) {
   if (!isOn('interaction', 'workState', true)) return;
+  /* W44：未知 phase 仍放行 idle；已知档用索引表（attention 等新档只追加）。 */
+  const idx = workStatusIndex(phase);
+  if (phase !== 'idle' && idx < 0 && phase !== 'sleeping') return;
   if (phase === workPhase && phase !== 'working') return;
   workPhase = phase;
   if (phase === 'thinking') workChunkSeen = false;
+  const personaId = loadConfig().personaId || 'default';
+  const emo = signatureEmo(personaId, phase) || extra.emotion || '';
+  /* W12：内侧总线先发；IPC 仍是对外唯一通道。 */
+  petEvents.emit('work-state', { phase, emotion: emo, index: idx, ...extra });
+  /* X7：工作事件轻推 mood（不抢 setEmotion，只动轴；working 不灌，避免每轮对话都困）。 */
   try {
-    mainWindow?.webContents.send('pet:work-state', { phase, ...extra });
+    if (phase === 'success') {
+      moodEngine.onAssistantEmotion('happy');
+      pushMoodSnapshot();
+    } else if (phase === 'error') {
+      moodEngine.onAssistantEmotion('serious');
+      pushMoodSnapshot();
+    } else if (phase === 'attention') {
+      moodEngine.onAssistantEmotion('surprised');
+      pushMoodSnapshot();
+    }
+  } catch { /* ignore */ }
+  try {
+    mainWindow?.webContents.send('pet:work-state', { ...extra, phase, emotion: emo, index: idx });
   } catch { /* ignore */ }
   /* status 气泡：只在**没吐过正文**时露短句。
    * ⚠️ 以前在 endStream 之后无条件 showStatus —— stream 已释放，arbiter 放行，
    *    「搞定啦 ✓」会 bubble:full 盖掉刚流完的整段回复（用户报：发什么都只回搞定啦）。
    *    有 chunk 就留给 endStream 的对话气泡；没吐字（静默/空回）才露短句。
-   *    报错仍必达，且要带上真实原因（响应中断 / 连接失败…），别只写「出了点问题」。 */
+   *    报错仍必达，且要带上真实原因（响应中断 / 连接失败…），别只写「出了点问题」。
+   * P4：台词按当前人格招牌池抽。 */
   if (phase === 'success') {
-    if (!workChunkSeen) bubble.showStatus('搞定啦 ✓', 2200);
+    if (!workChunkSeen) bubble.showStatus(workLine('success', Math.random, personaId), 2200);
   } else if (phase === 'error') {
     const raw = typeof extra.message === 'string' ? extra.message.trim() : '';
-    /* 气泡一行装不下长 HTTP 正文；截短后仍能认出「响应中断」「连接失败」。 */
-    const msg = (raw ? raw.replace(/\s+/g, ' ').slice(0, 72) : '') || '出了点问题…';
+    /* 气泡一行装不下长 HTTP 正文；截短后仍能认出「响应中断」「连接失败」。
+     * 没有具体原因时从台词池抽一句，避免万年「出了点问题」。 */
+    const msg = (raw ? raw.replace(/\s+/g, ' ').slice(0, 72) : '') || workLine('error', Math.random, personaId);
     bubble.showStatus(msg, Math.max(2800, Math.min(6000, 2000 + msg.length * 40)));
   }
 }
@@ -2099,8 +3261,12 @@ function emitChatEmotion(e) {
 }
 
 function emitChatThink(t) {
-  try { mainWindow?.webContents.send('chat:think', t); } catch { /* ignore */ }
-  bubble.appendThink(t);
+  /* G8：关 showThink 时仍剥标签，只是不画内心 OS。 */
+  if (!isOn('chat', 'showThink', true)) return;
+  const shown = String(t || '').trim();
+  if (!shown) return;
+  try { mainWindow?.webContents.send('chat:think', shown); } catch { /* ignore */ }
+  bubble.appendThink(shown);
 }
 
 /* 逐字发出去，和真实的流式回复走同一条通道，渲染层不用区分。 */
@@ -2113,6 +3279,46 @@ async function emitLocal(text, emotion = 'calm') {
   }
   filter.end();
   return { ok: true, local: true };
+}
+
+/* G23：藏窗截主屏 → 多模态一句。W15 口令与托盘「看一眼」共用。
+ * W1：永久开关 OR 未过期限时授权。 */
+async function runGlance(opts = {}) {
+  const permanent = isOn('interaction', 'glance', false);
+  if (!isGlanceAllowed(permanent)) {
+    return emitLocal('「看一眼」还没授权，托盘里开永久开关或限时授权后再叫我。', 'think');
+  }
+  const cfg = loadConfig();
+  if (!isLlmReady(cfg.llm)) {
+    return emitLocal('模型还没测通，托盘「测试连接」过了再叫我看屏。', 'think');
+  }
+  toast('我看一下…');
+  const shot = await captureGlanceScreen({
+    hidePet: () => {
+      try { bubble.hideNow?.(); } catch { /* ignore */ }
+      try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide(); } catch { /* ignore */ }
+    },
+    showPet: () => {
+      if (process.env.PET_HIDDEN === '1') return;
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+      } catch { /* ignore */ }
+    },
+    getDisplay: () => {
+      try { return screen.getPrimaryDisplay(); } catch { return null; }
+    },
+    getSources: (o) => desktopCapturer.getSources(o)
+  });
+  if (!shot.ok || !shot.dataUrl) {
+    console.warn('[glance] capture fail:', shot.error || 'unknown');
+    return emitLocal('这回没截到屏，等会儿再叫我看。', 'shy');
+  }
+  const system = resolvePersona(cfg) +
+    '\n\n【本轮·看屏】只描述可见的公开界面概况；不念密码、聊天全文、证件号；一两句口语即可。';
+  return chatStream([
+    { role: 'system', content: system },
+    buildGlanceUserMessage(shot.dataUrl)
+  ], opts);
 }
 
 async function tryLocalIntent(text) {
@@ -2278,11 +3484,205 @@ function proactiveMoodHint(emotion) {
   return PROACTIVE_MOOD_HINT[emotion] || PROACTIVE_MOOD_HINT.calm;
 }
 
+/* G2：前台进程名进主动搭话语境（全屏监视开着才有样本；过期 90s 丢弃）。
+ * 只给一句短提示，不抄窗口标题（隐私）。 */
+function foregroundHint() {
+  if (!isOn('quiet', 'enabled')) return '';
+  const fg = getForeground();
+  if (!fg?.name) return '';
+  if (Date.now() - (fg.at || 0) > 90 * 1000) return '';
+  return `主人电脑前台在跑「${fg.name}」，别装作不知道，也别念进程名。`;
+}
+
+/* X5：切应用侦测（对比上次主动搭话时记下的前台名）。 */
+let lastProactiveFg = '';
+
+async function edgeCueHint() {
+  if (!isOn('proactive', 'edgeCues', false)) return { hint: '', preferSilent: false };
+  let cpu = null;
+  let battery = null;
+  try {
+    const s = await collectStats(['battery']);
+    cpu = typeof s?.cpu === 'number' ? s.cpu : null;
+    battery = s?.battery || null;
+  } catch { /* 取不到就不硬塞线索 */ }
+  const fg = getForeground();
+  const name = fg?.name && Date.now() - (fg.at || 0) <= 90 * 1000 ? fg.name : '';
+  const fgSwitched = !!(name && lastProactiveFg && name !== lastProactiveFg);
+  if (name) lastProactiveFg = name;
+  return edgeCueFrom({ cpu, battery, fgSwitched });
+}
+
+/* G14：截屏隐藏（setContentProtection）+ 短暂藏窗。 */
+function applyHideFromCapture(on) {
+  try { mainWindow?.setContentProtection?.(!!on); } catch { /* ignore */ }
+  try { bubble.setContentProtection?.(!!on); } catch { /* ignore */ }
+}
+
+function hidePetBriefly(ms = 3000) {
+  const w = mainWindow;
+  if (!w || w.isDestroyed()) return;
+  const wasVisible = w.isVisible();
+  try { bubble.hideNow?.(); } catch { /* ignore */ }
+  try { w.hide(); } catch { /* ignore */ }
+  toast('已藏起，截完会自己回来');
+  setTimeout(() => {
+    if (!w || w.isDestroyed()) return;
+    if (wasVisible && process.env.PET_HIDDEN !== '1') {
+      try { w.show(); } catch { /* ignore */ }
+    }
+  }, Math.max(500, Number(ms) || 3000));
+}
+
+/* P7：视角蒸馏小窗 → personaParts。多字段同一套路。 */
+function promptPersonaDistill() {
+  return new Promise((resolve) => {
+    const fields = DISTILL_FIELDS;
+    const w = new BrowserWindow({
+      width: 420,
+      height: 420,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      frame: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
+      modal: !!mainWindow && !mainWindow.isDestroyed(),
+      show: false,
+      backgroundColor: '#1e1e22',
+      webPreferences: { contextIsolation: true, nodeIntegration: false }
+    });
+    const inputs = fields.map((f) =>
+      `<label>${f.label}<input name="${f.key}" placeholder="${f.placeholder || ''}" maxlength="200"></label>`
+    ).join('');
+    const html = `<!doctype html><meta charset="utf-8"><style>
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{background:#1e1e22;color:#e8e8ea;font:13px/1.45 "Microsoft YaHei",system-ui,sans-serif;padding:16px 18px;user-select:none}
+      h2{font-size:13px;font-weight:500;margin-bottom:6px}
+      p{font-size:12px;color:#9a9aa0;margin-bottom:10px}
+      label{display:block;font-size:12px;color:#b8b8bc;margin:8px 0 4px}
+      input{width:100%;height:30px;padding:0 8px;border-radius:6px;border:1px solid #3a3a40;background:#2a2a30;color:#fff;font:13px/1 inherit;outline:none}
+      .row{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+      button{height:28px;padding:0 14px;border-radius:6px;border:1px solid #3a3a40;background:#2a2a30;color:#e8e8ea;font-size:13px;cursor:pointer}
+      button.primary{background:#4a6cf7;border-color:#4a6cf7;color:#fff}
+    </style>
+    <h2>视角蒸馏</h2>
+    <p>几句短答，生成人设分项草稿（不碰表情协议槽）。</p>
+    ${inputs}
+    <div class="row"><button id="c">取消</button><button class="primary" id="k">生成</button></div>
+    <script>
+      const send = (v) => { window.__distill = v; };
+      document.getElementById('c').onclick = () => send(null);
+      document.getElementById('k').onclick = () => {
+        const o = {};
+        for (const el of document.querySelectorAll('input[name]')) o[el.name] = el.value.trim();
+        send(o);
+      };
+      window.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') send(null); });
+    <\/script>`;
+    w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    w.once('ready-to-show', () => w.show());
+    let finished = false;
+    const finish = async (val) => {
+      if (finished) return;
+      finished = true;
+      clearInterval(timer);
+      if (!w.isDestroyed()) w.destroy();
+      if (!val) { resolve(false); return; }
+      const draft = distillPersonaParts(val);
+      if (!draft.ok) { toast('写点什么再生成'); resolve(false); return; }
+      const patch = { persona: '', personaParts: draft.parts };
+      if (draft.name) patch.name = draft.name;
+      patchConfig(null, patch);
+      toast(draft.name ? `已生成「${draft.name}」人设草稿` : '已生成人设草稿');
+      resolve(true);
+    };
+    const timer = setInterval(async () => {
+      if (w.isDestroyed()) { finish(undefined); return; }
+      try {
+        const v = await w.webContents.executeJavaScript('window.__distill ?? undefined');
+        if (v !== undefined) finish(v === null ? undefined : v);
+      } catch { /* loading */ }
+    }, 120);
+    w.on('closed', () => { if (!finished) { finished = true; clearInterval(timer); resolve(false); } });
+  });
+}
+
+/* P8：导入 Character Card JSON → personaParts 草稿。 */
+async function importCharacterCard() {
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    title: '导入 Character Card（V2/V3 JSON）',
+    filters: [{ name: 'Character Card', extensions: ['json'] }],
+    properties: ['openFile']
+  });
+  if (canceled || !filePaths?.[0]) return false;
+  let raw;
+  try { raw = fs.readFileSync(filePaths[0], 'utf8'); }
+  catch (err) {
+    toast('读不了文件：' + (err?.message || err));
+    return false;
+  }
+  const draft = cardToPersonaDraft(raw);
+  if (!draft.ok) {
+    toast('不像角色卡：' + (draft.error || '无法解析'));
+    return false;
+  }
+  const patch = { persona: '', personaParts: draft.parts || {} };
+  if (draft.name) patch.name = draft.name;
+  patchConfig(null, patch);
+  toast(draft.name ? `已导入「${draft.name}」人设草稿` : '已导入人设草稿');
+  return true;
+}
+
+/* G13：导出聊天记录。读 history 文件 → 弹保存框。 */
+async function exportChatHistory(format) {
+  const file = path.join(app.getPath('userData'), 'chat-history.json');
+  let arr = [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    arr = Array.isArray(raw) ? raw : [];
+  } catch {
+    arr = [];
+  }
+  if (!arr.length) {
+    toast('还没有可导出的对话');
+    return false;
+  }
+  const name = resolveName(loadConfig());
+  const stamp = new Date().toISOString().slice(0, 10);
+  const isMd = format === 'md';
+  const { canceled, filePath } = await dialog.showSaveDialog({
+    title: isMd ? '导出为 Markdown' : '导出为 JSON',
+    defaultPath: path.join(app.getPath('documents'), `阿岩对话-${stamp}.${isMd ? 'md' : 'json'}`),
+    filters: isMd
+      ? [{ name: 'Markdown', extensions: ['md'] }]
+      : [{ name: 'JSON', extensions: ['json'] }]
+  });
+  if (canceled || !filePath) return false;
+  const meta = { name, exportedAt: new Date().toISOString() };
+  const body = isMd ? historyToMarkdown(arr, meta) : historyToJson(arr, meta);
+  try {
+    fs.writeFileSync(filePath, body, 'utf8');
+    toast(`已导出 ${arr.length} 条`);
+    return true;
+  } catch (err) {
+    toast('导出失败：' + (err?.message || err));
+    return false;
+  }
+}
+
 /* 把 llm.js 的 streamLLM 接到窗口上。
  * 依赖注入的代价就是这里多一层胶水 —— 但换来 llm.js 完全不碰窗口，
  * 可以脱离 Electron 单独 require 与测试。 */
 function chatStream(messages, opts = {}) {
   const cfg = loadConfig();
+  /* W16：requireTested 打开时，没绿标就走离线话术（不当真连上）。 */
+  const llmOpts = { ...cfg.llm };
+  if (cfg.llm?.requireTested && !isLlmReady(cfg.llm)) {
+    llmOpts.apiKey = '';
+    llmOpts.baseUrl = '';
+  }
   /* 上下文都插进第二位（紧跟人设那条 system）。
    * ⚠️ 都是 splice(1, 0)，**后套的在前**。最外层是记忆 → 最贴人设：
    *    [人设, 记忆, 心境, 媒体, 复读提示, ...历史]。
@@ -2300,7 +3700,7 @@ function chatStream(messages, opts = {}) {
   /* 累积说出口的正文，给回合后记忆抽取用（streamLLM 返回值不含全文）。 */
   let spoken = '';
   return streamLLM(withContext, {
-    ...cfg.llm,
+    ...llmOpts,
     send: (t) => { spoken += t; emitChatChunk(t); },
     sendEmotion: emitChatEmotion,
     sendThink: emitChatThink,
@@ -2312,6 +3712,18 @@ function chatStream(messages, opts = {}) {
      * 日志里频繁出现就说明该把禁用语写得更狠，或者升级成"边收边扣"的硬拦。 */
     if (res && Array.isArray(res.tone) && res.tone.length) {
       console.warn('[chat] 助手腔命中（提示词没管住）:', res.tone.join(' / '));
+    }
+    /* G9：输出侧人设护栏（纯判定；流式已出口，失败只记日志 + 轻 toast）。 */
+    if (res?.ok) {
+      const g = checkPersonaOutput(spoken, {
+        level: cfg.chat?.personaGuard,
+        silent: !!res.silent
+      });
+      res.guard = g;
+      if (!g.pass) {
+        console.warn('[chat] persona-guard fail:', g.reason);
+        try { toast('这句有点不像她（人设护栏）'); } catch { /* ignore */ }
+      }
     }
     if (res?.ok && !res.silent) {
       rememberAfterTurn(messages, spoken);
@@ -2327,8 +3739,28 @@ function chatStream(messages, opts = {}) {
 function registerIpc() {
   ipcMain.on('pet:set-ignore-mouse', (_e, ignore) => {
     if (!mainWindow) return;
+    /* W6 渐隐进行中：整窗强制穿透，渲染层再发 false 也别顶回去。 */
+    if (hoverFadeActive) {
+      mainWindow.setIgnoreMouseEvents(true, { forward: true });
+      return;
+    }
     if (ignore) mainWindow.setIgnoreMouseEvents(true, { forward: true });
     else mainWindow.setIgnoreMouseEvents(false);
+  });
+
+  /* W6：指针在她身上停一会儿 → 淡 + 穿透；离开 / 关开关 → 恢复。 */
+  ipcMain.on('pet:hover-fade', (_e, on) => {
+    if (!loadConfig().appearance?.hoverFade) on = false;
+    hoverFadeActive = !!on;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const a = loadConfig().appearance || {};
+    const baseOp = clampOpacity(a.opacity);
+    const opacity = hoverFadeActive ? Math.min(baseOp, 0.32) : baseOp;
+    try { mainWindow.setOpacity(opacity); } catch { /* ignore */ }
+    if (hoverFadeActive) {
+      try { mainWindow.setIgnoreMouseEvents(true, { forward: true }); } catch { /* ignore */ }
+    }
+    /* 熄掉时不强制 setIgnoreMouse(false) —— 下一帧命中测试会按实际重申。 */
   });
 
   ipcMain.on('pet:drag-move', (_e, { dx, dy }) => {
@@ -2499,7 +3931,21 @@ function registerIpc() {
         label: '设置',
         submenu: [
           { label: `重命名（当前：${resolveName(cfg)}）`, click: () => { promptRename(); } },
-          { label: `角色设定${personaStateLabel(cfg)}`, click: () => { promptPersona(); } },
+          {
+            label: `角色设定${personaStateLabel(cfg)}`,
+            submenu: [
+              { label: '自定义编辑…', click: () => { promptPersona(); } },
+              { type: 'separator' },
+              ...PERSONA_PRESETS.map((p) => ({
+                label: p.label,
+                click: () => { applyPersonaPreset(p.id); }
+              })),
+              { type: 'separator' },
+              { label: '性格微调', submenu: personalitySubmenu(cfg) },
+              { type: 'separator' },
+              oneshotSubmenu()
+            ]
+          },
           { type: 'separator' },
           { label: '检查更新', click: () => { checkForUpdates({ manual: true }); } },
           { label: '打开配置文件', click: openCfg }
@@ -2778,16 +4224,32 @@ function registerIpc() {
       proactiveAbort.abort();
       proactiveAbort = null;
     }
+    /* G3：新一轮也要掐掉上一轮普通对话流，否则打断后旧回复还在往气泡里灌。 */
+    if (chatAbort) {
+      chatAbort.abort();
+      chatAbort = null;
+    }
+    const ac = new AbortController();
+    chatAbort = ac;
     /* 用户开口 = 最强意义上的「被搭理」：想念轴归零（mood.js）。 */
     moodEngine.onUserChat();
     pushMoodSnapshot();
+    recordRhythmHit();
     emitWorkState('thinking');
     // 悬浮气泡：这一轮对话从现在开始显示（浮窗关着时是 no-op）
     bubble.beginStream();
     try {
-      // 本地能答的先答（系统状态 / 定时提醒 / 番茄钟），答不了的才交给对话后端
+      // 本地能答的先答（系统状态 / 定时提醒 / 番茄钟 / 看屏口令），答不了的才交给对话后端
       const last = [...(messages || [])].reverse().find((m) => m && m.role === 'user');
       try {
+        /* W15：短口令「看看 / 看一眼」→ G23 看屏通路（不进普通 LLM 文本轮）。 */
+        if (isGlancePhrase(typeof last?.content === 'string' ? last.content : '')) {
+          const g = await runGlance({ signal: ac.signal });
+          bubble.endStream();
+          if (g?.ok === false) emitWorkState('error', { message: g.error || '看屏失败' });
+          else emitWorkState('success');
+          return g;
+        }
         const local = await tryLocalIntent(last?.content);
         if (local) {
           bubble.endStream();
@@ -2802,7 +4264,21 @@ function registerIpc() {
         console.warn('[intent] 本地意图处理失败:', String(err?.message || err));
       }
       const cfg = loadConfig();
-      const res = await chatStream([{ role: 'system', content: resolvePersona(cfg) }, ...messages]);
+      /* G6：药盒指令拼进本轮 system，consume 后即焚。 */
+      let system = resolvePersona(cfg);
+      const pill = oneshot.consume();
+      if (pill) {
+        system = `${system}\n\n【仅本轮】${pill}`;
+        try { refreshTrayMenu(); } catch { /* ignore */ }
+      }
+      /* P6：专业模态 —— 只追加语气约束，不改人设正文。 */
+      if (cfg.chat?.mode === 'work') {
+        system += '\n\n【本轮模态·专业】先结论后细节，语气克制，少情绪词与客套。';
+      }
+      const res = await chatStream(
+        [{ role: 'system', content: system }, ...messages],
+        { signal: ac.signal }
+      );
       if (res?.ok) {
         bubble.endStream();
         emitWorkState('success');
@@ -2815,6 +4291,35 @@ function registerIpc() {
       bubble.abortStream();
       emitWorkState('error', { message: String(err?.message || err) });
       throw err;
+    } finally {
+      if (chatAbort === ac) chatAbort = null;
+    }
+  });
+
+  /* X3：拖文件「吃下」→ 长期记忆。只收短文本；二进制 / 过大直接拒。 */
+  ipcMain.handle('memory:eat-file', (_e, payload) => {
+    if (!isOn('memory', 'enabled', true)) {
+      toast('长期记忆关着，吃不下（托盘「功能开关」里开）');
+      return { ok: false, error: 'memory-off' };
+    }
+    const name = String(payload?.name || '文件').slice(0, 64);
+    const text = String(payload?.text || '').trim();
+    if (!text || text.length < 2) {
+      toast(`「${name}」嚼不动（只要短文本）`);
+      return { ok: false, error: 'empty' };
+    }
+    const body = text.slice(0, 400);
+    const factText = `主人给过文件「${name}」：${body}`;
+    try {
+      const r = memory.upsertFacts([{ kind: 'other', text: factText }], {
+        maxFacts: loadConfig().memory?.maxFacts
+      });
+      toast(r.added || r.updated ? `吃掉了「${name}」` : `「${name}」好像记过了`);
+      emitWorkState('success');
+      return { ok: true, added: r.added, updated: r.updated };
+    } catch (err) {
+      toast('没吃下去：' + (err?.message || err));
+      return { ok: false, error: String(err?.message || err) };
     }
   });
 
@@ -2823,9 +4328,21 @@ function registerIpc() {
     /* usable 是**派生**字段，别写进配置：判定规则只有一处（llm-providers.isUsable），
      * 渲染层拿到布尔值直接用 —— 让渲染层自己判就会多出第二份"什么算能聊"的定义，
      * 一旦本地免 key 那条规则改动，两边必然不同步。 */
+    const mode = normalizeMode(cfg.presence?.mode);
     return {
       ...cfg,
-      llm: { ...cfg.llm, apiKey: cfg.llm.apiKey ? '***' : '', usable: isUsable(cfg.llm) }
+      llm: {
+        ...cfg.llm,
+        apiKey: cfg.llm.apiKey ? '***' : '',
+        usable: isUsable(cfg.llm),
+        ready: isLlmReady(cfg.llm)
+      },
+      /* ocean 派生乘子（P3）：渲染层只读乘子，公式唯一真相在 ocean.js。 */
+      ocean: deriveOcean(cfg.personality),
+      /* X2 派生：陪伴档忽略安静时段 + idle 乘子。 */
+      presence: { ...(cfg.presence || {}), mode },
+      presenceIgnoreQuiet: ignoreQuietHours(mode),
+      presenceMul: presenceIdleMul(mode)
     };
   });
 
@@ -2884,11 +4401,43 @@ function registerIpc() {
     const silentHint = allowSilent
       ? '如果实在没什么自然可说的，就只回一个 [silent]，不用硬找话说。'
       : '';
+    const fgHint = foregroundHint();
+    const edge = await edgeCueHint();
+    const edgeSilent = edge.preferSilent && allowSilent
+      ? '（边缘线索偏打扰，优先 [silent]，有把握再开口。）'
+      : '';
+    /* G7 / W27：信息增益 —— 具名 reason；没话找话直接当沉默返回（不烧模型）。 */
+    const gainCtx = {
+      history: past,
+      edgeHint: edge.hint,
+      moodLine: moodEngine.promptLine(),
+      fgHint,
+      idleMinutes: Number(c.idleMinutes)
+    };
+    const gain = shouldProactiveSpeak(gainCtx);
+    if (!gain.speak) {
+      console.log('[chat] proactive skip（info-gain:', gain.reason + ', head=' + gain.head + '）');
+      return { ok: true, silent: true, skipped: gain.reason, reason: gain.reason, head: gain.head };
+    }
+    /* X6：作息门 —— 仅当用户显式打开 gateProactive 时拦非活跃窗。 */
+    if (isOn('rhythm', 'enabled', true) && isOn('rhythm', 'gateProactive', false)
+        && !rhythm.isActiveWindow(rhythmState)) {
+      console.log('[chat] proactive skip（rhythm: off-hours）');
+      return { ok: true, silent: true, skipped: 'rhythm-off-hours', reason: 'rhythm-off-hours', head: 'none' };
+    }
+
+    /* W26：先记账再生成（pending → delivered / interrupted / silent）。 */
+    let book = null;
+    if (cfg.proactive?.bookFirst !== false) {
+      book = bookDelivery({ reason: gain.reason, head: gain.head, preferSilent: gain.preferSilent });
+    }
 
     const ac = new AbortController();
     proactiveAbort = ac;
     bubble.beginStream();
     try {
+      const gainSilent = gain.preferSilent && allowSilent
+        ? '（信息不多，优先 [silent]。）' : '';
       const res = await chatStream([
         { role: 'system', content: resolvePersona(cfg) },
         ...past,
@@ -2897,20 +4446,39 @@ function registerIpc() {
           content: '（主人已经有一阵子没搭理你了。主动开个话头，一句话就够，' +
                    '别问"在忙吗"这种客套，按你的性子随口说点什么。' +
                    (silentHint ? silentHint : '') +
-                   proactiveMoodHint(c.emotion) + '）'
+                   proactiveMoodHint(c.emotion) +
+                   (fgHint || '') +
+                   (edge.hint || '') +
+                   edgeSilent +
+                   gainSilent +
+                   '）'
         }
       ], { signal: ac.signal });
       if (res?.ok && res.silent) {
         /* 她选择沉默：等待态照常收掉，但渲染层不 push 历史、不念、
          * 也不记"没被搭理"（她根本没开口）。 */
         bubble.endStream();
-        console.log('[chat] proactive silent（她选择这会儿不说）');
-        return { ok: true, silent: true };
+        if (book) settleDelivery(book.id, 'silent', { reason: gain.reason });
+        console.log('[chat] proactive silent（她选择这会儿不说）', gain.reason);
+        return { ok: true, silent: true, reason: gain.reason, head: gain.head };
       }
-      if (res?.ok) bubble.endStream(); else bubble.abortStream();
-      return res;
+      if (res?.ok) {
+        bubble.endStream();
+        if (book) settleDelivery(book.id, 'delivered', { reason: gain.reason });
+      } else {
+        bubble.abortStream();
+        if (book) settleDelivery(book.id, 'error', { reason: gain.reason, error: res?.error });
+      }
+      return { ...res, reason: gain.reason, head: gain.head };
     } catch (err) {
       bubble.abortStream();
+      if (book) {
+        const interrupted = ac.signal.aborted || String(err?.message || '').includes('abort');
+        settleDelivery(book.id, interrupted ? 'interrupted' : 'error', {
+          reason: gain.reason,
+          error: String(err?.message || err).slice(0, 160)
+        });
+      }
       throw err;
     } finally {
       /* 只有还是自己那把锁才清 —— 期间 chat:send 可能已经 abort 并置
@@ -2919,11 +4487,36 @@ function registerIpc() {
     }
   });
 
+  /* W27：零副作用 preview —— 只返回具名 reason，不记账不调模型。 */
+  ipcMain.handle('chat:proactive-preview', (_e, ctx) => {
+    const c = (ctx && typeof ctx === 'object') ? ctx : {};
+    const past = (Array.isArray(c.history) ? c.history : [])
+      .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+      .slice(-6)
+      .map((m) => ({ role: m.role, content: m.content.slice(0, 500) }));
+    return previewProactive({
+      history: past,
+      edgeHint: String(c.edgeHint || ''),
+      moodLine: String(c.moodLine || ''),
+      fgHint: String(c.fgHint || ''),
+      idleMinutes: Number(c.idleMinutes)
+    });
+  });
+
   /* say() 类整段播报进浮窗：渲染层的提醒 / 番茄钟 / 离线搭话走这两条 */
   ipcMain.on('pet:float-say', (_e, p) => {
     const o = typeof p === 'string' ? { text: p } : (p && typeof p === 'object' ? p : {});
     const ms = Number(o.ms);
     bubble.showFull(String(o.text || ''), Number.isFinite(ms) && ms > 0 ? ms : undefined);
+  });
+  /* 渲染层短提示（录音状态 / 拖文件闸门…）→ 气泡 status，与主进程 toast 同路。 */
+  ipcMain.on('pet:float-status', (_e, p) => {
+    const o = typeof p === 'string' ? { text: p } : (p && typeof p === 'object' ? p : {});
+    const ms = Number(o.ms);
+    bubble.showStatus(
+      String(o.text || ''),
+      Number.isFinite(ms) && ms > 0 ? ms : undefined
+    );
   });
   ipcMain.on('pet:float-hide', () => bubble.hideNow());
   /* 渲染层请求实量人物头顶 y（模型挂载 / 布局变化时），气泡底边锚头顶用 */
@@ -2952,6 +4545,7 @@ function registerIpc() {
     refreshWanderConfig();
     refreshQuietWatcher();
     refreshTTS();
+    refreshHotkeys();
     refreshMediaWatcher();
     refreshTrayMenu();
     try { mainWindow?.webContents.send('config:changed'); } catch { /* ignore */ }
@@ -3137,9 +4731,25 @@ if (!gotLock) {
       }));
     } catch { /* 取不到就算了 */ }
 
+    configureLedger(app.getPath('userData'));  // W26 主动账本
+    configureGlanceGrant({
+      onChange: ({ reason, remainingMs }) => {
+        if (reason === 'expired') toast('看屏限时授权已到期，已自动收回');
+        else if (reason === 'grant') {
+          const m = Math.max(1, Math.ceil(remainingMs / 60000));
+          try { bubble.showStatus?.(`看屏授权 ${m} 分钟`, 2200); } catch { /* ignore */ }
+        }
+        try { refreshTrayMenu(); } catch { /* ignore */ }
+        try {
+          mainWindow?.webContents.send('pet:glance-grant', grantSnapshot());
+        } catch { /* ignore */ }
+      }
+    });
     createWindow();
     createTray();
     startCursorPolling();
+    refreshTopWatchdog();   // W30：explorer / DPI / 休眠后重申置顶 + skipTaskbar
+    refreshAgentLinkWatch();  // W29：默认关
 
     /* 锁屏 / 解锁 → 推给渲染层当主动搭话的闸门（第 9 轮第一档）。
      * 对着锁屏说话没有任何场景；解锁 = 主人回来了，渲染层会自己重排闲置。
@@ -3148,11 +4758,13 @@ if (!gotLock) {
     try {
       powerMonitor.on('lock-screen', () => {
         screenLocked = true;
+        try { onReminderScreenLock(); } catch { /* ignore */ }
         console.log('[lock] screen locked');
         try { mainWindow?.webContents.send('pet:screen-locked', { locked: true }); } catch { /* ignore */ }
       });
       powerMonitor.on('unlock-screen', () => {
         screenLocked = false;
+        try { onReminderScreenUnlock(); } catch { /* ignore */ }
         console.log('[lock] screen unlocked');
         try { mainWindow?.webContents.send('pet:screen-locked', { locked: false }); } catch { /* ignore */ }
       });
@@ -3173,11 +4785,12 @@ if (!gotLock) {
       const resized = refreshWinSize();
       if (process.env.PET_WINSIZE_LOG) console.log('[winsize] displayChanged', JSON.stringify({ e, id: d?.id, area: d?.workArea, resized, SIZE: { ...SIZE }, t: Date.now() }));
       if (!mainWindow) return;
-      // 重定位也按窗口当前所在的那块屏算
-      const { workArea } = currentDisplay();
+      /* G27：display-added + multiScreenHop → 跳到**新屏**右下角；其余事件仍按原屏校正。 */
+      const hop = e === 'display-added' && !!loadConfig().motion?.multiScreenHop && d?.workArea;
+      const { workArea } = hop ? { workArea: d.workArea } : currentDisplay();
       let x;
       let y;
-      if (resized) {
+      if (hop || resized) {
         ({ x, y } = cornerPos(workArea, SIZE.w, SIZE.h, MARGIN));
       } else {
         ({ x, y } = getInitialBounds());
@@ -3187,21 +4800,37 @@ if (!gotLock) {
        * 不跟的话，家里那个坐标已经不属于任何屏幕，她一回位就会被拉到
        * 看不见的地方去（拔掉外接屏之后尤其明显）。 */
       setHome(x, y);
+      if (hop) toast('跳到新屏幕啦');
     };
-    screen.on('display-added', onDisplayChanged);
-    screen.on('display-removed', onDisplayChanged);
-    screen.on('display-metrics-changed', onDisplayChanged);
+    /* ⚠️ Electron 的 display-added 回调签名是 (event, display) ——
+     *    这里包一层把事件名传进去，方便 hop 只在「接入」时触发。 */
+    screen.on('display-added', (_ev, d) => onDisplayChanged('display-added', d));
+    screen.on('display-removed', (_ev, d) => onDisplayChanged('display-removed', d));
+    screen.on('display-metrics-changed', (_ev, d) => onDisplayChanged('display-metrics-changed', d));
 
     refreshStatsTimer();
     startIdleWatcher();
     refreshQuietWatcher();
     refreshTTS();
+    refreshHotkeys();
     refreshMediaWatcher();
 
     /* 心境层：读档（含离线补漂 + 久别重逢），然后 10 秒一步自调度。
      * 读档结果进日志 —— 坏档/首启这两种"不是错误但值得知道"的情况
      * loadAndDrift 自己会说，不在这里再猜一遍。 */
     console.log('[mood]', moodEngine.loadAndDrift(moodFile()));
+    loadTemperament();
+    loadRhythm();
+    applyHideFromCapture(!!loadConfig().appearance?.hideFromCapture);
+    try { memory.settleAndSave(); } catch (err) {
+      console.warn('[memory] settle failed', err?.message || err);
+    }
+    if (String(process.env.PET_SNAPSHOT || '') === 'memory') {
+      try { dumpMemorySnapshot(process.env.PET_MEMORY_Q || ''); } catch (err) {
+        console.warn('[memory-snapshot]', err?.message || err);
+      }
+    }
+    syncOceanFromConfig();
     moodTick();
     warnIfModelsMissing();
     initUpdater();
@@ -3306,6 +4935,7 @@ if (!gotLock) {
     wheel.dispose();        // 轮盘窗有轮询定时器，退出前必须停掉
     bubbleMenu.dispose();   // 泡泡菜单同理（技术储备不豁免：切过去也要能退干净）
     cardMenu.dispose();     // 卡片菜单（默认形态）—— 轮询 + 悬停定时器都得停
+    try { globalShortcut.unregisterAll(); } catch { /* ignore */ }
     /* 常驻的采样进程必须显式杀掉：Windows 上父进程退出**不会**带走子进程，
      * 留着它就是一个永远在跑的 powershell.exe。 */
     stopFullscreenWatch();

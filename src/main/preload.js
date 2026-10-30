@@ -5,7 +5,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 /* 主进程 → 渲染层可以订阅的事件白名单。
  * 做成白名单 + 通用 on()，是为了以后新增事件不用每次改 preload。 */
 const MAIN_EVENTS = [
-  'pet:toast',          // 操作反馈（改了大小 / 透明度时的小提示）
+  'pet:toast',          // 操作反馈兜底（仅 floatBubble 关时走主窗 #status）
+  'pet:emote',          // G18 托盘表情槽预览
+  'pet:stop-speak',     // G26 热键停朗读
   'pet:snapped',        // 吸附到屏幕边缘了
   'pet:noticed',        // 她"注意到"你在附近，这次不溜达了
   'pet:wander-start',   // 开始自己溜达
@@ -18,6 +20,8 @@ const MAIN_EVENTS = [
   'pet:screen-locked',  // 锁屏 / 解锁了（渲染层据此拦主动搭话）
   'pet:work-state',     // 对话工作状态（thinking/working/success/error）
   'pet:squash',         // 落地 / 甩抛 Q 弹挤压
+  'pet:tilt',           // X4 单摆倾角（弧度）
+  'pet:facing',         // X4 水平朝向 ±1
   'mood:snapshot',      // 心境层的四轴快照（表情偏置权重在里面，10s/事件后推）
   'monitor:stats'       // 系统状态悬浮显示的数据
 ];
@@ -26,6 +30,8 @@ const MAIN_EVENTS = [
 contextBridge.exposeInMainWorld('pet', {
   // 光标进入/离开角色本体时切换鼠标穿透
   setIgnoreMouse: (ignore) => ipcRenderer.send('pet:set-ignore-mouse', ignore),
+  /* W6：悬停渐隐穿透（淡 + 整窗 ignore；主进程压透明度） */
+  setHoverFade: (on) => ipcRenderer.send('pet:hover-fade', !!on),
 
   // 主进程按 30fps 轮询系统光标位置发过来，坐标是「相对窗口左上角」，
   // 和窗口内 mousemove 的 clientX/clientY 同一套 —— 这样鼠标移出窗口后
@@ -77,6 +83,8 @@ contextBridge.exposeInMainWorld('pet', {
   /* 主动搭话：闲置久了由主进程挑个话头。
    * 带上她此刻的情绪和最近几轮对话 —— 主进程按情绪挑话头，也让她接得上上文。 */
   proactive: (ctx) => ipcRenderer.invoke('chat:proactive', ctx),
+  /* W27：零副作用 preview（只返回 reason/head，不调模型） */
+  proactivePreview: (ctx) => ipcRenderer.invoke('chat:proactive-preview', ctx),
 
   /* ---- 媒体感知：主人此刻在听什么（歌名 / 歌手 / 播放状态） ----
    * 只在 media.enabled 开着时才有内容，否则恒为 null。 */
@@ -85,6 +93,8 @@ contextBridge.exposeInMainWorld('pet', {
   /* say() 类整段播报走悬浮气泡窗（chat.floatBubble 开启时）。
    * 主进程在浮窗关闭时会安全忽略这两条 —— 主窗内的 #bubble 照旧画。 */
   floatSay: (text, autoHideMs) => ipcRenderer.send('pet:float-say', { text, ms: autoHideMs }),
+  /* 短提示（status 级）：录音/拖文件等；浮窗开着时替代主窗 #status。 */
+  floatStatus: (text, autoHideMs) => ipcRenderer.send('pet:float-status', { text, ms: autoHideMs }),
   floatHide: () => ipcRenderer.send('pet:float-hide'),
   /* 请求主进程实量人物头顶 y（悬浮气泡的锚点用） */
   requestHeadMeasure: () => ipcRenderer.send('pet:head-measure'),
@@ -95,6 +105,9 @@ contextBridge.exposeInMainWorld('pet', {
 
   getConfig: () => ipcRenderer.invoke('config:get'),
   setConfig: (patch) => ipcRenderer.invoke('config:set', patch),
+
+  /* X3：把拖进来的文本文件「吃下」进长期记忆（主进程闸门 + 落盘）。 */
+  eatFile: (payload) => ipcRenderer.invoke('memory:eat-file', payload),
 
   /* ---- 外观：主进程改了缩放 / 透明度 / 模型后推过来 ---- */
   onAppearance: (cb) => ipcRenderer.on('appearance:changed', (_e, a) => cb(a)),

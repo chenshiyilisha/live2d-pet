@@ -178,13 +178,28 @@ const caretOn = () => chatOpt('floatBubbleCaret', true);
 const readTimeOn = () => chatOpt('floatBubbleReadTime', true);
 const moodBadgeOn = () => chatOpt('floatBubbleMoodBadge', true);
 
+/* OCEAN·A 放大/缩小读气泡时间（P3）。中性 1。refreshConfig / 每次算时读配置。 */
+function bubbleReadMul() {
+  try {
+    const { derive } = require('./ocean');
+    const p = require('./config').loadConfig().personality;
+    const m = derive(p).bubbleReadMul;
+    return Number.isFinite(m) && m > 0 ? Math.min(2, Math.max(0.5, m)) : 1;
+  } catch {
+    return 1;
+  }
+}
+
 /* 字数 → 停留多久（纯函数，回归直接断言，见 verify-bubble [K]）。
- * 短话取 READ_MS_MIN、长话取 READ_MS_MAX，中间线性插值。 */
-function readTimeMs(chars) {
+ * 短话取 READ_MS_MIN、长话取 READ_MS_MAX，中间线性插值。
+ * ⚠️ mul 默认 1：verify 与中性性格逐位一致；运行期乘 OCEAN·A。 */
+function readTimeMs(chars, mul = 1) {
   const c = Number(chars) || 0;
   const t = (c - READ_CHARS_MIN) / (READ_CHARS_MAX - READ_CHARS_MIN);
   const k = Math.max(0, Math.min(1, Number.isFinite(t) ? t : 0));
-  return Math.round(READ_MS_MIN + (READ_MS_MAX - READ_MS_MIN) * k);
+  const base = READ_MS_MIN + (READ_MS_MAX - READ_MS_MIN) * k;
+  const m = Number.isFinite(mul) && mul > 0 ? mul : 1;
+  return Math.round(base * m);
 }
 
 /* 尾巴尖 ↔ 头顶的间隙（纯函数，便于断言）。 */
@@ -442,6 +457,9 @@ function ensureWin() {
   });
   // 盖过主窗的置顶层（主窗是普通 alwaysOnTop；气泡悬浮其上，位置不重叠但保险）
   win.setAlwaysOnTop(true, 'screen-saver');
+  /* G15 / W20：气泡整窗穿透 —— 不抢下方点击；forward 保留 hover 类事件。 */
+  try { win.setIgnoreMouseEvents(true, { forward: true }); } catch { /* ignore */ }
+  try { win.setContentProtection(protectCapture); } catch { /* ignore */ }
   win.loadFile(path.join(__dirname, 'bubble.html'));
   win.on('closed', () => { win = null; });
   return win;
@@ -479,7 +497,7 @@ function reveal(w) {
  *    必须能一键退出，否则不喜欢的人只能改代码。 */
 function scheduleAutoHide() {
   clearHideTimer();
-  const ms = readTimeOn() ? readTimeMs(utterChars) : AUTO_HIDE_MS;
+  const ms = readTimeOn() ? readTimeMs(utterChars, bubbleReadMul()) : AUTO_HIDE_MS;
   hideTimer = setTimeout(() => { hideNow(); }, ms);
 }
 
@@ -697,6 +715,15 @@ function registerBubbleIpc() {
   ipcMain.on('bubble:height', (_e, h) => onContentHeight(h));
 }
 
+/* G14：与主窗同步截屏保护。窗还没建时记标志，ensureWin 时补上。 */
+let protectCapture = false;
+function setContentProtection(on) {
+  protectCapture = !!on;
+  try {
+    if (win && !win.isDestroyed()) win.setContentProtection(protectCapture);
+  } catch { /* ignore */ }
+}
+
 module.exports = {
   configureBubble,
   registerBubbleIpc,
@@ -714,6 +741,7 @@ module.exports = {
   refreshConfig,
   setQuiet,
   dispose,
+  setContentProtection,
   /* 测试与诊断用 */
   _state: () => ({
     alive: !!(win && !win.isDestroyed()),
@@ -730,7 +758,7 @@ module.exports = {
     /* 诊断：这一句已累计的正文字数、以及说完之后会停多久（D1）。
      * 只读，产品逻辑不依赖它 —— 停留时长是 scheduleAutoHide() 里算的。 */
     chars: utterChars,
-    hideMs: readTimeOn() ? readTimeMs(utterChars) : AUTO_HIDE_MS,
+    hideMs: readTimeOn() ? readTimeMs(utterChars, bubbleReadMul()) : AUTO_HIDE_MS,
     emotion: curEmotion,
     priority: arbiter.peek()
   }),

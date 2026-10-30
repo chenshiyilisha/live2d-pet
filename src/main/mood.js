@@ -71,6 +71,34 @@ const GAIN = {
   emoSleepyEnergy: -0.01
 };
 
+/* OCEAN·A（宜人）放大/缩小 softening（P3）。中性 1 = 与没这功能逐位一致。
+ * 主进程改性格档时 setPrideSoftMul；verify 可直接拨。 */
+let prideSoftMul = 1;
+function setPrideSoftMul(m) {
+  const n = Number(m);
+  prideSoftMul = Number.isFinite(n) && n > 0 ? Math.min(2.5, Math.max(0.4, n)) : 1;
+}
+function softPride() {
+  return GAIN.softening * prideSoftMul;
+}
+
+/* P5 Temperament：漂移速率乘子（默认全 1 = 与没气质层一致）。 */
+let rateMul = { socialRiseMul: 1, valencePullMul: 1, energyDriftMul: 1, pridePullMul: 1 };
+function setRateMul(m) {
+  const src = m && typeof m === 'object' ? m : {};
+  const clip = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? Math.min(1.5, Math.max(0.5, n)) : 1;
+  };
+  rateMul = {
+    socialRiseMul: clip(src.socialRiseMul),
+    valencePullMul: clip(src.valencePullMul),
+    energyDriftMul: clip(src.energyDriftMul),
+    pridePullMul: clip(src.pridePullMul)
+  };
+}
+function getRateMul() { return { ...rateMul }; }
+
 /* ───────────────────────── 阈值 ───────────────────────── */
 /* 表情偏置的起算线（PetMood 同值）：穿过才算「心情不错/闷/累」，
  * 中段不偏置 —— 否则偏置永远非零，「与没这功能逐位一致」就没法保证了。 */
@@ -152,10 +180,10 @@ function createMoodEngine() {
     const h = hour >= 0 ? hour : new Date().getHours();
     const nf = nightFactor(h);
 
-    S.valence = cl(S.valence + RATE.valencePull * Math.abs(S.valence - 0.5) * min);
-    S.social = cl(S.social + RATE.socialRise * nf * min);
-    S.energy = cl(S.energy + RATE.energyDrift * nf * min);
-    let prideStep = RATE.pridePull * Math.abs(S.pride - 0.5) * min;
+    S.valence = cl(S.valence + RATE.valencePull * rateMul.valencePullMul * Math.abs(S.valence - 0.5) * min);
+    S.social = cl(S.social + RATE.socialRise * rateMul.socialRiseMul * nf * min);
+    S.energy = cl(S.energy + RATE.energyDrift * rateMul.energyDriftMul * nf * min);
+    let prideStep = RATE.pridePull * rateMul.pridePullMul * Math.abs(S.pride - 0.5) * min;
     if (S.social >= PRIDE_EROSION_AT) prideStep += PRIDE_EROSION * min;
     S.pride = cl(S.pride + prideStep);
 
@@ -195,7 +223,7 @@ function createMoodEngine() {
     S.interactions++;
     S.valence = cl(S.valence + GAIN.clickValence);
     S.energy = cl(S.energy + GAIN.clickEnergy);
-    S.pride = cl(S.pride + GAIN.softening);
+    S.pride = cl(S.pride + softPride());
     S.social = 0;                        // 互动渴望被满足
     derive();
   }
@@ -205,7 +233,7 @@ function createMoodEngine() {
   function onDragBegin() {
     S.interactions++;
     S.energy = cl(S.energy + GAIN.dragEnergy);
-    S.pride = cl(S.pride + GAIN.softening);
+    S.pride = cl(S.pride + softPride());
     S.social = 0;
     derive();
   }
@@ -226,7 +254,7 @@ function createMoodEngine() {
     if (sec <= 0) return;
     S.interactions++;
     S.valence = cl(S.valence + GAIN.patValencePerSec * sec);
-    S.pride = cl(S.pride + GAIN.softening);
+    S.pride = cl(S.pride + softPride());
     S.social = 0;
     derive();
   }
@@ -235,7 +263,7 @@ function createMoodEngine() {
   function onUserChat() {
     S.interactions++;
     S.valence = cl(S.valence + GAIN.chatValence);
-    S.pride = cl(S.pride + GAIN.softening);
+    S.pride = cl(S.pride + softPride());
     S.social = 0;
     derive();
   }
@@ -354,7 +382,7 @@ function createMoodEngine() {
 
 /* 常量也导出 —— verify 拿同一份数值做解析解对照（单一事实源）。 */
 module.exports = {
-  createMoodEngine, nightFactor,
+  createMoodEngine, nightFactor, setPrideSoftMul, setRateMul, getRateMul,
   RATE, GAIN, REUNION_MIN_SEC, REUNION_HOLD_SEC, OFFLINE_CAP_SEC,
   VAL_HAPPY, VAL_SERIOUS, ENERGY_LOW, PRIDE_EROSION_AT
 };

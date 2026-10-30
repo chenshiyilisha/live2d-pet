@@ -108,7 +108,7 @@ const bubble = require('./bubble');
 const wheel = require('./wheel');
 const bubbleMenu = require('./bubble-menu');
 const cardMenu = require('./card-menu');
-const { createMoodEngine, setPrideSoftMul, setRateMul } = require('./mood');
+const { createMoodEngine, setPrideSoftMul, setRateMul, moodTemperature } = require('./mood');
 const { createTemperament } = require('./temperament');
 const { shouldProactiveSpeak } = require('./info-gain');
 const {
@@ -4067,6 +4067,16 @@ function chatStream(messages, opts = {}) {
   const cfg = loadConfig();
   /* W16：requireTested 打开时，没绿标就走离线话术（不当真连上）。 */
   const llmOpts = { ...cfg.llm };
+  /* W50：心境→temperature。开关关（chat.moodTemperature=false）时行为同旧版。
+   * 经 extraBody 注入（llm.js 顶层平铺，与讯飞 enable_thinking 同口径）。 */
+  if (cfg.chat?.moodTemperature !== false) {
+    const temp = moodTemperature(moodEngine.axes);
+    if (temp) {
+      const extra = { ...(llmOpts.extraBody || {}) };
+      extra.temperature = temp;
+      llmOpts.extraBody = extra;
+    }
+  }
   if (cfg.llm?.requireTested && !isLlmReady(cfg.llm)) {
     llmOpts.apiKey = '';
     llmOpts.baseUrl = '';

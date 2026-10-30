@@ -381,8 +381,27 @@ function createMoodEngine() {
 }
 
 /* 常量也导出 —— verify 拿同一份数值做解析解对照（单一事实源）。 */
+/* ───────────────────────── W50：心境→temperature ──────────────────────────
+ * 纯函数：四轴 → LLM temperature。参照 dsh-mood（MIT）的心境干预思路：
+ *   情绪高 → temperature 拉高（发散、有趣）；情绪低 → 压低（收敛、克制）；
+ *   活力低 → 压低（累了不想编造）。中段不偏置（行为同旧版）。
+ * 数值：高 0.9 / 低 0.7 / 默认 0.8。
+ * 判据只做保守区分：判不出一律返回 0.8（默认），不误伤。
+ */
+function moodTemperature(axes) {
+  const v = Number(axes?.valence);
+  const e = Number(axes?.energy);
+  if (Number.isNaN(v) || Number.isNaN(e)) return 0.8;
+  /* 优先级：情绪主导 → 活力修正 */
+  if (v >= VAL_HAPPY) return 0.9;
+  if (v <= VAL_SERIOUS) return 0.7;
+  if (e <= ENERGY_LOW) return 0.7;
+  return 0.8;
+}
+
 module.exports = {
   createMoodEngine, nightFactor, setPrideSoftMul, setRateMul, getRateMul,
+  moodTemperature,
   RATE, GAIN, REUNION_MIN_SEC, REUNION_HOLD_SEC, OFFLINE_CAP_SEC,
   VAL_HAPPY, VAL_SERIOUS, ENERGY_LOW, PRIDE_EROSION_AT
 };

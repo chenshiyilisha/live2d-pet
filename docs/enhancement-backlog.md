@@ -178,6 +178,11 @@
   `Him666233/astrbot_plugin_group_chat_plus` 191★ AGPL-3.0；另两个可借机制：
   GWW（按**用户粒度**隔离等待窗口，不劫持他人消息）· 频率调整 AI（按活跃度自适应概率）|
 
+| W49 | **Mnemosyne「已被取代的证据」检索维度**（2026-10-31 归档 §21.3）：记忆事实加 `supersededBy` 状态（被新事实推翻时标记、不再优先召回），与 G19 日结（只降不删）天然兼容；AGPL 只借思想 | dsh-mnemosyne |
+| W50 | **心境 → 采样温度**（2026-10-31 归档 §21.4）：LLM 调用按 mood/情绪档调 temperature（stress 高→冷淡、兴奋→发散），开关默认关 + 气质 A/B；小改动、接 `llm.js` 参数 | dsh-mood（MIT） |
+| W51 | **互动收益递减**（2026-10-31 归档 §21.4）：摸头/戳/投喂收益 100%→70%→40%→20%→5% 递减（同日内），替代 W13 的硬次数上限，体验更软 | dsh-mood（MIT） |
+| W52 | **动作编排层**（2026-10-31 归档 §21.7）：自然语言 → Live2D 动作时间线（计划→校验→播放）；表外大项，非优先（当前即时态表情够用）· 无 LICENSE 仓库 → 只借思路 | jingyu-live2d-agent |
+
 **网上已有、我们已有**：番茄 / 提醒 / 开机自启 / 锁屏静默 / 摸头 / 全屏闸门 / 低电降帧 / 工作状态；甩抛/摸头交互形态与 Coopanion 同类。  
 **不抄主线**：亲密度养成、多宠交友、径向技能轮当主 UI、内置捆小模型、会议 Join、打字蒸汽特效；**Computer use 控键鼠当产品主线**（与安静搭子冲突）。
 
@@ -364,4 +369,5 @@
 | 2026-10-30 | **W10/W19/W20/W23/W24**：话痨维 T · 触摸 quiet/normal/eager · 气泡穿透(=G15) · 记忆重要度/清晰度(=G19)。回归 `verify-w10-w19-w20.js` + `verify-ocean.js` |
 | 2026-10-30 | **W11/W25/W43**：情绪分轨 TTS · 初次相遇独立轴 · pickers 纯函数。回归 `verify-w11-w25-w43.js` |
 | 2026-10-30 | **W1/W12/W29/W44**：限时看屏授权 · PetEvent 总线 · Agent JSONL · workStatus+attention。回归 `verify-w1-w12-w29-w44.js` |
+| 2026-10-31 | **第 21 轮调研归档**（`open-source-reference.md` §21）：7 个外部源逐条核实（Coopanion 许可实证=AGPL-3.0-or-later、Mnemosyne 记忆三层、dsh-mood 心情对照、dsh-pet npm 发行线、SnowLuma=协议框架不碰、鲸语=大肥鱼官方编排工具交叉印证 deepfish 接入、DSH 组织全貌）。新增 W49–W52（已被取代证据维度 / 心境→temperature / 互动收益递减 / 动作编排层） | 用户给的 7 个地址 |
 | 2026-10-30 | **第三方模型「大肥鱼」(deepfish) 接入**（VTS 包改来，Cubism 5）：`profiles/deepfish.js` 档案（8 情绪 × 16 字段 · 10 个安全参数 · 三张表情表 key 参数互不重叠）· `params.js` 四注册表 + `main.js` 菜单（署名 toast）· **头物理链输入是 AngleX/Y/Z**（非 ParamAngle*，与 hiyori 相反）· ParamBrowL/RAngle 是物理输出（与 whale 不同）· 无眉 X/Form、无微笑眼、无连续脸红、无呆毛 → 全部置 null · 素材禁二次分发 → 不进安装包、不进 models.zip · 回归 `verify-deepfish.js`（六段断言 + 两负对照） | 素材自带使用须知（神宫凉子 / 霓虹猫） |

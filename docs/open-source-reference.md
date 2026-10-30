@@ -2985,3 +2985,149 @@ https://github.com/InariNGT-Ofiicial/gsv-rvc-voice-bridge             1★ MIT�
 https://github.com/InariNGT-Ofiicial/astrbot_plugin_gsv_rvc_voice      1★ MIT（AstrBot 适配：/voice /语音 /voice_health）
 https://github.com/Him666233/astrbot_plugin_group_chat_plus         191★ AGPL-3.0（「AI 读空气」：决策 AI / 回复 AI 分离 + GWW）
 ```
+
+---
+
+# 21. 第三批外部源归档：DSH 系记忆/心情、鲸语、SnowLuma（2026-10-31，第 21 轮）
+
+> 用户给的 7 个地址逐条核实（`api.github.com` 元数据 + README + **LICENSE 原文第一行**，
+> 规矩 29）。与第 16–20 轮不同的是：这批里有三个「同生态位直接对照」——
+> **Mnemosyne（记忆）↔ 我们的 memory.js**、**dsh-mood（心情）↔ 我们的 mood.js**、
+> **鲸语（动作编排）↔ 我们的表情/动作体系**，另有三个一眼可判（SnowLuma 协议框架、
+> dsh-pet npm 发行线、DSH 组织全貌）。
+
+## 21.1 总览：七个源一句话判决
+
+| 源 | 星 / 许可（读原文） | 本质 | 判决 |
+|---|---|---|---|
+| `Pal-AI-Lab/Coopanion` | 2757★ · LICENSE 第一行 **AGPL-3.0-or-later**（REST 标 NOASSERTION 是附加权限条款所致） | Electron 三端 + Cortico 桌宠 | ✅ 已归档 §E.1，本轮补许可实证；不搬码 |
+| `DSH-Raising-Plan/dsh-mnemosyne` | 9★ · LICENSE 第一行 **AGPL-3.0**（2026-10-30 仍在更新） | 「证据/时间/情境/状态演化/情绪/纠错」记忆系统 | 🟡 只借设计思想（下 §21.3），不搬码 |
+| `lulu23316/dsh-mood` | 3★ · LICENSE 第一行 **MIT** | 心情引擎 + 赛博日记插件 | 🟢 可细读对照（下 §21.4），落点记录 |
+| npm `dsh-pet` | 0.3.8 · 33 版 · MIT | 「吃白饭的蓝色大肥鱼」官方发行 | 🟢 发行线信息（下 §21.5），无机制可借 |
+| `SnowLuma/SnowLuma` | 3260★ · **NOASSERTION**（未读全文，协议框架非桌宠） | QQ / OneBot v11 / WebUI 协议框架 | ⛔ 非桌宠、非目标赛道（下 §21.6），不碰 |
+| `InariNGT-Ofiicial/jingyu-live2d-agent` | 5★ · **根目录无 LICENSE**（只有 `licenses/` 第三方清单） | 「鲸语」：自然语言 → Live2D 动作时间线 | 🟡 无许可=默认保留权利；但**它是大肥鱼模型的官方编排工具**，与本轮 deepfish 接入交叉印证（下 §21.7） |
+| `DSH-Raising-Plan` 组织 | 8 个仓库 | dsh-mnemosyne(9★) + 7 个 0★ 插件（context-budget / window-locator / chat-memory-ingest…） | 🟢 组织小、插件零散；`context-budget` 名与 G7 信息增益同族，未展开 |
+
+## 21.2 Coopanion 许可实证（订正上轮 REST 字段）
+
+- REST `license.spdx_id = NOASSERTION` 是**错的读法**：`contents/` 根目录确有 `LICENSE`
+  文件，第一行原文：
+
+  > Coopanion is licensed under the GNU Affero General Public License, version 3 or
+  > (at your option) any later version, whose text follows, with the **additional
+  > permission below**.
+
+  即 **AGPL-3.0-or-later + 附加权限条款**。§E.1 的「AGPL-3.0」判断不变，
+  但「NOASSERTION → 读原文」的教训这次又命中一次（第 17.8 节同款）。
+- 组织面板：`console/` + `core/` + `app/` + `packages/` + `telemetry-server/`
+  —— 发行壳与我们同构（Electron + electron-builder），**不因此改迁壳优先级**。
+
+## 21.3 Mnemosyne：记忆系统的三层模型（AGPL → 只借思想）
+
+> README 全本 33KB，只读文档。核心是**三层记忆 + 三维（时间/空间/情绪）+
+> 可解释更新**。与我们 G19/W24/W25 的对照：
+
+| 它的机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| 三层：事实与证据 → 状态与关系 → 演化与应用 | 「记住证据、时间与变化，不是记住结论」；「只有在证据足够时才深入推断，否则保留事实和未知状态本身就是正确结果」 | ✅ 已符合：memory.js 存事实 + 时间 + 清晰度；G19 的「模糊注入前缀」就是"证据不足的形态" |
+| 时间感知检索 | 检索要判断「查询针对过去还是现在」「记忆在目标时间是否有效」「有无更新/取代它的证据」「有无未解决冲突」 | 🟡 **可借**：`recallFacts` 目前是"按清晰度/最近度挑"，没有"已被取代"标记 → backlog 新增候选 |
+| 可解释的记忆更新 | 重要变更**先生成可审查的变更计划再写入**（新增/更新/合并/取代了什么、依据、影响面、反证、写入后如何验证、失败如何回滚） | 🟡 与 W24 日结（只降不删）同向；"变更计划"比我们的直接改 JSON 重，可作 W3 后置项 |
+| 情绪是记忆维度不是标签 | 「允许多种情绪同时存在」「记录强度/置信度/不确定性」「在新证据出现后重新评估过去的判断」；示例：争执后修复关系，不应简化为"这个人容易愤怒" | ✅ 已符合（规矩 22：标签随对话态、decay 回中性，不写死） |
+
+**结论**：AGPL 只借思想；**真正值得抄的一条**是「**已被取代的证据**」这个检索维度
+（我们现在没有"这条被新事实推翻了"的状态，只有清晰度降档）。
+
+## 21.4 dsh-mood：心情引擎对照（MIT，可细读）
+
+> 给 DeepSeek Harness 加「情绪 + 日记」。README 关键点逐条对照：
+
+| 它的机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| 六维状态机 | valence / arousal / dominance / engagement / stress / affinity；事件驱动 + 惯性 + **按时间戳指数衰减**，基线 55 | 🟡 我们的 mood 是 EMA 日均慢层（temperament.js）+ 情绪即时态；六维 vs 我们单轴，**维度多≠好**，不扩维 |
+| 22 情绪词矩阵 | 对话触发优先（说「乖」撒娇、说「别的鱼」吃醋），数值只做底色 | ✅ 我们情绪=8 档状态机，台词池已有 personaId 偏置（P4） |
+| 语气注入 | 每轮开始生成 ≤4 行语气提示，挂在人格段之后 | ✅ 已有（`temperament` 语气 hint + P6 专业模式语气约束） |
+| **情绪硬干预采样温度** | stress 高 → temperature 0.2 冷淡；兴奋 → 0.9 发散；低落 → 「≤15 字 + 工具轮豁免」 | 🔴 **可借真点**：我们 LLM 调用没有按心境调 temperature 的通路 → 记 backlog 候选 |
+| 每日日记 | 到点自动写、错过补写、一天一篇、没人陪时写得落寞 | ✅ W2 记忆日记本已有"浏览/删"；"自动写"= proactive 范畴，已有闸门 |
+| 互动收益递减 | 摸摸/投喂/逗各 5 次/天，100%→70%→40%→20%→5% | 🟡 我们的摸头/戳有生气档（W13），无次数账；「收益递减」比「次数上限」更贴真实互动 |
+| `simulated: true` 免责声明 | 「模拟情绪，不是模型的真实感受；只影响说话语气，不影响事实、安全判断与权限」 | ✅ 我们人设正文也声明非真人；**「不影响事实/安全判断」这句值得抄进我们的语气注入文档**（现在只约束在 persona 段） |
+
+**结论**：MIT 可细读。**两条记 backlog**：① 心境→temperature 映射；
+② 互动收益递减（替代 W13 的硬次数上限）。不搬六维——我们单轴够用。
+
+## 21.5 dsh-pet npm：发行线信息
+
+- `dsh-pet@0.3.8`（33 个版本）· MIT · 描述原文：「吃白饭的蓝色大肥鱼，赖在
+  DeepSeek Harness 里不走了」· 依赖只有 **5 个**。
+- 它是 `PC2005-cloud/dsh-pet`（第 18 轮已归档：106 段视频动画、组合在时间轴上）
+  的**官方发行渠道**，不是新机制来源。
+- 对我们的价值只有一条：**同生态位产品怎么发版**（33 版 MIT 小依赖）——
+  与我们「发版四件套 + 版本号纪律」对齐即可，无机制可借。
+
+## 21.6 SnowLuma：协议框架，非桌宠（不碰）
+
+- 3260★ · TypeScript · **NOASSERTION**（协议框架常用自定义许可）。
+- v2.2.1（2026-10-27）：Windows x64 / Linux x64 / Linux arm64，含 **QQ 接入 /
+  OneBot v11 / WebUI 管理**，分 lite（Node 24+）与完整版（内置 Node）。
+- 定位是「Next Remote Protocol Framework」——把即时通讯协议接到 AI 后端，
+  **不是桌面宠物**。与我们的赛道（安静陪伴桌宠）无交集，
+  与 §20.1 NapCatQQ 那条同族（QQ 协议生态），**明确不碰**。
+
+## 21.7 jingyu「鲸语」：与 deepfish 接入的交叉印证（无 LICENSE → 只借思路）
+
+> 「1.4.0-beta.2 · Windows 本地动作工作台」：把自然语言编排为可检查的
+> Live2D 动作时间线，网页或 VTube Studio 播放。
+
+**交叉印证（本轮最有价值的一条）**：
+
+1. 它用的模型就是 **DeepSeek「大肥鱼」**——README 明写
+   `model/DeepSeek/`、作者渠道取得、原画「神宫凉子」、建模「霓虹猫_NeonNeko」、
+   禁止擅自再分发完整模型。与我们的 **deepfish 接入同源**（我们素材同款、
+   同样不进包、不进 models.zip）→ 第 27 条规矩的素材红线被第三方工具
+   **独立背书**，不是我们自己多疑。
+2. 它要求模型目录含 `大肥鱼.model3.json` + `Exp3/` + `Animation/` + VTS 配置，
+   与我们接入时的 VTS 包特征（无 Motions/Expressions 段、自带 exp3）
+   **完全吻合** → 印证我们「model3.json 无段 → 自己 fetch 解析」的修法
+   正是该素材的通病，不是我们引入的。
+3. 它的工程约束：**参数/时间/通道冲突校验，失败最多修正一次**；
+   `model-profile.json` 启动时重建不进 Git —— 与我们的
+   `model-scan.js` + verify-packaged-files 的纪律同构。
+
+**可借点（只借思想）**：
+
+- **自然语言 → 动作时间线**：用户说"摸摸头再眨眼"→ 生成可检查的时间线。
+  我们的表情/动作是即时态（情绪驱动），**没有"序列编排"层**——
+  若要让 LLM 编排多动作，需要类似「计划→校验→播放」的通道。
+  记 backlog 候选（表外，属 W4 类增强，非优先）。
+- **VTS 原生动作编译 + 热部署、保留作者物理**：与我们 deepfish 的
+  AngleX/Y/Z 物理链判断同域（他们用 VTS 原生通道绕过了我们踩过的坑）。
+- **`agent-tools.json` / HTTP / CLI 协议 + 逐任务完成回执**：与
+  W29（只读 JSONL 联动）互补——它是**外部 Agent 驱动桌宠动作**的正向协议。
+
+**许可**：根目录只有 `licenses/`（第三方清单）与 `THIRD-PARTY.txt`，
+**没有自己的 LICENSE** → 默认保留所有权利。README 里"作者说明禁止擅自
+重新分发完整模型"再次印证素材红线。**只借思路，一行代码不搬。**
+
+## 21.8 本轮结论（按性价比）
+
+1. **Mnemosyne「已被取代的证据」检索维度**（§21.3）——记忆系统补一维，
+   与 G19 日结天然兼容，中低成本。
+2. **dsh-mood 心境→temperature**（§21.4）——LLM 调用参数接线，小改动、
+   气质风险需 A/B 验证（与 W11 情绪分轨 TTS 同族）。
+3. **dsh-mood 互动收益递减**（§21.4）——替代 W13 硬次数上限，
+   摸头/戳的体验更软。
+4. **鲸语动作编排层**（§21.7）——自然语言→动作时间线，表外大项，
+   非优先（现在表情即时态够用）。
+5. 其余（Coopanion 组织 / SnowLuma / dsh-pet npm / DSH 组织）——
+   无新增动作，归档即止。
+
+## 21.9 来源清单（全部经 api.github.com 核实存在，LICENSE 读原文第一行）
+
+```
+https://github.com/Pal-AI-Lab/Coopanion                    2757★ LICENSE 第一行=AGPL-3.0-or-later（+附加权限条款；REST 标 NOASSERTION 不可信）
+https://github.com/DSH-Raising-Plan/dsh-mnemosyne            9★ AGPL-3.0（LICENSE 第一行=GNU AGPL v3）· 记忆三层/三维/可解释更新
+https://github.com/lulu23316/dsh-mood                         3★ MIT（LICENSE 第一行=MIT License, 2026 dsh-mood contributors）· 心情六维/日记/temperature 干预
+https://www.npmjs.com/package/dsh-pet                   0.3.8 · 33 版 · MIT · 5 deps（PC2005-cloud/dsh-pet 官方发行）
+https://github.com/SnowLuma/SnowLuma                        3260★ NOASSERTION · 协议框架（QQ/OneBot v11）· 非桌宠
+https://github.com/InariNGT-Ofiicial/jingyu-live2d-agent      5★ 无 LICENSE（根目录仅 licenses/ 第三方清单）· 鲸语动作编排 · 用大肥鱼模型
+https://github.com/DSH-Raising-Plan                          组织 · 8 仓（mnemosyne 9★ + 7 个 0★ 插件）
+```

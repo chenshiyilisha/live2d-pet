@@ -198,7 +198,11 @@ function sensorScript(want) {
     L.push("$smi = Join-Path $env:SystemRoot 'System32\\nvidia-smi.exe'");
     L.push('if (Test-Path $smi) {');
     L.push("  $line = & $smi --query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader,nounits 2>$null | Select-Object -First 1");
-    L.push("  if ($line -match '^\\s*(\\d+)\\s*,\\s*(\\d+)\\s*$') { $o.nvGpu = [int]$Matches[1]; $o.tempC = [int]$Matches[2] }");
+    /* 🔴 温度是**小数**：driver 5xx / 44x 起 nvidia-smi 吐的是 `0, 47.86`
+     *    （旧驱动给整数）。旧正则只收 \d+ → 整行不匹配 → GPU 与温度同时消失，
+     *    而底座那两项本来就"同生共死"，于是看着像"这台没 N 卡"。
+     *    利用率仍是整数，温度允许小数再取整。 */
+    L.push("  if ($line -match '^\\s*(\\d+)\\s*,\\s*(\\d+(?:\\.\\d+)?)\\s*$') { $o.nvGpu = [int]$Matches[1]; $o.tempC = [int][double]$Matches[2] }");
     L.push('}');
   }
 
@@ -275,7 +279,9 @@ function sensorWatchScript(parentPid, sampleMs) {
     '  $o = [ordered]@{}',
     '  if ($hasSmi) {',
     "    $line = & $smi --query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader,nounits 2>$null | Select-Object -First 1",
-    "    if ($line -match '^\\s*(\\d+)\\s*,\\s*(\\d+)\\s*$') { $o.nvGpu = [int]$Matches[1]; $o.tempC = [int]$Matches[2] }",
+    /* 与 collectStats 那一段必须同一口径（温度允许小数）—— 两处解析不一致的话，
+     * 冷启补枪能出数、常驻采样却一直空，症状像"过一会儿自己没了"。 */
+    "    if ($line -match '^\\s*(\\d+)\\s*,\\s*(\\d+(?:\\.\\d+)?)\\s*$') { $o.nvGpu = [int]$Matches[1]; $o.tempC = [int][double]$Matches[2] }",
     '  }',
     '  $w.WriteLine(($o | ConvertTo-Json -Depth 4 -Compress))',
     '  $w.Flush()',

@@ -88,6 +88,10 @@ const {
 } = require('./media');
 const { startSynth, stopSynth, synthWav } = require('./tts');
 const {
+  PROVIDERS: TTS_PROVIDERS,
+  ttsProviderById, ttsIsUsable, ttsCurrentProviderId, ttsToPatch, ttsTest
+} = require('./tts-providers');
+const {
   isGlancePhrase, buildGlanceUserMessage, captureGlanceScreen
 } = require('./glance');
 const {
@@ -1608,6 +1612,194 @@ function llmDialog() {
   });
 }
 
+/* W47: 当前 TTS provider 的显示名 */
+function ttsProviderLabel(tts) {
+  const id = ttsCurrentProviderId(tts);
+  const p = ttsProviderById(id);
+  return p ? p.label : '自定义';
+}
+
+/* W47: 切到某条 TTS provider 预设 */
+function applyTtsProvider(id) {
+  const p = ttsProviderById(id);
+  if (!p) return;
+  if (p.custom) {
+    patchConfig('tts', { provider: 'custom' });
+    toast('已切到自定义：填地址与音色');
+    promptTts();
+    return;
+  }
+  const patch = ttsToPatch(p);
+  /* ⚠️ openai/gsv 返回的是 wav 字节，只有 winrt 引擎走 deps.synth 拿它 ——
+   *    所以切到这两个 provider 时必须同时把 engine 拉回 winrt。 */
+  patch.engine = 'winrt';
+  patchConfig('tts', patch);
+  if (!ttsIsUsable(loadConfig().tts || {})) {
+    toast(`已切到「${p.label}」，填个 key 就能出声`);
+    promptTts();
+    return;
+  }
+  toast(`已切到「${p.label}」`);
+}
+
+/* W47: 一键测试 —— 真发一句「你好」，能拿到音频字节就算通 */
+async function ttsTestMenu() {
+  const tts = loadConfig().tts || {};
+  if (!ttsIsUsable(tts)) {
+    toast('还没填 key：本地端点可以留空，云端必须填');
+    return;
+  }
+  toast('正在试一句…');
+  const r = await ttsTest(tts);
+  if (r.ok) {
+    toast(`语音已就绪（${r.bytes} 字节）`);
+  } else {
+    toast(`语音连不通：${String(r.error).slice(0, 80)}`);
+  }
+}
+
+/* W47: TTS 语音接入设置对话框 */
+function promptTts() {
+  const cfg = loadConfig();
+  const tts = cfg.tts || {};
+  const pid = ttsCurrentProviderId(tts);
+  const p = ttsProviderById(pid);
+  const local = !!(p && p.local);
+
+  return new Promise((resolve) => {
+    const w = new BrowserWindow({
+      width: 480,
+      height: 480,
+      minWidth: 420,
+      minHeight: 420,
+      resizable: true,
+      minimizable: false,
+      maximizable: false,
+      frame: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
+      modal: !!mainWindow && !mainWindow.isDestroyed(),
+      show: false,
+      backgroundColor: '#1e1e22',
+      webPreferences: { contextIsolation: true, nodeIntegration: false }
+    });
+
+    const html = `<!doctype html><meta charset="utf-8"><style>
+      *{box-sizing:border-box;margin:0;padding:0}
+      html,body{height:100%}
+      body{background:#1e1e22;color:#e8e8ea;font:13px/1.5 "Microsoft YaHei",system-ui,sans-serif;
+           padding:16px 20px 12px;user-select:none;display:flex;flex-direction:column}
+      h2{font-size:14px;font-weight:500;margin-bottom:2px}
+      .sub{font-size:12px;color:#9a9aa4;margin-bottom:10px}
+      label{display:block;font-size:12px;color:#9a9aa4;margin:8px 0 3px}
+      input{width:100%;padding:0 10px;border-radius:6px;border:1px solid #3a3a40;
+            background:#2a2a30;color:#fff;font:13px/1.4 "Cascadia Mono",Consolas,monospace;
+            outline:none;height:30px}
+      input:focus{border-color:#5a5a66}
+      .hint{font-size:11px;color:#7d7d88;margin-top:4px;line-height:1.5}
+      .tipline{font-size:11px;color:#7d7d88;margin-top:8px;line-height:1.6}
+      .grow{flex:1}
+      .row{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+      button{height:28px;padding:0 14px;border-radius:6px;border:1px solid #3a3a40;
+             background:#2a2a30;color:#e8e8ea;font-size:13px;cursor:pointer}
+      button.primary{background:#4a6cf7;border-color:#4a6cf7;color:#fff}
+      button:hover{filter:brightness(1.15)}
+    </style>
+    <h2>语音接入</h2>
+    <div class="sub" id="cur"></div>
+    <label>接口地址（到 /v1 这一级，不要带 /audio/speech）</label>
+    <input id="u" spellcheck="false">
+    <label>模型名</label>
+    <input id="m" spellcheck="false">
+    <label>音色 <span id="vHint"></span></label>
+    <input id="v" spellcheck="false">
+    <label>API Key<span id="kHint"></span></label>
+    <input id="k" type="password" spellcheck="false" autocomplete="off">
+    <div class="hint">本地端点（127.0.0.1）不需要 Key。留空时使用 Windows 系统音色。</div>
+    <div class="tipline" id="tip"></div>
+    <div class="grow"></div>
+    <div class="row">
+      <button id="test">测试一句</button>
+      <button id="c">取消</button><button class="primary" id="s">保存</button>
+    </div>
+    <script>
+      const U = ${JSON.stringify(String(tts.baseUrl || ''))};
+      const M = ${JSON.stringify(String(tts.model || ''))};
+      const V = ${JSON.stringify(String(tts.voice || ''))};
+      const K = ${JSON.stringify(String(tts.apiKey || ''))};
+      const LABEL = ${JSON.stringify(p ? p.label : '自定义')};
+      const LOCAL = ${JSON.stringify(local)};
+      document.getElementById('u').value = U;
+      document.getElementById('m').value = M;
+      document.getElementById('v').value = V;
+      document.getElementById('k').value = K;
+      document.getElementById('cur').textContent = LABEL;
+      document.getElementById('kHint').textContent = LOCAL ? '（可留空）' : '';
+      document.getElementById('vHint').textContent = LOCAL ? '（网关侧映射）' : '';
+      document.getElementById('tip').textContent = LOCAL
+        ? '本机端点不需要 API Key。改完可先「测试一句」，再保存。'
+        : '云端 TTS 需要 API Key。建议先「测试一句」再保存。';
+      function fields() {
+        return {
+          baseUrl: document.getElementById('u').value.trim(),
+          model: document.getElementById('m').value.trim(),
+          voice: document.getElementById('v').value.trim(),
+          apiKey: document.getElementById('k').value.trim()
+        };
+      }
+      document.getElementById('test').onclick = () => { window.__ttsResult = { test: true, ...fields() }; };
+      document.getElementById('s').onclick = () => { window.__ttsResult = { save: true, ...fields() }; };
+      document.getElementById('c').onclick = () => { window.__ttsResult = { cancel: true }; };
+      window.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape') window.__ttsResult = { cancel: true };
+      });
+      document.getElementById('u').focus();
+    <\/script>`;
+
+    w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    w.once('ready-to-show', () => w.show());
+
+    let finished = false;
+    const finish = (val) => {
+      if (finished) return;
+      finished = true;
+      clearInterval(timer);
+      if (!w.isDestroyed()) w.destroy();
+      resolve(val);
+    };
+    const timer = setInterval(async () => {
+      if (w.isDestroyed()) { finish(undefined); return; }
+      try {
+        const v = await w.webContents.executeJavaScript('window.__ttsResult ?? undefined');
+        if (v === undefined) return;
+        if (v.test) {
+          await w.webContents.executeJavaScript('window.__ttsResult = undefined');
+          await ttsTest({ baseUrl: v.baseUrl, model: v.model, voice: v.voice, apiKey: v.apiKey });
+          return;
+        }
+        if (v.cancel) { finish(undefined); return; }
+        if (v.save) {
+          /* 保存：只改 provider 相关四键，不动其它 tts 设置。 */
+          patchConfig('tts', {
+            provider: 'openai',
+            baseUrl: v.baseUrl,
+            model: v.model,
+            voice: v.voice,
+            apiKey: v.apiKey,
+            engine: 'winrt'
+          });
+          finish(undefined);
+          toast('语音接入已保存');
+          return;
+        }
+        finish(v);
+      } catch { /* 页面还在加载 */ }
+    }, 120);
+    w.on('closed', () => { if (!finished) { finished = true; clearInterval(timer); resolve(undefined); } });
+  });
+}
+
 async function promptLlm() {
   const next = await llmDialog();
   if (!next) return false;
@@ -2425,6 +2617,24 @@ function buildMenuTemplate() {
     submenu: [
       flag('tts', 'enabled', '启用语音朗读'),
       flag('tts', 'emotionVoice', '情绪分轨语速/音调', true),
+      { type: 'separator' },
+      /* W47: 语音接入（provider 预设 + 一键测试） */
+      {
+        label: `语音接入（${ttsProviderLabel(cfg.tts || {})}）`,
+        submenu: [
+          ...TTS_PROVIDERS.filter((p) => p.featured).map((p) => ({
+            label: p.label + (ttsCurrentProviderId(cfg.tts) === p.id ? ' ✓' : ''),
+            type: 'radio',
+            checked: ttsCurrentProviderId(cfg.tts) === p.id,
+            click: () => applyTtsProvider(p.id)
+          })),
+          { type: 'separator' },
+          { label: '设置…', click: () => { promptTts(); } },
+          ttsIsUsable(cfg.tts || {})
+            ? { label: '测试一句', click: () => { ttsTestMenu(); } }
+            : unavailable('测试一句', '没 key / 未配端点')
+        ]
+      },
       { type: 'separator' },
       process.platform === 'win32'
         ? {
@@ -4210,7 +4420,16 @@ function registerIpc() {
   ipcMain.handle('tts:synth', async (_e, payload) => {
     if (!isOn('tts', 'enabled', false)) return null;
     const p = payload && typeof payload === 'object' ? payload : {};
-    const r = await synthWav(p.text, p.opts || {});
+    /* W47：把 tts 配置段整体传给 synthWav —— 它按 provider 分流。
+     * winrt（默认）时这四个字段被忽略，行为不变。 */
+    const cfg = loadConfig();
+    const providerCfg = {
+      provider: cfg.tts?.provider,
+      baseUrl: cfg.tts?.baseUrl,
+      apiKey: cfg.tts?.apiKey,
+      model: cfg.tts?.model
+    };
+    const r = await synthWav(p.text, p.opts || {}, providerCfg);
     if (!r.ok) return null;
     return r.wav.buffer.slice(r.wav.byteOffset, r.wav.byteOffset + r.wav.byteLength);
   });

@@ -167,14 +167,9 @@
 
 | W43 | ~~动作池 pick 纯函数~~ **✅**：`pickers.js`（`pick`/`pickWeighted`/`rollKind`/`pickWeightedCategory`；排除后空退回原池；权重 0 不归一化）。`animations{}` 配置化仍待素材/视频线 | dsh-pet pickers；§18.2 |
 | W44 | ~~事件档位数组 + decideEndedCue~~ **✅**：`work-cues.js` · `WORK_STATUS` 含 attention（只可追加）· `decideEndedCue` · emit/渲染接 attention | dsh-pet cues.ts |
-| W45 | **换源四条硬细节**（对照我们的实现逐条核）：① `loadeddata` ≠ 开始出画，要等 `play()` 兑现才回执；② `ended` 只认前台元素（后台残留 handler 会掐断当前动画）；③ 加载失败/超时**必须释放 pending**，否则防重分支把它永久吞掉 = **「点了没反应」**；④ blob + **世代号**丢弃迟到结果（= 规矩 16） | 同上 `animation.ts` / `asset-loader.ts`；③ 与规矩 24「关掉的入口不许点了没反应」同族 |
+| W45 | ✅ 已核验通过（2026-10-30）—— 项目无 HTMLMediaElement，四条在**音频播放路径**上逐条核到等价实现且安全：`onended` + 兜底定时器（非 loadeddata）· `currentSrc===src` 单槽防残留 handler · `waiting.delete` + `cleanup` 全路径释放 pending · `ttsGen` 世代号丢弃迟到结果；verify-w45.js 32 条断言固化 | 同上 `animation.ts` / `asset-loader.ts`；③ 与规矩 24「关掉的入口不许点了没反应」同族 |
 | W46 | **素材链存档为「第二交付路线」**（不换产品线）：20 段核心动作（idle / turn / drag / click×5 / 工作状态×6）≈10MB 就能撑起一个可用形象；管线 = AI 绿幕视频 → 抠像（**手工**，自动 HSV 残边）→ 归一化 → 640×360 webm(VP9-alpha) → Safari 另出 HEVC-alpha `.mov` | `custom-model-plan.md` §11 降档路线；🔴 **许可**：代码 MIT、**素材「禁止商用」**、形象 CC BY-NC-SA 4.0 → **只借结构，一行素材不能进包**（规矩 29） |
-| W47 | **TTS 加 OpenAI 兼容 provider**（借 gsv-rvc-voice-bridge 的网关模式，MIT）：
-  `tts.provider='winrt'\|'openai'` + `baseUrl` / `apiKey` / `model` / `voice` 四个键，
-  结构照抄 `llm-providers.js`（预设 + 一键测试）。🔴 **连不上网关必须静默回落 WinRT**
-  （否则她变哑巴），且回落只记一行日志不弹窗 —— 她不该因为一个可选功能报错 |
-  `InariNGT-Ofiicial/gsv-rvc-voice-bridge` MIT；网关无认证、只听 127.0.0.1、串行合成
-（防并发抢 GPU）；`maxChars` 是**文本**限制不是音频时长限制 |
+| W47 | ✅ 已完成（2026-10-30）—— `src/main/tts-providers.js` 预设（gsv 网关默认 + 常见端点）、`ttsProviderById` / `ttsIsUsable` / `ttsToPatch` / `ttsTest`；`synthWav` 第三参分流：openai → `POST {baseUrl}/audio/speech`（`response_format:'wav'`），失败/超时/无 key **静默回落 WinRT** 并记一行日志（绝不弹窗变哑巴）；`gsv` provider 的 model 为空时自动 `GET /v1/models` 拉取；文本超 1500 字截断；渲染层 `engineOf()` 不用改（波形路径同 winrt）；托盘「功能开关→语音朗读→语音接入」面板（预设 + 一键测试，照 llm-providers 结构）；`verify-w47.js` 39 条断言（含负对照：分流判断改坏 → C1+C2 真红） | 同上 `InariNGT-Ofiicial/gsv-rvc-voice-bridge` MIT；网关无认证、只听 127.0.0.1、串行合成（防并发抢 GPU）；`maxChars` 是**文本**限制不是音频时长限制 |
 | W48 | **proactive 加「决策 AI」**（借 group_chat_plus 的**决策 AI / 回复 AI 分离**，
   ⚠️ 该仓 **AGPL-3.0 → 只借思想自己写，不复制代码**）：判断"要不要插嘴"走
   **独立的轻量 LLM 调用**，不拼完整人格 + 全部记忆 + 全部历史 —— 把最贵的资源

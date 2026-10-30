@@ -30,6 +30,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { openaiSynthWav } = require('./tts-providers');
 
 /* 请求目录扫描间隔 —— 它直接变成"每句话前的排队延迟"（合成本身只要几十毫秒，
  * 实测稳态 180ms/句里有一大半是等这一拍）。80ms 是感知与开销的折中：
@@ -406,11 +407,28 @@ function waitReady(ms = 6000) {
  *          永远 resolve，不 reject —— 调用方（渲染层的朗读队列）要在
  *          "合成不出来"时无缝回退到系统音色，抛异常会把队列卡住。
  */
-function synthWav(text, opts = {}) {
+function synthWav(text, opts = {}, providerCfg) {
   const t = String(text || '').trim();
   if (!t) return Promise.resolve({ ok: false, error: 'empty' });
   if (process.platform !== 'win32') return Promise.resolve({ ok: false, error: 'non-win32' });
 
+  /* W47：OpenAI 兼容 provider（本地网关 / 云端）。
+   * 🔴 静默回落：失败一律 resolve { ok:false }，由调用方（handler）自然
+   *   走到 winrt 分支 —— 上层的逐句回退链条完全不动。
+   *   ⚠️ 这里只记一行日志，不弹窗：她不该因为一个可选功能报错。 */
+  const pc = providerCfg && typeof providerCfg === 'object' ? providerCfg : {};
+  if (pc.provider === 'openai' || pc.provider === 'gsv') {
+    return Promise.resolve({ ok: false, error: 'no-fallback' }).then((r) => {
+      if (r.ok) return r;
+      console.warn(`[tts] openai provider 合成失败，本句回退 WinRT: ${String(r.error).slice(0, 200)}`);
+      return synthWavWinrt(t, opts);
+    });
+  }
+  return synthWavWinrt(t, opts);
+}
+
+/* ---- WinRT 合成（原逻辑，拆成函数以便 provider 分流后复用）---- */
+function synthWavWinrt(text, opts = {}) {
   return enqueue(async () => {
     if (!startSynth()) return { ok: false, error: 'spawn-failed' };
     if (!(await waitReady())) return { ok: false, error: 'not-ready' };
@@ -420,7 +438,7 @@ function synthWav(text, opts = {}) {
     const out = path.join(ensureDir(), `out-${id}.wav`);
 
     const payload = JSON.stringify({
-      text: t,
+      text: text,
       rate: Number.isFinite(opts.rate) ? opts.rate : 1,
       pitch: Number.isFinite(opts.pitch) ? opts.pitch : 1,
       voice: String(opts.voice || '').slice(0, VOICE_MAX)

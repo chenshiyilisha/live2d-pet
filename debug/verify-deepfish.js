@@ -235,6 +235,14 @@ const readSrc = (p) => fs.readFileSync(path.join(SRC, p), 'utf8').replace(/\r\n/
     const missing = listed.filter((f) => !dirFiles.includes(f));
     ok(missing.length === 0,
       `model3.json 的 ${listed.length} 个表情文件在 expressions/ 目录全部存在${missing.length ? ' —— 缺失：' + missing.join(', ') : ''}`);
+
+    /* 🔴 HitAreas 字段必须存在且为数组。插件 getHitAreaDefs() 里
+     * `this.settings.hitAreas.map(...)` —— 没有 HitAreas 字段时
+     * this.hitAreas 初始化为 {}，{}.map 直接炸，boot failed。
+     * 实测：deepfish 的 cdi3.json 没有 HitAreas（VTS 从 PSD 导入特征），
+     * hiyori/whale 都有。这里断言 model3.json 顶层有 HitAreas。 */
+    ok(Array.isArray(m3.HitAreas),
+      `model3.json 顶层有 HitAreas 数组${Array.isArray(m3.HitAreas) ? '' : '（🔴 缺失 → boot failed: _a.map is not a function）'}`);
   }
 
   /* ================= [F] 接线层（源码断言） ================= */

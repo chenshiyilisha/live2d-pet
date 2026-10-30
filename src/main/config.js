@@ -251,7 +251,11 @@ const DEFAULT_CONFIG = {
     /* G19 2a：清晰度日结默认跟记忆总开关走（settle 本身廉价）。 */
     decay: true,
     /* G19 2b：retention<10 时删正文留墓碑。不可逆，默认关。 */
-    forget: { enabled: false }
+    forget: { enabled: false },
+    /* W2：夜间矛盾降权。安静时段（proactive.quietHours）写入的事实先降
+     * 一档清晰度——深夜说的"算了不喜欢了"更可能是情绪化表达。
+     * 默认开；降到 fuzzy/trace 档只会带前缀标注，不会删。 */
+    quietPenalty: true
   },
   /* G12：MCP 客户端骨架。默认关；无 server、无 SDK 依赖；工具调用需逐条授权。 */
   mcp: {

@@ -123,7 +123,7 @@
 | ID | 项 | 出处味道 |
 |---|---|---|
 | W1 | ~~限时看屏授权 + 倒计时收回~~ **✅**：`glance-grant` 会话内存 · 3m/10m 预设 · 到期 toast+收回 · 永久开关仍可用 · 托盘剩时 | Convai |
-| W2 | 记忆日记本 UI（浏览/删）+ 夜间矛盾降权 | Nexus / Convai |
+| ~~W2~~ | ~~记忆日记本 UI（浏览/删）+ 夜间矛盾降权~~ **✅（2026-10-30）**：`memory.deleteFact()` 墓碑删除 · 设置菜单「记忆日记本…」对话框（内联 HTML 浏览/删）· 夜间降权 `applyQuietPenalty`（安静时段写入的事实降一档清晰度，复用 `proactive.quietHours` 口径、开关 `memory.quietPenalty` 默认开、firstEncounter/pinned/name/boundary 不降、trace 地板）· 回归 `verify-w2.js`（负对照：去掉保护/开关关 → 必须不降）| Nexus / Convai |
 | W3 | 导入模型预检（缺资源仍显示并说明） | Nexus 0.4.7 |
 | W4 | 窗口当地形（走窗顶/爬边） | mochi / mushroom |
 | W5 | ~~位置钉 + 闲置够久才稀有换位~~ **✅**：`motion.positionPin`（默认关）· 放下钉 14/34/44 分 · 到期+闲置≥60s 才 hop 一步再钉 | armada |

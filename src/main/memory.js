@@ -70,13 +70,43 @@ const HEURISTICS = [
 
 const SKIP_MARKERS = /开玩笑|随便说说|骗你的|当我没说|临时|今天先|算了吧/;
 
+/* W2：quiet hours 判定（口径与 src/renderer/quiet-hours.js 一致：
+ * "HH-HH" 格式、**分钟区间**、半开 [start,end)、a===b 不设、
+ * start > end = 跨零点）。主进程无渲染层 ESM，内联同一套逻辑 ——
+ * 改 quiet hours 规则时两处同步。 */
+function parseQuietHoursLocal(spec) {
+  if (typeof spec !== 'string') return null;
+  const m = spec.trim().match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
+  if (!m) return null;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  if (!Number.isInteger(a) || !Number.isInteger(b)) return null;
+  if (a < 0 || a > 23 || b < 0 || b > 23) return null;
+  if (a === b) return null;          // 零长度区间 → 不设（别退化成全天禁言）
+  return { start: a * 60, end: b * 60 };
+}
+
+function inQuietHoursLocal(range, date) {
+  if (!range) return false;
+  const d = date instanceof Date ? date : new Date(date);
+  const mins = d.getHours() * 60 + d.getMinutes();
+  return range.start < range.end
+    ? (mins >= range.start && mins < range.end)
+    : (mins >= range.start || mins < range.end);
+}
+
 let getPath = () => null;
 let getForgetEnabled = () => false;
+let getQuietSpec = () => '';
+let getQuietPenalty = () => true;
+let quietPenalized = 0;   // 最近一次 upsertFacts 夜间降权的条数（日志/调试用）
 let cache = null;   // { facts: Fact[] } | null
 
-function configureMemory({ getPath: gp, getForgetEnabled: gfe } = {}) {
+function configureMemory({ getPath: gp, getForgetEnabled: gfe, getQuietSpec: gqs, getQuietPenalty: gqp } = {}) {
   if (typeof gp === 'function') getPath = gp;
   if (typeof gfe === 'function') getForgetEnabled = gfe;
+  if (typeof gqs === 'function') getQuietSpec = gqs;
+  if (typeof gqp === 'function') getQuietPenalty = gqp;
   cache = null;
 }
 
@@ -274,7 +304,8 @@ function upsertFacts(drafts, opts = {}) {
   const store = loadStore();
   let added = 0;
   let updated = 0;
-  const now = Date.now();
+  const now = Number(opts.now) || Date.now();
+  const touched = [];   // 本次写入/更新触及的事实（夜间降权只降这批）
 
   for (const d of drafts || []) {
     if (!d || !d.text) continue;
@@ -312,6 +343,7 @@ function upsertFacts(drafts, opts = {}) {
       fact.pinned = isPinned(fact);
       store.facts[tombIdx] = fact;
       updated++;
+      touched.push(fact);
       continue;
     }
 
@@ -326,6 +358,7 @@ function upsertFacts(drafts, opts = {}) {
       found.importance = Math.max(Number(found.importance) || 0, imp);
       found.pinned = isPinned(found);
       updated++;
+      touched.push(found);
     } else {
       const source = d.source === 'llm' ? 'llm' : 'heuristic';
       const importance = scoreImportance(text, kind, source);
@@ -347,6 +380,7 @@ function upsertFacts(drafts, opts = {}) {
       };
       fact.pinned = isPinned(fact);
       store.facts.push(fact);
+      touched.push(fact);
       if (!store.firstAt) store.firstAt = now;
       added++;
     }
@@ -368,8 +402,45 @@ function upsertFacts(drafts, opts = {}) {
     store.stats.dropped = (Number(store.stats.dropped) || 0) + Math.max(0, rest.length - keep);
   }
 
+  /* W2：夜间矛盾降权 —— 深夜抽到的事实更可能是情绪化表达（"算了不喜欢了"），
+   * 落盘前把**本次写入/更新触及**的事实降一档清晰度（touched 之外的旧档不动）。 */
+  quietPenalized = applyQuietPenalty(touched, now);
+  if (quietPenalized) {
+    console.log('[memory] quiet-penalty', JSON.stringify({
+      penalized: quietPenalized,
+      quietHours: getQuietSpec()
+    }));
+  }
+
   saveStore(store);
-  return { added, updated, store };
+  return { added, updated, store, quietPenalized };
+}
+
+/**
+ * W2：夜间降权。安静时段写入的事实更可能是情绪化表达，落盘前降**本次 touched**
+ * 的事实一档清晰度。降档只是「标注模糊」，清晨 settle 会按 retention 自然升档，
+ * 无需主动恢复。
+ * 判定口径同 renderer/quiet-hours.js：配置不合法一律当不设（宁少降不误降）。
+ * name/boundary 与高重要度事实是「硬事实」，不降。
+ * @param {Array} touched 本次写循环触及的事实（活档）
+ * @param {number} now
+ * @returns {number} 实际降权的条数
+ */
+function applyQuietPenalty(touched, now) {
+  if (!Array.isArray(touched) || !touched.length) return 0;
+  if (getQuietPenalty() === false) return 0;   // W2 开关（memory.quietPenalty，默认开）
+  const range = parseQuietHoursLocal(getQuietSpec());
+  if (!range || !inQuietHoursLocal(range, new Date(now))) return 0;
+  let penalized = 0;
+  for (const f of touched) {
+    if (!f || isTombstone(f)) continue;
+    if (isFirstEncounter(f) || isPinned(f)) continue;   // 初次相遇/硬事实不降
+    const i = clarityIndex(f.clarity || 'vivid');
+    if (i >= clarityIndex('trace')) continue;           // 已到地板（trace 是 index 最大值）
+    f.clarity = CLARITY_ORDER[i + 1];                   // 降一档 = index 增大
+    penalized++;
+  }
+  return penalized;
 }
 
 function tokenize(s) {
@@ -668,6 +739,22 @@ function listFacts() {
   return loadStore().facts.filter((f) => !isTombstone(f));
 }
 
+/**
+ * W2：删除单条记忆（记忆日记本 UI）。id 命中的活档 → 墓碑。
+ * 不可逆（正文删了），仅在用户从日记本里明确点删除时调用。
+ * 墓碑保留 normalizeKey 供 upsert 复活匹配（见 toTombstone）。
+ * @returns {boolean} 是否真的删了一条活档
+ */
+function deleteFact(id) {
+  const store = loadStore();
+  const idx = store.facts.findIndex((f) => !isTombstone(f) && f.id === id);
+  if (idx < 0) return false;
+  store.facts[idx] = toTombstone(store.facts[idx]);
+  store.stats = store.stats || { forgotten: 0, dropped: 0 };
+  store.stats.forgotten = (Number(store.stats.forgotten) || 0) + 1;
+  return saveStore(store);
+}
+
 function clearFacts() {
   cache = emptyStore();
   return saveStore(cache);
@@ -705,6 +792,7 @@ module.exports = {
   injectMemoryContext,
   rememberTurn,
   listFacts,
+  deleteFact,
   clearFacts,
   loadStore,
   settle,
@@ -714,6 +802,10 @@ module.exports = {
   toTombstone,
   refreshFirstEncounters,
   hashUnit,
+  /* W2：夜间降权（内部函数，verify-w2 直接调） */
+  applyQuietPenalty,
+  parseQuietHoursLocal,
+  inQuietHoursLocal,
   /* 测试用 */
   _resetCache: () => { cache = null; },
   normalizeKey,

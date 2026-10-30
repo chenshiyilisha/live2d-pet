@@ -271,6 +271,9 @@ async function testSynth(server, text, opts) {
     for (const f of FAILS) console.error('  - ' + f);
     process.exit(1);
   }
+  /* winrt 合成子进程的句柄可能还没清干净（stopSynth 异步），
+   * 断言已全部跑完，直接退出避免挂住（批量跑时会被 timeout 误判为失败）。 */
+  process.exit(0);
 })().catch((err) => {
   console.error('verify-w47 异常:', err);
   process.exit(1);

@@ -244,7 +244,10 @@ configureThrowHooks({
 });
 memory.configureMemory({
   getPath: () => path.join(app.getPath('userData'), 'memory-facts.json'),
-  getForgetEnabled: () => !!(loadConfig().memory?.forget?.enabled)
+  getForgetEnabled: () => !!(loadConfig().memory?.forget?.enabled),
+  /* W2：安静时段来源复用 proactive.quietHours（口径唯一：解析失败当不设）。 */
+  getQuietSpec: () => String(loadConfig().proactive?.quietHours || ''),
+  getQuietPenalty: () => loadConfig().memory?.quietPenalty !== false
 });
 mcp.configureMcp({
   getCfg: () => loadConfig().mcp || { enabled: false, servers: [], grants: {} }
@@ -1838,6 +1841,159 @@ async function promptLlm() {
   return true;
 }
 
+/* W2：记忆日记本 —— 浏览 / 删除（设置菜单入口）。
+ * 列表在渲染层，删除时回调主进程 memory.deleteFact(id)（墓碑，不可逆）。
+ * 对话框内联 HTML（同 promptTts 模式）。 */
+function promptMemoryJournal() {
+  return new Promise((resolve) => {
+    const w = new BrowserWindow({
+      width: 460,
+      height: 520,
+      minWidth: 420,
+      minHeight: 380,
+      resizable: true,
+      minimizable: false,
+      maximizable: false,
+      frame: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
+      modal: !!mainWindow && !mainWindow.isDestroyed(),
+      show: false,
+      backgroundColor: '#1e1e22',
+      webPreferences: { contextIsolation: true, nodeIntegration: false }
+    });
+
+    const html = `<!doctype html><meta charset="utf-8"><style>
+      *{box-sizing:border-box;margin:0;padding:0}
+      html,body{height:100%}
+      body{background:#1e1e22;color:#e8e8ea;font:13px/1.5 "Microsoft YaHei",system-ui,sans-serif;
+           padding:16px 20px 12px;user-select:none;display:flex;flex-direction:column}
+      h2{font-size:14px;font-weight:500;margin-bottom:2px}
+      .sub{font-size:12px;color:#9a9aa4;margin-bottom:10px}
+      #list{flex:1;overflow-y:auto;border:1px solid #3a3a40;border-radius:6px;background:#26262b}
+      .item{padding:10px 12px;border-bottom:1px solid #33333a;display:flex;align-items:flex-start;gap:10px}
+      .item:last-child{border-bottom:none}
+      .text{flex:1;min-width:0;word-break:break-all}
+      .meta{font-size:11px;color:#7d7d88;margin-top:3px}
+      button.del{height:26px;padding:0 10px;border-radius:6px;border:1px solid #5a3a3a;
+                 background:#3a2222;color:#e8a8a8;font-size:12px;cursor:pointer;white-space:nowrap}
+      button.del:hover{filter:brightness(1.2)}
+      .empty{padding:24px 12px;text-align:center;color:#7d7d88;font-size:12px}
+      .grow{flex:1}
+      .row{display:flex;justify-content:flex-end;margin-top:12px}
+      button{height:28px;padding:0 14px;border-radius:6px;border:1px solid #3a3a40;
+             background:#2a2a30;color:#e8e8ea;font-size:13px;cursor:pointer}
+      button:hover{filter:brightness(1.15)}
+    </style>
+    <h2>记忆日记本</h2>
+    <div class="sub" id="sub">-</div>
+    <div id="list"></div>
+    <div class="grow"></div>
+    <div class="row">
+      <button id="c">关闭</button>
+    </div>
+    <script>
+      window.__memList = [];
+      function clarityLabel(c) {
+        if (c === 'fuzzy') return '记得不太清';
+        if (c === 'trace') return '好像有过';
+        return '清楚';
+      }
+      function kindLabel(k) {
+        return { name: '称呼', pref: '偏好', boundary: '边界', relation: '约定', other: '其它' }[k] || '其它';
+      }
+      function fmtDate(ts) {
+        if (!ts) return '-';
+        const d = new Date(ts);
+        return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      }
+      function render() {
+        const list = document.getElementById('list');
+        const sub = document.getElementById('sub');
+        sub.textContent = window.__memList.length + ' 条记忆';
+        if (!window.__memList.length) {
+          list.innerHTML = '<div class="empty">还没有记住什么。</div>';
+          return;
+        }
+        list.innerHTML = '';
+        for (const f of window.__memList) {
+          const row = document.createElement('div');
+          row.className = 'item';
+          const text = document.createElement('div');
+          text.className = 'text';
+          const prefix = (f.clarity === 'fuzzy' || f.clarity === 'trace')
+            ? '【' + clarityLabel(f.clarity) + '】' : '';
+          text.textContent = prefix + f.text;
+          const meta = document.createElement('div');
+          meta.className = 'meta';
+          meta.textContent = kindLabel(f.kind) + ' · ' + fmtDate(f.updated || f.at)
+            + (f.firstEncounter ? ' · 最初的日子' : '');
+          text.appendChild(meta);
+          const del = document.createElement('button');
+          del.className = 'del';
+          del.textContent = '删除';
+          del.onclick = () => { window.__memDelete = f.id; };
+          row.appendChild(text);
+          row.appendChild(del);
+          list.appendChild(row);
+        }
+      }
+      document.getElementById('c').onclick = () => { window.__memResult = 'close'; };
+      window.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape') window.__memResult = 'close';
+      });
+      render();
+    <\/script>`;
+
+    w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    w.once('ready-to-show', () => w.show());
+
+    /* 首屏列表 */
+    const injectList = () => w.webContents.executeJavaScript(
+      'window.__memList = ' + JSON.stringify(memory.listFacts().map((f) => ({
+        id: f.id, text: f.text, kind: f.kind,
+        clarity: f.clarity || 'clear',
+        updated: f.updated || f.at || 0,
+        at: f.at || 0,
+        firstEncounter: !!f.firstEncounter
+      }))) + '; render();'
+    ).catch(() => {});
+    injectList();
+
+    let finished = false;
+    const finish = (val) => {
+      if (finished) return;
+      finished = true;
+      clearInterval(timer);
+      if (!w.isDestroyed()) w.destroy();
+      resolve(val);
+    };
+    const timer = setInterval(async () => {
+      if (w.isDestroyed()) { finish(undefined); return; }
+      try {
+        const v = await w.webContents.executeJavaScript(
+          'window.__memDelete ?? window.__memResult ?? undefined');
+        if (v === undefined) return;
+        if (v === 'close') { finish('close'); return; }
+        /* v 是待删除的 fact id */
+        if (typeof v === 'string') {
+          const ok = memory.deleteFact(v);
+          if (ok) {
+            toast('已删除');
+            await w.webContents.executeJavaScript('window.__memDelete = null;');
+            injectList();
+          } else {
+            toast('这条已经不在了');
+            await w.webContents.executeJavaScript('window.__memDelete = null;');
+          }
+        }
+      } catch { /* 页面还在加载 */ }
+    }, 120);
+    w.on('closed', () => { if (!finished) { finished = true; clearInterval(timer); resolve(undefined); } });
+  });
+}
+
 /* ============================================================
  *  多配置档（M6）—— 家里 Ollama / 公司云 一键切
  * ========================================================== */
@@ -2729,6 +2885,16 @@ function buildMenuTemplate() {
       }
     },
     {
+      /* W2：夜间矛盾降权 —— 安静时段写入的事实降一档清晰度（带前缀标注，不删）。 */
+      label: '安静时段写入降一档',
+      type: 'checkbox',
+      checked: cfg.memory?.quietPenalty !== false,
+      click: (item) => {
+        patchConfig('memory', { quietPenalty: !!item.checked });
+        toast(item.checked ? '安静时段写入会先降一档' : '安静时段写入不再降档');
+      }
+    },
+    {
       label: '到期遗忘正文（默认关）',
       type: 'checkbox',
       checked: !!cfg.memory?.forget?.enabled,
@@ -3094,6 +3260,11 @@ function buildMenuTemplate() {
         try { memory.clearFacts(); } catch { /* ignore */ }
         toast('长期记忆已清空');
       }
+    },
+    {
+      /* W2：记忆日记本（浏览/删）。只读渲染层用 listFacts()。 */
+      label: '记忆日记本…',
+      click: () => { promptMemoryJournal(); }
     }
   ];
 

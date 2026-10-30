@@ -247,7 +247,9 @@ memory.configureMemory({
   getForgetEnabled: () => !!(loadConfig().memory?.forget?.enabled),
   /* W2：安静时段来源复用 proactive.quietHours（口径唯一：解析失败当不设）。 */
   getQuietSpec: () => String(loadConfig().proactive?.quietHours || ''),
-  getQuietPenalty: () => loadConfig().memory?.quietPenalty !== false
+  getQuietPenalty: () => loadConfig().memory?.quietPenalty !== false,
+  /* W49：已取代留档开关（memory.supersede，默认开）。 */
+  getSupersede: () => loadConfig().memory?.supersede !== false
 });
 mcp.configureMcp({
   getCfg: () => loadConfig().mcp || { enabled: false, servers: [], grants: {} }

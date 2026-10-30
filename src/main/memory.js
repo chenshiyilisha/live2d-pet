@@ -99,14 +99,16 @@ let getPath = () => null;
 let getForgetEnabled = () => false;
 let getQuietSpec = () => '';
 let getQuietPenalty = () => true;
+let getSupersede = () => true;   // W49：已取代留档开关（memory.supersede，默认开）
 let quietPenalized = 0;   // 最近一次 upsertFacts 夜间降权的条数（日志/调试用）
 let cache = null;   // { facts: Fact[] } | null
 
-function configureMemory({ getPath: gp, getForgetEnabled: gfe, getQuietSpec: gqs, getQuietPenalty: gqp } = {}) {
+function configureMemory({ getPath: gp, getForgetEnabled: gfe, getQuietSpec: gqs, getQuietPenalty: gqp, getSupersede: gsu } = {}) {
   if (typeof gp === 'function') getPath = gp;
   if (typeof gfe === 'function') getForgetEnabled = gfe;
   if (typeof gqs === 'function') getQuietSpec = gqs;
   if (typeof gqp === 'function') getQuietPenalty = gqp;
+  if (typeof gsu === 'function') getSupersede = gsu;
   cache = null;
 }
 
@@ -159,7 +161,8 @@ function refreshFirstEncounters(store) {
   if (!store || !Array.isArray(store.facts)) return store;
   const firstAt = Number(store.firstAt) || 0;
   if (!firstAt) return store;
-  const live = store.facts.filter((f) => !isTombstone(f));
+  /* W49：已取代留档不注入对话，锚点标记只给活档（留档有 superseded 语义本身）。 */
+  const live = store.facts.filter((f) => !isTombstone(f) && !isSuperseded(f));
   const already = live.filter(isFirstEncounter);
   if (already.length >= INITIAL.MAX_MARK) return store;
   const cands = [];
@@ -280,6 +283,68 @@ function extractHeuristic(userText) {
   return out;
 }
 
+/**
+ * W49：相似事实的两种关系。
+ *   'expand'    —— 旧事实是新事实的**子集**（包含 / 同值长句 / 措辞微调），合并、行为同旧；
+ *   'replace'   —— 同槽位出现**不同值**（共享模板骨架、中间只差一个短值），
+ *                 旧事实退场留档。
+ * 判据只做保守区分：判不出一律按 expand（合并），不误伤。
+ * 判据：公共前缀 P + 公共后缀 S（不重叠），要求 (P+S) ≥ 60% 较短句 ——
+ * 即两条事实共享大部分模板骨架，差异只落在中间的「值」上；
+ * 且中间值非空、互不相等 → replace。
+ */
+function factRelation(oldText, newText) {
+  const o = normalizeKey(oldText);
+  const n = normalizeKey(newText);
+  if (!o || !n) return 'expand';
+  if (o === n || o.includes(n) || n.includes(o)) return 'expand';
+  let p = 0;
+  while (p < o.length && p < n.length && o[p] === n[p]) p++;
+  let s = 0;
+  while (s < o.length - p && s < n.length - p &&
+         o[o.length - 1 - s] === n[n.length - 1 - s]) s++;
+  if (p + s < 0.6 * Math.min(o.length, n.length)) return 'expand';
+  const midO = o.slice(p, o.length - s);
+  const midN = n.slice(p, n.length - s);
+  if (!midO || !midN) return 'expand';        // 中间为空 = 同值长句（已在包含里拦掉）
+  if (midO === midN) return 'expand';
+  return 'replace';
+}
+
+/**
+ * W49：从事实文本取「槽位值」（模板尾部的 X，如「主人喜欢X」的 X）。
+ * 供外部核对与后续扩展用（factRelation 本身走公共后缀比对，不依赖本函数）。
+ */
+function extractSlotTail(text) {
+  const m = String(text || '').match(/主人喜欢([\u4e00-\u9fffA-Za-z0-9·•]{1,8})/);
+  if (m) {
+    const v = normalizeKey(m[1]);
+    if (v) return v;
+  }
+  return null;
+}
+
+/** 同 id / 同 key 墓碑复活时，旧档的 supersededBy 不继承（新写入视为有效当前值）。 */
+function clearSuperseded(f) {
+  const clean = { ...f };
+  delete clean.superseded;
+  delete clean.supersededBy;
+  return clean;
+}
+
+/** W49：把活档标记为「已被取代」。保留正文 + 时间戳供核对，注入层一律不选。 */
+function markSuperseded(f, byId, now) {
+  f.superseded = true;
+  f.supersededBy = String(byId || '');
+  f.supersededAt = now;
+  return f;
+}
+
+/** W49：留档事实（superseded）不参与召回/统计，但仍占容量。 */
+function isSuperseded(f) {
+  return !!(f && f.superseded === true);
+}
+
 /** 两段短事实是否该合并（同义改写）。 */
 function similarFact(a, b) {
   const ka = normalizeKey(a);
@@ -304,6 +369,7 @@ function upsertFacts(drafts, opts = {}) {
   const store = loadStore();
   let added = 0;
   let updated = 0;
+  let superseded = 0;   // W49：本轮被取代留档的旧事实条数
   const now = Number(opts.now) || Date.now();
   const touched = [];   // 本次写入/更新触及的事实（夜间降权只降这批）
 
@@ -347,18 +413,63 @@ function upsertFacts(drafts, opts = {}) {
       continue;
     }
 
-    let found = store.facts.find((f) => !isTombstone(f) && similarFact(f.text, text));
+    let found = store.facts.find((f) => !isTombstone(f) && !isSuperseded(f) && similarFact(f.text, text));
     if (found) {
-      /* 新的更具体就替换文案；种类取更「硬」的（name > boundary > …） */
-      if (text.length > found.text.length) found.text = text;
-      if ((KIND_BOOST[kind] || 0) > (KIND_BOOST[found.kind] || 0)) found.kind = kind;
-      found.updated = now;
-      found.hits = (found.hits || 0) + 1;
-      const imp = scoreImportance(found.text, found.kind, found.source);
-      found.importance = Math.max(Number(found.importance) || 0, imp);
-      found.pinned = isPinned(found);
-      updated++;
-      touched.push(found);
+      /* W49：firstEncounter（首次印象锚点）只拦删除/改写语义，不拦换值留档——
+       * 留档保住正文、改回旧值还能按 id 复活，锚点信息不丢。 */
+      if (factRelation(found.text, text) === 'replace' &&
+          getSupersede() !== false && !isPinned(found)) {
+        /* W49：同槽位换值 —— 旧事实退场留档（正文/时间保留，注入层不选）。
+         * 用户改回旧值时按 id 复活留档，不存两份同 id。 */
+        markSuperseded(found, id, now);
+        superseded++;
+        const source = d.source === 'llm' ? 'llm' : 'heuristic';
+        const prev = store.facts.find((f) => f.id === id && f !== found && isSuperseded(f));
+        const importance = scoreImportance(text, kind, source);
+        let fact;
+        if (prev) {
+          fact = clearSuperseded({
+            ...prev, text, kind, at: now, updated: now, hits: 0, source,
+            importance, clarity: 'vivid', lastSeen: 0, recallCount: 0,
+            pinned: false, firstEncounter: false, migrated: false
+          });
+          store.facts[store.facts.indexOf(prev)] = fact;
+        } else {
+          fact = {
+            id,
+            text,
+            kind,
+            at: now,
+            updated: now,
+            hits: 0,
+            source,
+            importance,
+            clarity: 'vivid',
+            lastSeen: 0,
+            recallCount: 0,
+            pinned: false,
+            firstEncounter: false,
+            migrated: false
+          };
+          fact.pinned = isPinned(fact);
+          store.facts.push(fact);
+          if (!store.firstAt) store.firstAt = now;
+          added++;
+        }
+        fact.pinned = isPinned(fact);
+        touched.push(fact);
+      } else {
+        /* expand：新的更具体就替换文案；种类取更「硬」的（name > boundary > …） */
+        if (text.length > found.text.length) found.text = text;
+        if ((KIND_BOOST[kind] || 0) > (KIND_BOOST[found.kind] || 0)) found.kind = kind;
+        found.updated = now;
+        found.hits = (found.hits || 0) + 1;
+        const imp = scoreImportance(found.text, found.kind, found.source);
+        found.importance = Math.max(Number(found.importance) || 0, imp);
+        found.pinned = isPinned(found);
+        updated++;
+        touched.push(found);
+      }
     } else {
       const source = d.source === 'llm' ? 'llm' : 'heuristic';
       const importance = scoreImportance(text, kind, source);
@@ -413,7 +524,10 @@ function upsertFacts(drafts, opts = {}) {
   }
 
   saveStore(store);
-  return { added, updated, store, quietPenalized };
+  if (superseded) {
+    console.log('[memory] supersede', JSON.stringify({ superseded }));
+  }
+  return { added, updated, superseded, store, quietPenalized };
 }
 
 /**
@@ -483,7 +597,8 @@ function recall(userText, opts = {}) {
   const injectMax = Math.max(1, Math.min(12, Number(opts.injectMax) || 6));
   const expand = opts.forceExpand || needsExpandedRecall(userText);
   const q = String(userText || '');
-  const live = store.facts.filter((f) => !isTombstone(f));
+  /* W49：已取代留档不参与召回（它不是「她记得的事」）。 */
+  const live = store.facts.filter((f) => !isTombstone(f) && !isSuperseded(f));
 
   /* W25：初次相遇单独成区，常驻少量（不挤掉 name/boundary）。 */
   const origin = live
@@ -603,6 +718,11 @@ function settle(storeIn, now = Date.now(), opts = {}) {
   const nextFacts = [];
   for (const f of store.facts) {
     if (isTombstone(f)) {
+      nextFacts.push(f);
+      continue;
+    }
+    /* W49：留档事实不参与升降/遗忘（它只是查得到，不占「记得」名额）。 */
+    if (isSuperseded(f)) {
       nextFacts.push(f);
       continue;
     }
@@ -735,8 +855,16 @@ async function extractViaLlm(userText, assistantText, llm = {}) {
   }
 }
 
-function listFacts() {
-  return loadStore().facts.filter((f) => !isTombstone(f));
+/**
+ * W49：listFacts 默认只列活档（记忆日记本展示「她现在记得的事」）；
+ * 传 opts.includeSuperseded=true 时附带留档（标注 supersededBy 可追溯）。
+ */
+function listFacts(opts = {}) {
+  const includeSuperseded = opts && opts.includeSuperseded === true;
+  return loadStore().facts.filter((f) => {
+    if (isTombstone(f)) return false;
+    return includeSuperseded || !isSuperseded(f);
+  });
 }
 
 /**
@@ -806,6 +934,12 @@ module.exports = {
   applyQuietPenalty,
   parseQuietHoursLocal,
   inQuietHoursLocal,
+  /* W49：已取代证据维度（内部函数，verify-w49 直接调） */
+  factRelation,
+  extractSlotTail,
+  isSuperseded,
+  markSuperseded,
+  clearSuperseded,
   /* 测试用 */
   _resetCache: () => { cache = null; },
   normalizeKey,

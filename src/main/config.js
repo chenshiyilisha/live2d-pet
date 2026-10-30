@@ -255,7 +255,10 @@ const DEFAULT_CONFIG = {
     /* W2：夜间矛盾降权。安静时段（proactive.quietHours）写入的事实先降
      * 一档清晰度——深夜说的"算了不喜欢了"更可能是情绪化表达。
      * 默认开；降到 fuzzy/trace 档只会带前缀标注，不会删。 */
-    quietPenalty: true
+    quietPenalty: true,
+    /* W49：已取代证据留档。同槽位换值时旧事实退场（正文/时间保留，注入层不选）。
+     * 默认开——「主人喜欢猫→改说喜欢狗」时她不该同时记得两件相悖的事。 */
+    supersede: true
   },
   /* G12：MCP 客户端骨架。默认关；无 server、无 SDK 依赖；工具调用需逐条授权。 */
   mcp: {

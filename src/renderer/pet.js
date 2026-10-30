@@ -9,13 +9,16 @@ import {
   EMO_SPEED, EMO_SPEED_DEFAULT, PAT, buildEmoTarget,
   EMO_SETTLE_EPS, EMO_SETTLE_HOLD_MS, emotionDeviation,
   emoDecayAmt, mixEmoDecay, mixEmoMood, EMO_RANGE,
-  EXPRESSIONS, EMOTES, PROPS
+  EXPRESSIONS, EMOTES, PROPS, applyProfile, profileCredit,
+  resolveEmotion, MOUTH_OPEN_MAX
 } from './params.js';
 import { pickProp, propDuration, propGap } from './prop-pool.js';
 import { configureTTS, initTTS, speak, enqueueSpeech, takeSentences, stopSpeak, ttsVoiceInfo, ttsQueueState, setSpeechObserver, lipEnv, spokenText, resetSpoken, isSpeaking } from './tts.js';
 import { parseQuietHours, inQuietHours, msUntilQuietEnd } from './quiet-hours.js';
 import { abortRecording, configureRecorder } from './recorder.js';
 import { rollFactors } from './jitter.js';
+import { pickIdleEmote } from './idle-tod.js';
+import { pokeThresholds, patThresholds } from './touch-mode.js';
 
 // 渲染进程崩溃时默认什么线索都拿不到，先把未捕获异常转发出来
 window.addEventListener('error', (e) => {
@@ -31,15 +34,21 @@ Live2DModel.registerTicker(PIXI.Ticker);
 
 console.log('[pet] modules loaded');
 
-/* 当前生效的模型名（初值来自 params.js 的 MODEL_NAME）。
+/* 当前生效的模型名（初值来自 params.js 的 MODEL_NAME；运行时跟 appearance.model）。
  * 是**可变状态**、且只有本文件写，所以不搬去 params.js ——
  * ESM 的 import 绑定是只读的，跨模块赋值不成立。
  *
- * ⚠️ 这里曾经还有一个"单飞守卫"（记下最近一次请求挂载的模型，加载完比对，
- *    不一致就把刚拿到的资源丢掉）。春移除后模型固定、mountModel 只在 boot
- *    里调一次，守卫再没有能触发的路径 —— 连同它的源码级断言一起删了，
- *    别让它烂在这儿冒充保护。 */
+ * mountGen：X1 热换时防止「慢请求后到」把新模型冲掉。 */
 let curModelName = MODEL_NAME;
+let mountGen = 0;
+/* X4：水平朝向（±1）与单摆倾角（弧度）。layout / squash 都要乘上它们。 */
+let facingDir = 1;
+let tiltRad = 0;
+
+function resolveModelName(name) {
+  const n = String(name || '').trim();
+  return MODELS[n] ? n : MODEL_NAME;
+}
 
 /* ============================================================
  *  DOM
@@ -140,6 +149,7 @@ let patMs = 0;            // 本次摸头已持续毫秒（只在 rising/holding
 let patReleased = false;  // rising 期间就松手了 —— 等它升完再回落，别半途砍断
 let patNagged = false;    // 这次已经抗议过了（只抗议一次）
 let patShy = false;       // 这次已经转过 shy（只转一次）
+let patAngry = false;     // W13：抗议后仍摸 → serious（只转一次）
 let patEscaped = false;   // 她已经自己挣脱过 —— 随后那次鼠标松开不算点击
 // 上一帧往各参数里叠加的增量。每帧先把上一帧的增量减掉再写新的，
 // 否则叠加会一层层累积下去（尤其是被 focus()/motion 也在写的头部角度）。
@@ -186,17 +196,42 @@ let decayActive = false;
  * ========================================================== */
 
 let statusTimer = null;
+/* 短提示：浮窗开着进气泡（status）；关着才用主窗琥珀色 #status。
+ * ⚠️ 这里直接读 cfg，不调后面才声明的 floatBubble() —— boot 早期失败也会 showStatus。 */
 function showStatus(msg) {
-  statusEl.textContent = msg;
+  const t = String(msg || '').trim();
+  if (!t) return;
+  if (cfg?.chat?.floatBubble !== false && typeof window.pet?.floatStatus === 'function') {
+    const ms = Math.max(2800, Math.min(6000, 2000 + t.length * 40));
+    try { window.pet.floatStatus(t, ms); } catch { /* ignore */ }
+    return;
+  }
+  statusEl.textContent = t;
   statusEl.classList.add('show');
   clearTimeout(statusTimer);
   statusTimer = setTimeout(() => statusEl.classList.remove('show'), 6000);
 }
 
 function setIgnoreMouse(ignore) {
+  /* W6：渐隐穿透中强制整窗 ignore，命中测试别把它顶回去。 */
+  if (hoverFadeOn) ignore = true;
   if (ignoringMouse === ignore) return;
   ignoringMouse = ignore;
   window.pet?.setIgnoreMouse(ignore);
+}
+
+/* W6：指针停在她身上一会儿 → 淡 + 穿透，方便点后面的窗口。 */
+let hoverFadeOn = false;
+let hoverFadeArmAt = 0;
+const HOVER_FADE_MS = 700;
+
+function setHoverFade(on) {
+  on = !!on && cfg?.appearance?.hoverFade === true;
+  if (hoverFadeOn === on) return;
+  hoverFadeOn = on;
+  if (!on) hoverFadeArmAt = 0;
+  try { window.pet?.setHoverFade?.(on); } catch { /* ignore */ }
+  if (on) setIgnoreMouse(true);
 }
 
 /* ── 参数读写：只有「按索引 + Core 原始数组」这一条路是正确的 ────────────
@@ -276,6 +311,13 @@ function setParam(id, value) {
     return;
   }
   try { core.setParameterValueByIndex(idx, value, 1); } catch { /* 模型未就绪时忽略 */ }
+}
+
+/* W34：口型写参前按档案 mouthOpenMax 夹取（默认 1）。 */
+function setMouthOpen(v) {
+  const max = typeof MOUTH_OPEN_MAX === 'number' && MOUTH_OPEN_MAX > 0 ? MOUTH_OPEN_MAX : 1;
+  const clamped = Math.max(0, Math.min(max, v));
+  setParam(P.MOUTH_OPEN, clamped);
 }
 
 function readParam(id) {
@@ -530,17 +572,17 @@ function tickProps(dt) {
   if (propNextMs > 0) return;
   /* 只在真正闲着的时候冒 —— 说话/听/想、被摸、在拖，都不冒。 */
   if (state !== State.IDLE || patState !== 'idle') { propNextMs = 6000; return; }
-  const spec = pickProp(PROPS[MODEL_NAME] || [], Math.random, propLast);
+  const spec = pickProp(PROPS[curModelName] || [], Math.random, propLast);
   if (!spec || !propExp.has(spec.file)) { propNextMs = propGap(PROP_GAP); return; }
   propCur = { file: spec.file, target: 1, remainMs: propDuration(spec) };
   propLast = spec.file;
   console.log('[pet] prop', JSON.stringify({ file: spec.file, ms: Math.round(propCur.remainMs) }));
 }
 
-/* 闲置久了脸上开始"走神"：2 分钟发呆（呆眼），4 分钟魂飞出去（吐魂）。
+/* 闲置久了脸上开始"走神"：2 分钟第一档，4 分钟第二档。
+ * W9：按时段从池里挑（早/午/晚/夜）；关 timeOfDayIdle 时退回呆眼→吐魂。
  * 和道具是两条独立的闲置线 —— 道具是"她自己在玩"，发呆是"她没在玩"。
- * 每个闲置周期各只来一次：一有互动（点/摸/说话/拖）就整个清零，
- * 否则隔几秒冒一次，就成了"循环动画"而不是"走神"。 */
+ * 每个闲置周期各只来一次：一有互动（点/摸/说话/拖）就整个清零。 */
 function tickIdleEmote(dt) {
   const on = cfg?.appearance?.expressions !== false && cfg?.appearance?.stickers !== false;
   if (!on || state !== State.IDLE || patState !== 'idle' || dragging) {
@@ -548,12 +590,22 @@ function tickIdleEmote(dt) {
     return;
   }
   idleMs += dt * 1000;
+  const tod = cfg?.appearance?.timeOfDayIdle !== false;
+  const have = typeof EMOTES !== 'undefined' && EMOTES?.[curModelName]
+    ? new Set(Object.keys(EMOTES[curModelName] || {}))
+    : null;
   if (idleEmoteStage === 0 && idleMs >= 120000) {
     idleEmoteStage = 1;
-    emote('呆眼', 3200);
+    const name = tod
+      ? (pickIdleEmote(new Date().getHours(), { stage: 0, have }) || '呆眼')
+      : '呆眼';
+    emote(name, 3200);
   } else if (idleEmoteStage === 1 && idleMs >= 240000) {
     idleEmoteStage = 2;
-    emote('吐魂', 4200);
+    const name = tod
+      ? (pickIdleEmote(new Date().getHours(), { stage: 1, have }) || '吐魂')
+      : '吐魂';
+    emote(name, 4200);
   }
 }
 
@@ -689,7 +741,7 @@ function emoteOff() {
 /* 解析档案 motionSlots：slot 名（thinking/drag…）或直接组名。空串 = 不播。 */
 function resolveMotionSlot(slotOrGroup) {
   if (!slotOrGroup) return '';
-  const slots = MODELS[MODEL_NAME]?.motionSlots;
+  const slots = MODELS[curModelName]?.motionSlots;
   if (slots && Object.prototype.hasOwnProperty.call(slots, slotOrGroup)) {
     return String(slots[slotOrGroup] || '');
   }
@@ -715,7 +767,10 @@ function stopEventMotions() {
  *    与 emote() 换事件表情同一条规矩：换档立刻卸下旧档专属参数，新档再淡入。
  *    共享参数（眉/嘴形）仍走 emoEff 插值，脸型过渡照旧柔。 */
 function setEmotion(name) {
-  if (!EMOTION[name]) return;
+  /* W33：协议标签缺档时走 emotionAlias，避免缺字段 = 眉停旧值。 */
+  const resolved = resolveEmotion(name);
+  if (!resolved) return;
+  name = resolved;
   /* 衰减的账清零。🔴 必须放在早退**之前**：同一个情绪再次触发
    * （LLM 连两句都给 happy、摸头时她本来就在 happy）也该算
    * "新的一股满强度情绪"，而不是接着上一次的残量继续往下衰。 */
@@ -850,6 +905,8 @@ function headBandH() {
 
 /* A 段 · 起手：patAmt 0→1（快），再叠上错峰插值本身的爬升。 */
 function patStart() {
+  wakeFromSleep('pat');
+  noteInteract();
   patState = 'rising';
   patAmt = 0;
   patPhase = 0;
@@ -857,6 +914,7 @@ function patStart() {
   patReleased = false;
   patNagged = false;
   patShy = false;
+  patAngry = false;
   patEscaped = false;
   window.pet?.activity?.();   // 手放上来了就算"有活动"：别在这时候溜达走
   setEmotion('happy');
@@ -883,6 +941,7 @@ function patAbort() {
   patReleased = false;
   patNagged = false;
   patShy = false;
+  patAngry = false;
   patEscaped = false;
 }
 
@@ -900,17 +959,25 @@ function updatePat(dt) {
 
   if (patState === 'holding') {
     patMs += dt * 1000;
+    /* W19：quiet/eager 缩放 PAT 时间门槛；normal = 原常数。 */
+    const th = patThresholds(cfg?.interaction?.touchMode, PAT);
     /* 害羞和抗议都发生在**按住的过程中**，不是等松手才反应 ——
      * 你一直按着不放，她中途就开始不自在。 */
-    if (!patShy && patMs >= PAT.shyMs) { patShy = true; setEmotion('shy'); }
-    if (!patNagged && patMs >= PAT.nagMs) {
+    if (!patShy && patMs >= th.shyMs) { patShy = true; setEmotion('shy'); }
+    if (!patNagged && patMs >= th.nagMs) {
       patNagged = true;
       say('别摸啦，头发要乱了。');
+    }
+    /* W13：抗议后仍不撒手 → 生气档（serious），再往后才挣脱。 */
+    if (!patAngry && patMs >= th.angryMs) {
+      patAngry = true;
+      setEmotion('serious');
+      say('都说了别摸了！');
     }
     /* 抗议过还不撒手 → 她自己挣脱（走 C 段回落，不理会手还在不在）。
      * ⚠️ 置 patEscaped 是为了让随后那一次 mouseup **不算点击** ——
      *    否则她挣脱完、用户松手，会被当成"戳了一下"再播一次 TapBody。 */
-    if (!patEscaped && patMs >= PAT.escapeMs) {
+    if (!patEscaped && patMs >= th.escapeMs) {
       patEscaped = true;
       say('……不理你了。');
       patRelease();
@@ -1136,12 +1203,17 @@ function applyTextureLod(m) {
 }
 
 async function mountModel(name) {
-  const def = MODELS[name] || MODELS.hiyori;
+  const want = resolveModelName(name);
+  const def = MODELS[want] || MODELS.hiyori;
+  const gen = ++mountGen;
 
   /* 切模型会重挂整套渲染资源（AudioContext / 纹理 / 画布），
    * 先把正在进行的录音作废 —— 否则麦克风会一直开着，而且录到的样本
    * 会跨在新旧两个模型之间。 */
   abortRecording();
+
+  /* 档案表必须在挂载前刷到目标模型 —— put() / 情绪目标读的是 live EMOTION/P。 */
+  applyProfile(want);
 
   /* ---- 1) 先把新模型加载好，**再**拆旧的 ----
    * boot 时 model / holder 都还是 null，下面"拆旧的"那几行其实是空转。
@@ -1156,6 +1228,11 @@ async function mountModel(name) {
     // 全部预加载掉，切换就是零延迟的。
     motionPreload: 'ALL'
   });
+  /* 慢请求后到：已经有更新的 mountModel 在飞，丢掉这份。 */
+  if (gen !== mountGen) {
+    try { next.destroy?.(); } catch { /* ignore */ }
+    return false;
+  }
   next.anchor.set(0, 0);
 
   /* ---- 2) 拆旧的。Cubism 的 GL 资源不主动释放就会一直挂着
@@ -1179,8 +1256,18 @@ async function mountModel(name) {
   }
   model = null;
 
+  /* G17：启动/热换偶现「两个她」—— stage 上残留孤儿 holder（慢请求后到被
+   * gen 丢掉、或 destroy 异常半截）。挂新模型前先把 stage 扫空。 */
+  if (app?.stage) {
+    while (app.stage.children.length) {
+      const orphan = app.stage.children[0];
+      try { app.stage.removeChild(orphan); } catch { /* ignore */ }
+      try { orphan.destroy?.({ children: true }); } catch { /* ignore */ }
+    }
+  }
+
   /* ---- 3) 换全局：取景几何与参数表都按新模型刷一遍 ---- */
-  applyModelGeometry(name);
+  applyModelGeometry(want);
   // 取景几何整体换掉了，命中测试的位置缓存必须作废，否则会拿旧坐标读像素
   hitCache = { x: NaN, y: NaN, a: -1, t: 0 };
 
@@ -1485,7 +1572,7 @@ async function mountModel(name) {
   }
 
   console.log('[pet] model mounted', JSON.stringify({
-    name,
+    name: want,
     drawables: model.internalModel?.coreModel?.getDrawableCount?.(),
     params: model.internalModel?.coreModel?.getParameterCount?.(),
     /* 有哪些动作组是「模型真的认得」的 —— 接线对不对，看这一行最快：
@@ -1495,9 +1582,9 @@ async function mountModel(name) {
   /* 自带 exp3 表情（情绪 / 事件 / 道具三张表）按**本次挂载的模型**加载
    * （不 await：解析失败/慢都别挡首帧，加载完成前三个 Map 都是空的，
    * applyExpressions 直接短路）。
-   * ⚠️ 必须放 mountModel 里用参数 name —— 曾经误放到 boot，那里裸写 `name`
+   * ⚠️ 必须放 mountModel 里用参数 want —— 曾经误放到 boot，那里裸写 `name`
    *    拿到的是 window.name（=''），表情全程静默失效。 */
-  loadExpressions(name).catch((e) => console.warn('[pet] expr fatal', String(e)));
+  loadExpressions(want).catch((e) => console.warn('[pet] expr fatal', String(e)));
   /* 人物刚画出来 → 重量一次头顶 y（悬浮气泡锚点）。慢一点等首帧画稳。 */
   setTimeout(() => window.pet?.requestHeadMeasure?.(), 1500);
   /* 摸头条带的锚（渲染层自己的实量头顶）也要量一次 —— 量不到会自动重试。 */
@@ -1615,7 +1702,7 @@ async function boot() {
     console.log('[pet] clearpatch err', String(e));
   }
 
-  await mountModel(MODEL_NAME);
+  await mountModel(resolveModelName(cfg?.appearance?.model || MODEL_NAME));
   // 加载成功的显式证据：若模型没真正就绪，这里会先炸
   const core = model.internalModel?.coreModel;
   console.log('[pet] model ready', JSON.stringify({
@@ -1690,9 +1777,21 @@ async function boot() {
           emoSteadyMs >= EMO_SETTLE_HOLD_MS) decayActive = true;
       if (decayActive && emotion !== 'calm') {
         decayMs += dt * 1000;
-        decayAmt = emoDecayAmt(emotion, decayMs);
+        /* OCEAN 衰减乘子（P3）：τ 变大 = 衰减更慢 → 等价于时钟变慢。
+         * 中性 ocean 乘子 ≈1，与没这功能逐位一致。 */
+        const dMul = oceanDecayMul(emotion);
+        decayAmt = emoDecayAmt(emotion, decayMs / dMul);
       }
       mixEmoDecay(emoEff, decayAmt);
+      /* G4：衰减到底 → 情绪标签也回 calm（否则脸上平静、台词池还按旧情绪挑，
+       * 过夜后像"挂了一整夜"的性格幽灵）。先 mix 再改标签；不走 setEmotion。 */
+      if (decayActive && decayAmt <= 0 && emotion !== 'calm' && EMOTION.calm) {
+        emotion = 'calm';
+        emoTarget = EMOTION.calm;
+        decayActive = false;
+        decayMs = 0;
+        decayAmt = 1;
+      }
     } else if (decayAmt !== 1) {
       /* 开关中途被关掉：回满强度，让插值自己滑回去（不硬跳）。 */
       decayAmt = 1;
@@ -1741,10 +1840,10 @@ async function boot() {
       ? emoSteadyMs + dt * 1000
       : 0;
 
-    /* 口型。两条路：
-     *   · 有真实包络（`tts.engine='winrt'`，声音由我们自己用 WebAudio 播，
-     *     见 tts.js 的 lipEnv）→ 嘴直接跟随真实音量；
-     *   · 没有（系统音色，或这一句刚回退过）→ 退回原来的正弦波。
+    /* 口型。三条路：
+     *   · 真实包络（winrt + WebAudio）→ lipEnv 非 null；
+     *   · G11 文字模拟（system / 回退）→ lipEnv 仍非 null（按字推进）；
+     *   · 仅当 lipEnv 为 null 且仍在念 → 最后的正弦兜底。
      * ⚠️ lipEnv 必须**每帧都调**：它内部带快攻慢放的平滑，调用频率变了
      *    平滑就变；而且队列空了（state 已回 IDLE）时还要靠它把嘴收回去。
      * 🔴 正弦波那条分支的判据是 `state === SPEAKING && isSpeaking()` ——
@@ -1754,14 +1853,14 @@ async function boot() {
     const env = lipEnv(dt);
     if (env !== null) {
       mouthLevel = env;
-      setParam(P.MOUTH_OPEN, mouthLevel);
+      setMouthOpen(mouthLevel);
     } else if (state === State.SPEAKING && isSpeaking()) {
       mouthPhase += dt * 10;
       mouthLevel = (Math.sin(mouthPhase) * 0.5 + 0.5) * 0.7 + 0.15;
-      setParam(P.MOUTH_OPEN, mouthLevel);
+      setMouthOpen(mouthLevel);
     } else if (mouthLevel > 0) {
       mouthLevel = Math.max(0, mouthLevel - dt * 4);
-      setParam(P.MOUTH_OPEN, mouthLevel);
+      setMouthOpen(mouthLevel);
     }
   }, null, PIXI.UPDATE_PRIORITY.LOW);
 
@@ -1775,6 +1874,7 @@ async function boot() {
     isBusy: () => busy,
     setState,
     isQuiet: () => quiet,
+    getEmotion: () => emotion,
     /* 主进程的 Windows 合成通道（见 src/main/tts.js）。
      * ⚠️ 调顶层桥必须 `window.pet?.xxx?.(` —— `.?.` 只护对象不护方法，
      *    写成 `window.pet.synthSpeech?.()` 在旧版本 preload 下会直接崩。 */
@@ -2122,7 +2222,9 @@ function layout() {
   // ---- 2) 缩放：整张 Cubism 画布恰好等于画布高度，再乘人物缩放系数 ----
   const s = (vh / CANVAS_H) * PET_SCALE;
   layoutBaseScale = s;
-  holder.scale.set(s * squashMul);
+  /* X4：scale.x 带朝向；rotation 带单摆倾角（甩抛/拖拽期间主进程推）。 */
+  holder.scale.set(s * squashMul * facingDir, s * squashMul);
+  holder.rotation = tiltRad;
 
   // ---- 3) 平移：把**模型墨水的真实顶部**对到 HEAD_PAD、身体中心对到窗口中心 ----
   // 关系式是 window = canvas内坐标 + CANVAS_OFF（CANVAS_OFF 就是 canvas 的 left/top，
@@ -2428,6 +2530,16 @@ function updatePointer(x, y) {
 window.pet?.onCursor?.((p) => {
   // 主进程的轮询覆盖窗口内外，直接采用
   updatePointer(p.x, p.y);
+  /* W6：渐隐中指针离开窗 → 立刻熄（mousemove 出窗就不来了）。 */
+  if (hoverFadeOn || hoverFadeArmAt) {
+    const W = stageEl?.clientWidth || 0;
+    const H = stageEl?.clientHeight || 0;
+    if (p.x < -2 || p.y < -2 || p.x > W + 2 || p.y > H + 2) {
+      setHoverFade(false);
+    } else {
+      scheduleHitTest(p.x, p.y);
+    }
+  }
 });
 
 /* 拖动前先接管：主进程轮询只负责视线，拖动位移仍由窗口内的 mousemove 出。 */
@@ -2450,8 +2562,21 @@ function scheduleHitTest(x, y) {
     const p = hitPending;
     hitPending = null;
     if (!p) return;
-    if (dragging) return;            // 拖动中固定不穿透，由下面的拖动分支接管
-    setIgnoreMouse(!(isOverPet(p.x, p.y) || isOverUI(p.x, p.y)));
+    if (dragging) {
+      setHoverFade(false);
+      return;            // 拖动中固定不穿透，由下面的拖动分支接管
+    }
+    const overPet = isOverPet(p.x, p.y);
+    const over = overPet || isOverUI(p.x, p.y);
+    /* W6：停在身上 ≥700ms → 渐隐穿透；离开身体或关开关 → 熄。 */
+    if (cfg?.appearance?.hoverFade === true && overPet && !isOverUI(p.x, p.y)) {
+      if (!hoverFadeArmAt) hoverFadeArmAt = Date.now();
+      else if (!hoverFadeOn && Date.now() - hoverFadeArmAt >= HOVER_FADE_MS) setHoverFade(true);
+    } else {
+      if (hoverFadeOn || hoverFadeArmAt) setHoverFade(false);
+      else hoverFadeArmAt = 0;
+    }
+    setIgnoreMouse(!over);
   });
 }
 
@@ -2507,6 +2632,8 @@ canvas.addEventListener('mousedown', (e) => {
     return;
   }
   if (e.button !== 0) return;
+  wakeFromSleep('click');
+  noteInteract();
   dragging = true;
   dragMoved = false;
   dragReacted = false;
@@ -2616,13 +2743,14 @@ function onPetClicked() {
   try { model.motion('TapBody'); } catch { /* 模型没这个组就算了 */ }
   playSquash(0.55);            // 点击 Q 弹（可关 interaction.squash）
 
-  if (cfg?.interaction?.pokeReact !== false && clickStreak >= 4) {
-    setEmotion('surprised');
-    /* 戳到第六下 → 快哭了。四下那句"戳够了没有"还带着点脾气，
-     * 六下的是真委屈（6哭贴纸 + 呆眼 + 波浪嘴，见档案的 emotes 表）。 */
-    const hurt = clickStreak >= 6;
+  const pokeTh = pokeThresholds(cfg?.interaction?.touchMode);
+  if (cfg?.interaction?.pokeReact !== false && clickStreak >= pokeTh.annoy) {
+    /* W13 递进 + W19 档位：annoy 惊讶 → hurt 委屈哭 → mad 生气（serious）。 */
+    const mad = clickStreak >= pokeTh.mad;
+    const hurt = clickStreak >= pokeTh.hurt;
+    setEmotion(mad ? 'serious' : 'surprised');
     if (hurt) emote('哭', 2600);
-    say(hurt ? '呜……你干嘛啦。' : '戳够了没有。');
+    say(mad ? '……你再戳试试。' : hurt ? '呜……你干嘛啦。' : '戳够了没有。');
     return;
   }
 
@@ -2857,18 +2985,53 @@ window.pet?.onThink?.((text) => {
 /* 心境层快照（主进程 10 秒 / 事件后推）：只缓存，主循环每帧从这取偏置权重。
  * 走 preload 的事件白名单（pet.on），通道不在白名单里时静默无操作 ——
  * moodSnap 保持 null，主循环的 mixEmoMood 收到 null 原样返回，零侵入。 */
-window.pet?.on?.('mood:snapshot', (s) => { if (s && typeof s === 'object') moodSnap = s; });
+/* G16：drowsy → sleep。精力偏低且闲置够久 → SLEEP；任何互动叫醒。 */
+const SLEEP_IDLE_MS = 12 * 60 * 1000;
+let lastInteractAt = Date.now();
+function noteInteract() { lastInteractAt = Date.now(); }
+function maybeEnterSleep() {
+  if (!moodSnap || cfg?.appearance?.mood === false) return;
+  if (busy || dragging || patState !== 'idle') return;
+  if (state !== State.IDLE) return;
+  const sleepy = Number(moodSnap?.bias?.sleepy) || 0;
+  const energy = Number(moodSnap?.energy);
+  const tired = sleepy >= 0.55 || (Number.isFinite(energy) && energy <= 0.25);
+  if (!tired) return;
+  if (Date.now() - lastInteractAt < SLEEP_IDLE_MS) return;
+  setState(State.SLEEP);
+  console.log('[pet] enter sleep（drowsy）');
+}
+function wakeFromSleep(why = '') {
+  if (state !== State.SLEEP) return;
+  setState(State.IDLE);
+  noteInteract();
+  if (why) console.log('[pet] wake from sleep', why);
+}
+
+window.pet?.on?.('mood:snapshot', (s) => {
+  if (s && typeof s === 'object') moodSnap = s;
+  maybeEnterSleep();
+});
 
 // 托盘 / 右键菜单里改了开关，重新读一遍配置
 // （语音朗读、主动搭话、互动行为、系统状态显示等开关都在里面）
 window.pet?.onConfigChanged?.(async () => {
   const wasFloating = cfg?.monitor?.floating === true;
+  const prevModel = curModelName;
   try {
     cfg = await window.pet.getConfig();
     llmUsable = !!cfg?.llm?.usable;
     applyFrameCap();   // 低配降帧等开关即时生效
+    if (cfg?.appearance?.hoverFade !== true) setHoverFade(false);
     // 大小也可能是在配置里改的，跟着同步一次
     setUserScale(cfg?.appearance?.scale);
+    /* X1：appearance.model 变了 → 热换档案 + 重挂（署名 toast 由主进程发）。 */
+    const nextModel = resolveModelName(cfg?.appearance?.model);
+    if (nextModel !== prevModel) {
+      await mountModel(nextModel);
+      const credit = profileCredit(nextModel);
+      if (credit) console.log('[pet] model credit', credit);
+    }
     /* 关掉悬浮显示时**只藏牌、不还高度**（2026-10-29「始终是加了底座时的大小」）：
      * 那一条高度是写死给"底座"的，关掉它只是为了不看牌，人物不该因此变大一圈 ——
      * 一变大就又是一次 canvas resize，正是这个 bug 的来路。
@@ -2939,12 +3102,41 @@ const INTERRUPT_MARK = '[Interrupted by user]';
  */
 function truncateHistoryOnInterrupt() {
   const heard = spokenText();
+  const wasSpeaking = isSpeaking() || state === State.SPEAKING;
+  const streaming = busy && !!String(replyBuffer || '').trim();
   resetSpoken();
-  if (!heard) return false;
   if (history.length && history[history.length - 1].content === INTERRUPT_MARK) return false;
 
   const last = history[history.length - 1];
+  const shown = String(replyBuffer || '').replace(/\s+$/, '');
+
+  /* G3：流式还没落历史 —— 按「念到的 / 看到的」先落一条半截 assistant。
+   * TTS 关着时 spoken 恒空，用气泡已显示的正文（用户眼里就是听到的）。 */
+  if (streaming && (!last || last.role !== 'assistant')) {
+    let text;
+    if (heard) {
+      text = heard.replace(/\s+$/, '') + (heard.length < shown.length ? '...' : '');
+    } else if (shown) {
+      text = shown + '...';
+    } else {
+      text = '...';
+    }
+    history.push({ role: 'assistant', content: text });
+    history.push({ role: 'user', content: INTERRUPT_MARK });
+    return true;
+  }
+
   if (!last || last.role !== 'assistant') return false;
+
+  /* 历史已有完整回复，但 TTS 一句还没泵出来就被打断 → 记成没听到。 */
+  if (!heard) {
+    if (wasSpeaking) {
+      last.content = '...';
+      history.push({ role: 'user', content: INTERRUPT_MARK });
+      return true;
+    }
+    return false;
+  }
   if (!last.content.startsWith(heard)) return false;
   if (last.content.length === heard.length) return false;   // 念完了，不算被打断
 
@@ -2967,6 +3159,10 @@ function truncateHistoryOnInterrupt() {
 function stopSpeaking() {
   stopSpeak();
   resetSpoken();
+  /* G20：打断后嘴型立刻归零（不等衰减帧）—— 否则半张嘴僵一下。 */
+  mouthLevel = 0;
+  mouthPhase = 0;
+  try { if (P?.MOUTH_OPEN) setParam(P.MOUTH_OPEN, 0); } catch { /* 模型未挂 */ }
   if (state === State.SPEAKING && !busy) setState(State.IDLE);
 }
 
@@ -2987,9 +3183,17 @@ const PROACTIVE_LINES = {
   sleepy: ['你也没睡啊……那我再撑一会儿。', '有点困了，你也早点睡。']
 };
 
+/* 久别招呼（P2）。与 main/line-pools.js 的 FAREWELL_LINES **逐字同步**
+ * （verify-line-pools 对两端断言）。离线主动搭话且 ≥4 小时没聊过 → 走这池。 */
+const FAREWELL_LINES = ['你回来了。', '好久没见。', '还在呢。', '嗯，你来了。'];
+const FAREWELL_AFTER_MS = 4 * 60 * 60 * 1000;
+
 /* 由情绪取一句话。情绪表里没有的（理论上不会）退回 calm，池子空也退回 calm ——
  * 这个函数**不许抛**，它跑在定时器回调里，抛出去就是一条没人接的异常。 */
 function proactiveLine(emo) {
+  if (lastChatAt > 0 && Date.now() - lastChatAt >= FAREWELL_AFTER_MS && FAREWELL_LINES.length) {
+    return FAREWELL_LINES[Math.floor(Math.random() * FAREWELL_LINES.length)];
+  }
   const pool = PROACTIVE_LINES[emo] || PROACTIVE_LINES.calm;
   const use = pool.length ? pool : PROACTIVE_LINES.calm;
   return use[Math.floor(Math.random() * use.length)];
@@ -3060,13 +3264,14 @@ function noteUserResponse() {
   pokeIdleTimer();
 }
 
-/* 撞上免打扰时段 → 排到时段结束那一刻再看。
- * ⚠️ 两头都要夹：下限 1 分钟（别刚跨过边界又反复贴上来），
- *    上限 30 分钟（配置写错也不至于把她冻住一整天）。 */
+/* 撞上免打扰时段 → 排到时段结束那一刻再看（G1）。
+ * ⚠️ 下限 1 分钟（别刚跨过边界又反复贴上来）。
+ * ⚠️ 上限 12 小时（覆盖默认 23-8；旧 30 分钟上限会让整夜每半小时空转一次）。
+ *    解析失败时 ms=0，走下限 1 分钟再看 —— 不会冻死一整天。 */
 function scheduleAfterQuietHours() {
   clearTimeout(idleTimer);
   const ms = msUntilQuietEnd(quietRange, new Date());
-  idleTimer = setTimeout(proactiveSpeak, Math.min(Math.max(ms, 60 * 1000), 30 * 60 * 1000));
+  idleTimer = setTimeout(proactiveSpeak, Math.min(Math.max(ms, 60 * 1000), 12 * 60 * 60 * 1000));
 }
 
 /* 媒体播放中不插话（2026-10-15 加，调研第 7 轮思路级第 3 条）。
@@ -3110,7 +3315,29 @@ function pokeIdleTimer() {
   // 下限 0.05 分钟（3 秒）：配置写错时不至于让角色一直碎碎念
   const mins = Number(cfg.proactive?.idleMinutes);
   const safe = Number.isFinite(mins) && mins >= 0.05 ? mins : 8;
-  idleTimer = setTimeout(proactiveSpeak, safe * 60 * 1000);
+  /* OCEAN·E×T：外向×话痨 → 间隔缩短（cfg.ocean 由主进程派生，公式在 ocean.js）。 */
+  const idleMul = Number(cfg?.ocean?.idleMinutesMul);
+  /* X2 陪伴档：再乘 presenceIdleMul（主进程派生进 cfg.presenceMul）。 */
+  const presMul = Number(cfg?.presenceMul ?? cfg?.presence?.idleMul);
+  const scaled = safe
+    * (Number.isFinite(idleMul) && idleMul > 0 ? idleMul : 1)
+    * (Number.isFinite(presMul) && presMul > 0 ? presMul : 1);
+  idleTimer = setTimeout(proactiveSpeak, Math.max(0.05, scaled) * 60 * 1000);
+}
+
+/* 当前情绪的衰减 τ 乘子（P3）。正/负查 ocean；其余 1。 */
+function oceanDecayMul(emo) {
+  const o = cfg?.ocean;
+  if (!o) return 1;
+  if (emo === 'happy' || emo === 'smile' || emo === 'shy' || emo === 'surprised') {
+    const m = Number(o.positiveDecayMul);
+    return Number.isFinite(m) && m > 0 ? m : 1;
+  }
+  if (emo === 'serious') {
+    const m = Number(o.negativeDecayMul);
+    return Number.isFinite(m) && m > 0 ? m : 1;
+  }
+  return 1;
 }
 
 /* 到点了但此刻不方便开口 —— **短周期重试**，而不是重排一整个闲置周期。
@@ -3138,6 +3365,7 @@ function retryIdleTimer(ms = PROACTIVE_RETRY_MS) {
  *    免打扰要排到时段结束，到上限要彻底停手。 */
 function proactiveBlockedBy() {
   if (busy) return 'busy';
+  if (state === State.SLEEP) return 'sleep';
   if (state !== State.IDLE) return 'state:' + state;
   /* 「情绪安定」判据 —— 见 params.js 的 EMO_SETTLE_EPS 段。
    * 她刚被打断一次、刚溜达回来、或手还在头上时，情绪参数都还在往目标走；
@@ -3153,10 +3381,14 @@ function proactiveBlockedBy() {
    * 对话交互"—— 用户开口、回复完成、她主动说完，三个时点都刷。 */
   const cd = cooldownMs();
   if (cd > 0 && Date.now() - lastChatAt < cd) return 'chat_cooldown';
+  /* X2 勿扰档：盖过 quietHours，全天不主动。 */
+  if (cfg?.presence?.mode === 'focus') return 'focus';
   /* 免打扰时段（配置 proactive.quietHours，形如 "23-8"，见 quiet-hours.js）。
    * 凌晨三点冒一句"起来动动"不是陪伴，是闹鬼 —— 调研里 astrbot 的
-   * quiet_hours 默认值就是 1-7 点整段闭嘴。 */
-  if (inQuietHours(quietRange, new Date())) return 'quiet_hours';
+   * quiet_hours 默认值就是 1-7 点整段闭嘴。
+   * X2 陪伴档忽略此时段（cfg.presenceIgnoreQuiet 由主进程派生）。 */
+  if (cfg?.presence?.mode !== 'companion' && !cfg?.presenceIgnoreQuiet
+      && inQuietHours(quietRange, new Date())) return 'quiet_hours';
   /* 连着追了几次都没人搭理 → 别追了（调研里的 max_unanswered_times）。
    * 量的是"**连着**"，不是"今天累计"：用户回一句就归零。 */
   const cap = maxUnanswered();
@@ -3176,6 +3408,8 @@ async function proactiveSpeak() {
     console.log('[pet] proactive 延后', JSON.stringify({ why, steadyMs: Math.round(emoSteadyMs), unanswered: proactiveUnanswered }));
     /* 免打扰时段：不该 2 秒探一次（那就是空转一整晚），排到时段结束那一刻。 */
     if (why === 'quiet_hours') { scheduleAfterQuietHours(); return; }
+    /* X2 勿扰：不空转重试 —— 等用户改回日常/陪伴（config:changed → pokeIdleTimer）。 */
+    if (why === 'focus') { clearTimeout(idleTimer); return; }
     /* 到未回复上限：这次不追了。**不排新定时器** —— 排了也是每 8 分钟一次、
      * 到点必被同一道闸门拦下的空转。她重新开口的时机是用户有反应
      * （noteUserResponse），那一下会把定时器重新武装上。 */
@@ -3301,7 +3535,10 @@ async function proactiveSpeak() {
 
 async function sendMessage() {
   const text = input.value.trim();
-  if (!text || busy || !model) return;
+  if (!text || !model) return;
+
+  wakeFromSleep('chat');
+  noteInteract();
 
   /* 用户发消息 = **明确**搭理她了 → 退避归零（见 noteUserResponse）。
    * 这条是 proactive 退避唯一的"复活"入口之一，别挪走。 */
@@ -3312,11 +3549,11 @@ async function sendMessage() {
   chatEpoch++;
   lastChatAt = Date.now();
 
-  busy = true;
   input.value = '';
   armComposerIdle();   // 刚开口：从这轮对话起重新算闲置
 
-  /* 上一轮她还没念完就被这一条打断 —— 分两步，顺序不能反：
+  /* 上一轮她还没念完 / 还在流式就被这一条打断（G3 允许 busy 时打断）——
+   * 分两步，顺序不能反：
    *   ① 先把"她实际说到哪了"截进历史（读的是 tts.js 那笔已念出的账，
    *      见 truncateHistoryOnInterrupt；开关 chat.interruptMark）；
    *   ② 再停朗读、清队列与分句缓冲 —— 否则新回复的朗读要排在旧句后面
@@ -3328,6 +3565,9 @@ async function sendMessage() {
   else resetSpoken();
   stopSpeaking();
   speechBuf = '';
+  window.pet?.floatHide?.();
+
+  busy = true;
 
   history.push({ role: 'user', content: text });
   if (history.length > 16) history.splice(0, history.length - 16);
@@ -3439,6 +3679,13 @@ window.pet?.onAppearance?.((a) => {
 
 // 操作反馈小字（改了大小 / 透明度时主进程会发过来）
 window.pet?.on?.('pet:toast', (d) => { if (d?.text) showStatus(d.text); });
+window.pet?.on?.('pet:emote', (d) => {
+  const name = String(d?.name || '').trim();
+  if (!name) return;
+  const ms = Number(d?.ms);
+  emote(name, Number.isFinite(ms) && ms > 0 ? ms : 2800);
+});
+window.pet?.on?.('pet:stop-speak', () => { try { stopSpeaking(); } catch { /* ignore */ } });
 
 /* 定时提醒 / 番茄钟到点 —— 气泡 + 语音。
  * 人不在屏幕前的时候语音是唯一有效的通道，所以这里一定会念（除非关了朗读）。 */
@@ -3526,15 +3773,16 @@ function playSquash(intensity = 0.5) {
   const amp = Math.max(0.08, Math.min(0.35, Number(intensity) * 0.35));
   clearTimeout(squashTimer);
   squashMul = 1 - amp;
-  holder.scale.set(layoutBaseScale * squashMul);
+  holder.scale.set(layoutBaseScale * squashMul * facingDir, layoutBaseScale * squashMul);
+  holder.rotation = tiltRad;
   /* 压扁 → 回弹过头 → 回正 */
   squashTimer = setTimeout(() => {
     if (!holder) return;
     squashMul = 1 + amp * 0.45;
-    holder.scale.set(layoutBaseScale * squashMul);
+    holder.scale.set(layoutBaseScale * squashMul * facingDir, layoutBaseScale * squashMul);
     squashTimer = setTimeout(() => {
       squashMul = 1;
-      if (holder) holder.scale.set(layoutBaseScale);
+      if (holder) applyHolderPose();
     }, 90);
   }, 70);
 }
@@ -3543,11 +3791,14 @@ window.pet?.on?.('pet:squash', (d) => {
   playSquash(Number(d?.intensity) || 0.5);
 });
 
-/* 工作状态镜像：thinking / working / success / error → 表情 + 槽位动作 */
+/* 工作状态镜像：thinking / working / success / error / attention → 表情 + 槽位动作
+ * P4：主进程可带 emotion（人格招牌偏置），缺省仍 happy/serious。
+ * W44：attention 档（Agent Stop 等）→ 惊讶一下再回 idle。 */
 let workStateTimer = 0;
 window.pet?.on?.('pet:work-state', (d) => {
   if (cfg?.interaction?.workState === false) return;
   const phase = d?.phase;
+  const emo = typeof d?.emotion === 'string' ? d.emotion : '';
   clearTimeout(workStateTimer);
   if (phase === 'thinking') {
     setState(State.THINKING);
@@ -3556,20 +3807,50 @@ window.pet?.on?.('pet:work-state', (d) => {
     /* SPEAKING 由首字 chunk 路径也会设；这里只补动作槽 */
     playEventMotion('working');
   } else if (phase === 'success') {
-    setEmotion('happy');
+    setEmotion(EMOTION[emo] ? emo : 'happy');
     playEventMotion('success');
     workStateTimer = setTimeout(() => {
       if (!busy && state !== State.SPEAKING) setState(State.IDLE);
       stopEventMotions();
     }, 1400);
   } else if (phase === 'error') {
-    setEmotion('serious');
+    setEmotion(EMOTION[emo] ? emo : 'serious');
     playEventMotion('error');
     workStateTimer = setTimeout(() => {
       if (!busy) setState(State.IDLE);
       stopEventMotions();
     }, 1600);
+  } else if (phase === 'attention') {
+    setEmotion(EMOTION[emo] ? emo : 'surprised');
+    /* 档案可无 attention 槽 → 回落 thinking 组。 */
+    if (!resolveMotionSlot('attention')) playEventMotion('thinking');
+    else playEventMotion('attention');
+    workStateTimer = setTimeout(() => {
+      if (!busy && state !== State.SPEAKING) setState(State.IDLE);
+      stopEventMotions();
+    }, 1500);
+  } else if (phase === 'idle') {
+    stopEventMotions();
+    if (!busy && state !== State.SPEAKING) setState(State.IDLE);
   }
+});
+
+/* X4 单摆 / 翻转 —— 改 holder 的 rotation / scale.x，不碰 layout 基准。 */
+function applyHolderPose() {
+  if (!holder) return;
+  const s = layoutBaseScale * squashMul;
+  holder.scale.set(s * facingDir, s);
+  holder.rotation = tiltRad;
+}
+window.pet?.on?.('pet:tilt', (d) => {
+  const r = Number(d?.rad);
+  tiltRad = Number.isFinite(r) ? r : 0;
+  applyHolderPose();
+});
+window.pet?.on?.('pet:facing', (d) => {
+  const dir = Number(d?.dir);
+  facingDir = dir < 0 ? -1 : 1;
+  applyHolderPose();
 });
 
 window.pet?.on?.('pet:quiet', (d) => {
@@ -3913,6 +4194,48 @@ function applyStatsReserve() {
 /* ============================================================
  *  启动
  * ========================================================== */
+
+/* ============================================================
+ *  X3：拖文件「吃下」→ 长期记忆
+ * ==========================================================
+ *  只收常见文本后缀；过大 / 二进制当场拒绝，不进主进程。
+ *  窗口常开 ignoreMouse —— 拖进来时先要她接住（preventDefault）。 */
+const EAT_EXT = /\.(txt|md|markdown|json|csv|log|text)$/i;
+const EAT_MAX = 32 * 1024;
+
+function eatDroppedFiles(fileList) {
+  const files = [...(fileList || [])].slice(0, 3);
+  if (!files.length) return;
+  for (const f of files) {
+    const name = String(f.name || '文件');
+    if (!EAT_EXT.test(name)) {
+      showStatus(`「${name}」嚼不动（只要 txt/md/json…）`);
+      continue;
+    }
+    if (f.size > EAT_MAX) {
+      showStatus(`「${name}」太大了（≤32KB）`);
+      continue;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || '');
+      window.pet?.eatFile?.({ name, text }).catch?.(() => {});
+    };
+    reader.onerror = () => showStatus(`「${name}」读失败`);
+    reader.readAsText(f.slice(0, EAT_MAX), 'utf-8');
+  }
+}
+
+window.addEventListener('dragover', (e) => {
+  if (![...e.dataTransfer.types].includes('Files')) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+});
+window.addEventListener('drop', (e) => {
+  if (![...e.dataTransfer.types].includes('Files')) return;
+  e.preventDefault();
+  eatDroppedFiles(e.dataTransfer.files);
+});
 
 boot().catch((err) => {
   console.error('[pet] boot failed', err);

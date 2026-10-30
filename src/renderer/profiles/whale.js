@@ -25,8 +25,17 @@
  *       param 里**不填** ID，引擎的 put() 会自动跳过（静默、无害）。
  */
 
+/* 切到本模型时 toast 一次的署名（X1）。素材源自 VTube Studio 模型包，
+ * Andersen216 补了 model3.json；商用授权未齐前仅本地可切、不上架默认。 */
+export const WHALE_CREDIT = '鲸鱼娘素材源自 VTube Studio 模型包（Andersen216 补 model3）';
+
 export const WHALE = {
   name: 'whale',
+  credit: WHALE_CREDIT,
+
+  /* W33 / W34：本档情绪齐全、口型全开。半身降档档案再收紧。 */
+  emotionAlias: {},
+  mouthOpenMax: 1,
 
   model: {
     label: '鲸鱼娘',
@@ -145,32 +154,25 @@ export const WHALE = {
   },
 
   /* ============================================================
-   *  8 情绪 × 16 字段。
+   *  8 情绪 × 16 字段（G18：按真脸重调，2026-10-30）
    *
-   *  ⚠️ 这一整组是**从 hiyori 原样抄来的，还没按这个模型调过**。
-   *  抄过来是为了先把链路跑通（字段集一致是档案契约的硬要求）；
-   *  每个模型的脸长什么样、参数口径（有的模型 body 是归一值不是度）
-   *  都不一样，这表必须在看着真人调过之后才算数。
+   *  这模型没有微笑眼参数 → eyeSmile 列写了 put() 也跳过（契约保留）。
+   *  补偿：用 **嘴形 / 脸红(Paramhh2) / 微眯眼 / 眉与头姿** 把情绪读出来；
+   *  贴纸层（expressions 表）再叠一层贴图开关，连续脸 + 贴纸互补。
    *
-   *  弯眼（eyeSmile）那一路写了也白写 —— 这模型没有微笑眼参数，
-   *  写了会被 put() 静默跳过（保留是为了字段集契约）。
-   *
-   *  同理 **bodyY / bodyZ / ahoge 三列现在也是"写了不生效"** —— param 里
-   *  那三个 ID 已按上文的物理冲突结论清空，put() 会跳过它们。留着数值是
-   *  为了①字段集契约（规矩 28，少一个键 verify 就红）；②将来要是这个
-   *  模型的物理被关掉（appearance 开关 / 换 physics3.json），把 ID 填回去
-   *  立刻就能用，不用重新调表情。
-   *  ⚠️ 别因为"看着没变化"就把这三列的数值删了 —— 那是契约不是死代码。
+   *  bodyY / bodyZ / ahoge 仍是"写了不生效"（物理输出，见 param 注释），
+   *  数值留着守字段集契约，别当死代码删。
    * ========================================================== */
   emotion: {
     calm:      { browLY: 0,     browRY: 0,     browLX: 0,     browRX: 0,     browAngle: 0,     browForm: 0,    mouthForm: 0,     eyeSmile: 0,    eyeOpen: 1,    cheek: 0,    headZ: 0,   headY: 0,   shoulder: 0,    ahoge: 0,    bodyY: 0,    bodyZ: 0 },
-    happy:     { browLY: 0.45,  browRY: 0.45,  browLX: 0,     browRX: 0,     browAngle: 0.15,  browForm: 0,    mouthForm: 0.85,  eyeSmile: 1,    eyeOpen: 0.95, cheek: 0.2,  headZ: -4,  headY: -3,  shoulder: 0.1,  ahoge: 0.5,  bodyY: 2.5,  bodyZ: 0 },
-    smile:     { browLY: 0.2,   browRY: 0.2,   browLX: 0,     browRX: 0,     browAngle: 0.1,   browForm: 0,    mouthForm: 0.55,  eyeSmile: 0.7,  eyeOpen: 1,    cheek: 0.1,  headZ: -2,  headY: 0,   shoulder: 0,    ahoge: 0.25, bodyY: 1.5,  bodyZ: 0 },
-    think:     { browLY: -0.45, browRY: -0.2,  browLX: 0.35,  browRX: -0.3,  browAngle: -0.45, browForm: 0.6,  mouthForm: -0.25, eyeSmile: 0,    eyeOpen: 0.7,  cheek: 0,    headZ: 7,   headY: 2,   shoulder: 0,    ahoge: -0.35, bodyY: 0,   bodyZ: 2.5 },
-    shy:       { browLY: -0.25, browRY: -0.25, browLX: 0,     browRX: 0,     browAngle: 0.35,  browForm: 0,    mouthForm: 0.35,  eyeSmile: 0.55, eyeOpen: 0.8,  cheek: 1,    headZ: 0,   headY: 6,   shoulder: 0.25, ahoge: -0.2, bodyY: -3,   bodyZ: 0 },
-    serious:   { browLY: -0.6,  browRY: -0.6,  browLX: -0.4,  browRX: -0.4,  browAngle: -0.25, browForm: 0,    mouthForm: -0.45, eyeSmile: 0,    eyeOpen: 1,    cheek: 0,    headZ: 0,   headY: -1,  shoulder: 0,    ahoge: -0.1, bodyY: 1.5,  bodyZ: 0 },
-    surprised: { browLY: 0.8,   browRY: 0.8,   browLX: 0,     browRX: 0,     browAngle: 0,     browForm: 0,    mouthForm: 0.15,  eyeSmile: 0,    eyeOpen: 1.05, cheek: 0.15, headZ: 0,   headY: -2,  shoulder: 0.35, ahoge: 0.85, bodyY: -5,   bodyZ: 0 },
-    sleepy:    { browLY: -0.15, browRY: -0.15, browLX: 0,     browRX: 0,     browAngle: 0.1,   browForm: 0,    mouthForm: 0.05,  eyeSmile: 0.25, eyeOpen: 0.35, cheek: 0.12, headZ: 4,   headY: 4,   shoulder: -0.1, ahoge: -0.5, bodyY: 2.5,  bodyZ: 2.5 }
+    /* 无弯眼：嘴再咧一点 + 脸红抬高 + 眼略眯（代替 eyeSmile） */
+    happy:     { browLY: 0.35,  browRY: 0.35,  browLX: 0,     browRX: 0,     browAngle: 0.2,   browForm: 0,    mouthForm: 0.95,  eyeSmile: 1,    eyeOpen: 0.88, cheek: 0.45, headZ: -6,  headY: -2,  shoulder: 0.1,  ahoge: 0.5,  bodyY: 2.5,  bodyZ: 0 },
+    smile:     { browLY: 0.18,  browRY: 0.18,  browLX: 0,     browRX: 0,     browAngle: 0.12,  browForm: 0,    mouthForm: 0.7,   eyeSmile: 0.7,  eyeOpen: 0.92, cheek: 0.28, headZ: -3,  headY: 0,   shoulder: 0,    ahoge: 0.25, bodyY: 1.5,  bodyZ: 0 },
+    think:     { browLY: -0.5,  browRY: -0.18, browLX: 0.4,   browRX: -0.35, browAngle: -0.5,  browForm: 0.7,  mouthForm: -0.35, eyeSmile: 0,    eyeOpen: 0.65, cheek: 0,    headZ: 8,   headY: 3,   shoulder: 0,    ahoge: -0.35, bodyY: 0,   bodyZ: 2.5 },
+    shy:       { browLY: -0.3,  browRY: -0.3,  browLX: 0,     browRX: 0,     browAngle: 0.4,   browForm: 0,    mouthForm: 0.42,  eyeSmile: 0.55, eyeOpen: 0.72, cheek: 1,    headZ: 2,   headY: 8,   shoulder: 0.25, ahoge: -0.2, bodyY: -3,   bodyZ: 0 },
+    serious:   { browLY: -0.75, browRY: -0.75, browLX: -0.5,  browRX: -0.5,  browAngle: -0.3,  browForm: 0.15, mouthForm: -0.55, eyeSmile: 0,    eyeOpen: 1,    cheek: 0,    headZ: 0,   headY: -2,  shoulder: 0,    ahoge: -0.1, bodyY: 1.5,  bodyZ: 0 },
+    surprised: { browLY: 0.9,   browRY: 0.9,   browLX: 0,     browRX: 0,     browAngle: 0.05,  browForm: 0,    mouthForm: 0.4,   eyeSmile: 0,    eyeOpen: 1.08, cheek: 0.28, headZ: 0,   headY: -4,  shoulder: 0.35, ahoge: 0.85, bodyY: -5,   bodyZ: 0 },
+    sleepy:    { browLY: -0.22, browRY: -0.22, browLX: 0,     browRX: 0,     browAngle: 0.12,  browForm: 0,    mouthForm: 0.1,   eyeSmile: 0.25, eyeOpen: 0.28, cheek: 0.2,  headZ: 6,   headY: 5,   shoulder: -0.1, ahoge: -0.5, bodyY: 2.5,  bodyZ: 2.5 }
   },
 
   /* 口径照 hiyori，但这个模型的实际取值范围还没实测 —— 中文名只给了

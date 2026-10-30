@@ -26,6 +26,9 @@ import { WHALE } from './profiles/whale.js';
 
 export const MODELS = { [HIYORI.name]: HIYORI.model, [WHALE.name]: WHALE.model };
 
+/* 完整档案表（含 param/emotion…）。applyProfile 从这里取数热换。 */
+const PROFILE_PACKS = { [HIYORI.name]: HIYORI, [WHALE.name]: WHALE };
+
 /* 各模型的「情绪 → exp3 表情」映射（whale 独有，hiyori 是 undefined）。
  * 消费方 pet.js 的加载器用它拼 expressions/ 下的文件名。
  *
@@ -47,18 +50,22 @@ export const EMOTES = { [WHALE.name]: WHALE.emotes };
 /* 道具池：{ 模型: [ { file, w, ms } ] }。闲置时随机冒出来，见 prop-pool.js。 */
 export const PROPS = { [WHALE.name]: WHALE.props };
 
-/* 当前模型的档案键 —— 全项目只在这里写一次这个字符串。
- * 主进程、渲染层、诊断脚本都引用它，免得再出现「配置里写一个名字、
- * 代码里比对另一个名字」这种两边不一致。
- * ⚠️ 切模型目前是**改这一行**（whale 接入验证中，还没做运行时切换）。 */
-export const MODEL_NAME = WHALE.name;
+/* 默认档案键（配置缺失 / 校验脚本兜底）。运行时以 appearance.model 为准，
+ * 经 applyProfile 热换下面的 let 表 —— 别再靠改这一行切模型。 */
+export const MODEL_NAME = HIYORI.name;
 
-/* 当前档案的数据表（以旧名字导出 —— pet.js / diag.js / verify 的进口）。 */
-export const PARAM = WHALE.param;
-export const EMOTION = WHALE.emotion;
-export const EMO_RANGE = WHALE.emoRange;
-export const PAT_DELTA = WHALE.patDelta;
-export const EMO_SPEED = WHALE.emoSpeed;
+/* 当前档案的数据表（以旧名字导出 —— pet.js / diag.js / verify 的进口）。
+ * ⚠️ 必须是 let：X1 运行时切模型要整表换掉；ESM live binding 让消费方
+ *    不用改 import。const 绑死 WHALE/HIYORI 对象后热换无效。 */
+export let PARAM = HIYORI.param;
+export let EMOTION = HIYORI.emotion;
+export let EMO_RANGE = HIYORI.emoRange;
+export let PAT_DELTA = HIYORI.patDelta;
+export let EMO_SPEED = HIYORI.emoSpeed;
+/* W33：协议标签 → 档案实有情绪。缺档时 setEmotion 走这里，防眉卡死。 */
+export let EMOTION_ALIAS = HIYORI.emotionAlias || {};
+/* W34：口型写参上限（降档口腔一张张嘴图时夹到 <1）。默认 1。 */
+export let MOUTH_OPEN_MAX = typeof HIYORI.mouthOpenMax === 'number' ? HIYORI.mouthOpenMax : 1;
 
 /* 当前生效的参数表。
  *
@@ -68,6 +75,35 @@ export const EMO_SPEED = WHALE.emoSpeed;
  * 多模型化后别名表回来了 —— 就是现在 profiles 里的 param 档案
  * （缺键 = 该模型没有这器官，pet.js 的 put() 自动跳过）。 */
 export let P = { ...PARAM };
+
+/** 把档案表刷成指定模型。返回实际生效的档案键（未知名回落 hiyori）。 */
+export function applyProfile(name) {
+  const pack = PROFILE_PACKS[name] || PROFILE_PACKS[HIYORI.name];
+  PARAM = pack.param;
+  EMOTION = pack.emotion;
+  EMO_RANGE = pack.emoRange;
+  PAT_DELTA = pack.patDelta;
+  EMO_SPEED = pack.emoSpeed;
+  EMOTION_ALIAS = pack.emotionAlias || {};
+  MOUTH_OPEN_MAX = typeof pack.mouthOpenMax === 'number' ? pack.mouthOpenMax : 1;
+  P = { ...PARAM };
+  return pack.name;
+}
+
+/** W33：把协议/调用方情绪名解析成档案里真有的档。无映射则 null。 */
+export function resolveEmotion(name) {
+  if (!name) return null;
+  if (EMOTION[name]) return name;
+  const a = EMOTION_ALIAS[name];
+  if (a && EMOTION[a]) return a;
+  return null;
+}
+
+/** 署名文案（whale 有；hiyori 无）。切模型 toast 用。 */
+export function profileCredit(name) {
+  const pack = PROFILE_PACKS[name];
+  return (pack && pack.credit) ? String(pack.credit) : '';
+}
 
 export const State = {
   IDLE: 'idle',
@@ -124,6 +160,8 @@ export const PAT = {
   fall: 1.4,        // ≈0.71s 回 0
   shyMs: 1400,      // 按住这么久 → 从 happy 转 shy（蹭久了会害羞）
   nagMs: 3000,      // 按住这么久 → 抗议一句（摸太久了）
+  /* W13：抗议过后还不撒手 → 生气档（serious）。必须 nagMs < angryMs < escapeMs。 */
+  angryMs: 5000,
   /* 按住这么久 → 她**自己去挣脱**：不等你松手，patAmt 自己回落。
    * 参考 VirtualCockroach 的抚摸分级（舒服 → 提醒 → 烦 → 强行挣脱），
    * 我们原来只做到"烦"（nagMs），手不松开她就会一直由着你摸。

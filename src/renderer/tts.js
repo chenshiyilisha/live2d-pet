@@ -1,4 +1,5 @@
 import { State } from './params.js';
+import { applyEmotionVoice } from './tts-emotion.js';
 
 /* ============================================================
  *  语音朗读
@@ -40,6 +41,8 @@ let deps = {
    *    靠每一处自己记得判断，早晚会漏一个 —— 而"漏一个"的表现就是
    *    打游戏时角色突然开口说话，正是这个功能要消灭的东西。 */
   isQuiet: () => false,
+  /* W11：当前情绪标签；缺省 calm。 */
+  getEmotion: () => 'calm',
   /* 让主进程用 Windows 语音合成吐一段 wav（见 src/main/tts.js）。
    * 默认 null —— 没有它（旧版 preload、或被裁掉的构建）就整个功能退回
    * 系统内置音色，一行都不能炸。 */
@@ -70,36 +73,71 @@ export function initTTS() {
   speechSynthesis.onvoiceschanged = pick;
 }
 
-/* 现在能不能出声？三条都要满足：开关开着、浏览器有 speechSynthesis、
- * 音色表已经填好（异步）。 */
+/* 现在能不能出声？开关开着即可。
+ * W14：speechSynthesis / winrt 都挂了仍允许走 silent（嘴型文字模拟 + 气泡有字）。 */
 function canSpeak() {
   const cfg = deps.getCfg();
-  return !!cfg?.tts?.enabled && typeof speechSynthesis !== 'undefined' && ttsReady;
+  if (!cfg?.tts?.enabled) return false;
+  if (typeof speechSynthesis === 'undefined') return true;
+  return ttsReady || degradeSticky === 'silent';
 }
 
 /* 这一句用哪个引擎。
  * ⚠️ 只有"配置选了 winrt" **且** "合成通道真的注入了"才算 winrt。
  *    少判后半个条件，旧 preload（没有 synthSpeech）就会让每一句都
- *    先等一次必然失败的合成 —— 观感是"朗读要停两秒才开口"。 */
+ *    先等一次必然失败的合成 —— 观感是"朗读要停两秒才开口"。
+ * W14 降级机：winrt 失败 → 本会话粘滞 system；system 也挂 → silent。 */
 const ENGINE_SYSTEM = 'system';
 const ENGINE_WINRT = 'winrt';
+let degradeSticky = null;   // null | 'system' | 'silent'
+
+function markDegrade(level, why) {
+  if (level === 'silent') {
+    if (degradeSticky !== 'silent') {
+      console.warn('[tts] degrade → silent', why || '');
+    }
+    degradeSticky = 'silent';
+    return;
+  }
+  if (level === 'system' && degradeSticky !== 'silent') {
+    if (degradeSticky !== 'system') {
+      console.warn('[tts] degrade winrt → system', why || '');
+    }
+    degradeSticky = 'system';
+  }
+}
 
 function engineOf() {
+  if (degradeSticky === 'system' || degradeSticky === 'silent') return ENGINE_SYSTEM;
   const e = deps.getCfg()?.tts?.engine;
   return e === ENGINE_WINRT && typeof deps.synth === 'function' ? ENGINE_WINRT : ENGINE_SYSTEM;
 }
 
+/** W14：当前降级档 —— 'winrt' | 'system' | 'silent'（诊断 / verify 用）。 */
+export function ttsDegradeLevel() {
+  if (degradeSticky === 'silent') return 'silent';
+  if (degradeSticky === 'system') return 'system';
+  if (typeof speechSynthesis === 'undefined' || !ttsReady) {
+    return engineOf() === ENGINE_WINRT ? 'winrt' : 'silent';
+  }
+  return engineOf() === ENGINE_WINRT ? 'winrt' : 'system';
+}
+
 /* 合成参数。两个引擎的语速/音调语义一致（都是 1 = 正常），所以同一份
- * 配置直传，只做钳制 —— winrt 那边超出范围会抛。 */
+ * 配置直传，只做钳制 —— winrt 那边超出范围会抛。
+ * W11：再叠情绪分轨（emotionVoice 关则原样）。 */
 function synthOpts() {
   const t = deps.getCfg()?.tts || {};
   const r = Number(t.rate);
   const p = Number(t.pitch);
-  return {
+  const base = {
     rate: Number.isFinite(r) ? Math.min(3, Math.max(0.5, r)) : 1.05,
     pitch: Number.isFinite(p) ? Math.min(2, Math.max(0, p)) : 1,
     voice: String(t.voice || '')
   };
+  return applyEmotionVoice(base, deps.getEmotion?.() || 'calm', {
+    enabled: t.emotionVoice !== false
+  });
 }
 
 /* ============================================================
@@ -124,8 +162,43 @@ let ac = null;             // AudioContext（懒建：没有朗读就一个都�
 let analyser = null;
 let envBuf = null;
 let currentSrc = null;     // 正在播的那一段
-let lipActive = false;     // 这一轮朗读是有真实波形的（false → pet.js 回正弦波）
+let lipActive = false;     // 这一轮朗读是有真实波形的（false → 文字模拟 / 正弦）
 let lipLevel = 0;
+/* G11：拿不到波形时按文本推进口型（标点处闭嘴），优于无关正弦波。
+ * 蓝本 Nexus lipSync.simulateText；88ms/字再按语速缩放。 */
+let textSim = null;        // { text, i, acc, msPerChar } | null
+
+function startTextSim(text) {
+  const rate = synthOpts().rate || 1.05;
+  textSim = {
+    text: String(text || ''),
+    i: 0,
+    acc: 0,
+    msPerChar: 88 / Math.max(0.5, Math.min(3, rate))
+  };
+  lipLevel = 0;
+}
+function stopTextSim() {
+  textSim = null;
+}
+function stepTextSim(dt) {
+  if (!textSim) return null;
+  textSim.acc += (dt || 0) * 1000;
+  while (textSim.acc >= textSim.msPerChar && textSim.i < textSim.text.length) {
+    textSim.acc -= textSim.msPerChar;
+    textSim.i++;
+  }
+  let target = 0;
+  if (textSim.i < textSim.text.length) {
+    const ch = textSim.text[textSim.i] || ' ';
+    const isSoft = /[\s,，。.!！？、:：;；~]/.test(ch);
+    target = isSoft ? 0.08 + Math.random() * 0.08 : 0.32 + Math.random() * 0.46;
+  }
+  const k = target > lipLevel ? LIP_ATTACK : LIP_RELEASE;
+  lipLevel += (target - lipLevel) * (1 - Math.exp(-(dt || 0) * k));
+  if (target === 0 && lipLevel < 0.002) lipLevel = 0;
+  return lipLevel;
+}
 
 function getAC() {
   if (ac) return ac;
@@ -153,25 +226,26 @@ function getAC() {
  * 当前的口型强度。**每帧调用一次**（内部带平滑，调用频率变了平滑就变）。
  *
  * @param {number} dt 距上一帧的秒数
- * @returns {number|null} 0..1 的真实包络；**null = 这一段没有波形**，
- *                        调用方（pet.js）应退回它自己的正弦波动画。
+ * @returns {number|null} 0..1 包络；**null** = 本段既无波形也无文字模拟，
+ *                        调用方（pet.js）才退回正弦波动画。
  */
 export function lipEnv(dt) {
-  if (!lipActive) return null;
-
-  let target = 0;
-  if (currentSrc && analyser && envBuf) {
-    analyser.getFloatTimeDomainData(envBuf);
-    let sum = 0;
-    for (let i = 0; i < envBuf.length; i++) sum += envBuf[i] * envBuf[i];
-    const rms = Math.sqrt(sum / envBuf.length);
-    target = Math.min(1, rms * LIP_GAIN);
+  if (lipActive) {
+    let target = 0;
+    if (currentSrc && analyser && envBuf) {
+      analyser.getFloatTimeDomainData(envBuf);
+      let sum = 0;
+      for (let i = 0; i < envBuf.length; i++) sum += envBuf[i] * envBuf[i];
+      const rms = Math.sqrt(sum / envBuf.length);
+      target = Math.min(1, rms * LIP_GAIN);
+    }
+    const k = target > lipLevel ? LIP_ATTACK : LIP_RELEASE;
+    lipLevel += (target - lipLevel) * (1 - Math.exp(-(dt || 0) * k));
+    if (target === 0 && lipLevel < 0.002) lipLevel = 0;
+    return lipLevel;
   }
-
-  const k = target > lipLevel ? LIP_ATTACK : LIP_RELEASE;
-  lipLevel += (target - lipLevel) * (1 - Math.exp(-(dt || 0) * k));
-  if (target === 0 && lipLevel < 0.002) lipLevel = 0;
-  return lipLevel;
+  if (textSim) return stepTextSim(dt);
+  return null;
 }
 
 /* ============================================================
@@ -298,35 +372,58 @@ const MAX_QUEUE = 8;
 let speechObserver = null;
 export function setSpeechObserver(fn) { speechObserver = fn; }
 
+/* W14 末档：不出声，只跑文字口型，按字数估时推进队列。 */
+function playSilent(text, finish) {
+  lipActive = false;
+  startTextSim(text);
+  deps.setState(State.SPEAKING);
+  const ms = Math.max(800, String(text || '').length * 120);
+  ttsGuard = setTimeout(() => { stopTextSim(); finish(); }, ms);
+}
+
 /* 用**系统内置音色**念一条（Chromium speechSynthesis）。
  * 它也是 winrt 那条路的兜底 —— 所以这里必须一条路都能走通、不依赖
- * 任何 winrt 侧的状态。 */
+ * 任何 winrt 侧的状态。W14：连它也挂 → silent。 */
 function playSystem(text, finish) {
-  /* 回到机械口型：这一段没有波形可分析，嘴巴交回 pet.js 的正弦波。
+  /* 没有波形：G11 文字模拟口型（标点处降幅）；lipEnv 非 null 时 pet.js 不再跑正弦。
    * （winrt 和 system 在同一轮里混着出现是可能的 —— 中间某句合成失败。） */
+  if (typeof speechSynthesis === 'undefined' || typeof SpeechSynthesisUtterance === 'undefined') {
+    markDegrade('silent', 'no-speechSynthesis');
+    playSilent(text, finish);
+    return;
+  }
   lipActive = false;
-  lipLevel = 0;
+  startTextSim(text);
+  const wrap = () => { stopTextSim(); finish(); };
 
   try {
     const u = new SpeechSynthesisUtterance(text);
     if (ttsVoice) u.voice = ttsVoice;
     u.lang = ttsVoice?.lang || 'zh-CN';
-    const cfg = deps.getCfg();
-    u.rate = cfg?.tts?.rate ?? 1.05;
-    u.pitch = cfg?.tts?.pitch ?? 1.0;
+    const so = synthOpts();
+    u.rate = so.rate;
+    u.pitch = so.pitch;
     u.onstart = () => deps.setState(State.SPEAKING);
-    u.onend = finish;
+    u.onend = wrap;
     /* ⚠️ onerror 也必须推进队列。不接的话：合成失败的那一条永远不回调，
      *    队列卡在 ttsActive=true，后面所有句子全部哑掉（而且不报错）。 */
-    u.onerror = finish;
+    u.onerror = (ev) => {
+      /* cancel/interrupt 也会走 onerror —— 别把打断当成引擎挂掉。 */
+      const err = String(ev?.error || '');
+      if (err && err !== 'interrupted' && err !== 'canceled') {
+        markDegrade('silent', err);
+      }
+      wrap();
+    };
     speechSynthesis.speak(u);
 
     /* 兜底：onend 偶尔不触发（合成被中断、引擎抽风），会让队列永远卡住。
      * 按字数粗估一个上限，到点强制推进。 */
-    ttsGuard = setTimeout(finish, Math.max(2000, text.length * 260) + 2500);
+    ttsGuard = setTimeout(wrap, Math.max(2000, text.length * 260) + 2500);
   } catch (err) {
     console.warn('[pet] 朗读失败:', err?.message || err);
-    finish();                        // 抛错也要推进，别卡住队列
+    markDegrade('silent', err?.message || 'playSystem-throw');
+    playSilent(text, finish);
   }
 }
 
@@ -340,6 +437,7 @@ async function playWinrt(text, gen, finish, pcm) {
     buf = pcm ? await pcm : await deps.synth(text, synthOpts());
   } catch (err) {
     console.warn('[pet] 语音合成失败，本句回退系统音色:', err?.message || err);
+    markDegrade('system', err?.message || 'synth-throw');
     buf = null;
   }
   /* 合成要等在途的进程，这期间可能已经被打断（用户发了新消息、
@@ -347,7 +445,11 @@ async function playWinrt(text, gen, finish, pcm) {
   if (gen !== ttsGen) { finish(); return; }
 
   const ctx = buf ? getAC() : null;
-  if (!buf || !ctx) { playSystem(text, finish); return; }
+  if (!buf || !ctx) {
+    markDegrade('system', !buf ? 'synth-empty' : 'no-audiocontext');
+    playSystem(text, finish);
+    return;
+  }
 
   let audio = null;
   try {
@@ -359,9 +461,14 @@ async function playWinrt(text, gen, finish, pcm) {
     audio = await ctx.decodeAudioData(buf);
   } catch (err) {
     console.warn('[pet] 音频解码失败，本句回退系统音色:', err?.message || err);
+    markDegrade('system', err?.message || 'decode-fail');
   }
   if (gen !== ttsGen) { finish(); return; }
-  if (!audio || !audio.duration) { playSystem(text, finish); return; }
+  if (!audio || !audio.duration) {
+    markDegrade('system', 'bad-audio');
+    playSystem(text, finish);
+    return;
+  }
 
   try {
     const src = ctx.createBufferSource();
@@ -373,6 +480,7 @@ async function playWinrt(text, gen, finish, pcm) {
     };
     src.onended = end;
     currentSrc = src;
+    stopTextSim();
     lipActive = true;
     lipLevel = 0;
     src.start();
@@ -384,6 +492,7 @@ async function playWinrt(text, gen, finish, pcm) {
     console.warn('[pet] 播放失败，本句回退系统音色:', err?.message || err);
     currentSrc = null;
     lipActive = false;
+    markDegrade('system', err?.message || 'play-fail');
     playSystem(text, finish);
   }
 }
@@ -451,6 +560,7 @@ function stopAudio() {
   if (src) { try { src.stop(); } catch { /* ignore */ } }
   lipActive = false;
   lipLevel = 0;
+  stopTextSim();
 }
 
 /* 清场：掐掉在念的、清空队列、作废在途回调。 */
@@ -505,6 +615,6 @@ export function ttsVoiceInfo() {
 export function ttsQueueState() {
   return {
     queued: ttsQueue.length, active: ttsActive, gen: ttsGen,
-    engine: engineOf(), lip: lipActive, lipLevel
+    engine: engineOf(), degrade: ttsDegradeLevel(), lip: lipActive, lipLevel
   };
 }

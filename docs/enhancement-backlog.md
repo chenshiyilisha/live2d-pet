@@ -364,3 +364,4 @@
 | 2026-10-30 | **W10/W19/W20/W23/W24**：话痨维 T · 触摸 quiet/normal/eager · 气泡穿透(=G15) · 记忆重要度/清晰度(=G19)。回归 `verify-w10-w19-w20.js` + `verify-ocean.js` |
 | 2026-10-30 | **W11/W25/W43**：情绪分轨 TTS · 初次相遇独立轴 · pickers 纯函数。回归 `verify-w11-w25-w43.js` |
 | 2026-10-30 | **W1/W12/W29/W44**：限时看屏授权 · PetEvent 总线 · Agent JSONL · workStatus+attention。回归 `verify-w1-w12-w29-w44.js` |
+| 2026-10-30 | **第三方模型「大肥鱼」(deepfish) 接入**（VTS 包改来，Cubism 5）：`profiles/deepfish.js` 档案（8 情绪 × 16 字段 · 10 个安全参数 · 三张表情表 key 参数互不重叠）· `params.js` 四注册表 + `main.js` 菜单（署名 toast）· **头物理链输入是 AngleX/Y/Z**（非 ParamAngle*，与 hiyori 相反）· ParamBrowL/RAngle 是物理输出（与 whale 不同）· 无眉 X/Form、无微笑眼、无连续脸红、无呆毛 → 全部置 null · 素材禁二次分发 → 不进安装包、不进 models.zip · 回归 `verify-deepfish.js`（六段断言 + 两负对照） | 素材自带使用须知（神宫凉子 / 霓虹猫） |

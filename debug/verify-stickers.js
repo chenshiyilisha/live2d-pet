@@ -118,8 +118,8 @@ console.log('[A] 档案三张表与素材文件');
 console.log('\n[B] 渲染层链路');
 {
   ok(/function loadExpressions\(/.test(pet), 'loadExpressions 存在');
-  ok(/loadExpressions\(name\)/.test(pet),
-    '调用点用 mountModel 的 name 参数（⚠️ 别挪去 boot：那里裸写 name 是 window.name=""，曾静默失效）');
+  ok(/loadExpressions\((?:name|want|modelName)\)/.test(pet),
+    '调用点用 mountModel 的模型名（want/name；⚠️ 别挪去 boot：那里裸写 name 是 window.name=""）');
   ok(/function splitExp3\(/.test(pet), 'splitExp3 存在（一个 exp3 拆两条通道）');
 
   /* 拆分优先级：能落到 16 字段的走增量层，**先判 EXP3_FIELD 再判 owned**。
@@ -166,7 +166,7 @@ console.log('\n[B] 渲染层链路');
   /* 道具调度：只在她真正闲着时冒 */
   ok(/state !== State\.IDLE \|\| patState !== 'idle'/.test(pet),
     '道具只在 IDLE 且没在摸头时冒（说话/听/想、被摸、在拖都不冒）');
-  ok(/pickProp\(PROPS\[MODEL_NAME\]/.test(pet) && /propDuration\(spec\)/.test(pet),
+  ok(/pickProp\(PROPS\[(?:MODEL_NAME|curModelName)\]/.test(pet) && /propDuration\(spec\)/.test(pet),
     '抽签与时长走 prop-pool 的纯函数（可单独断言）');
   ok(/forceProp\(null\)|propCur\.target = 0/.test(pet), '收起道具走淡出，不是直接置 null（否则残影）');
 

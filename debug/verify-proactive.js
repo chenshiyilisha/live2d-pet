@@ -386,7 +386,9 @@ console.log('\n══════ E. 媒体播放中不插话（2026-10-15 加�
   {
     check(/proactive\?\.allowSilent !== false/.test(MAIN_LF), 'allowSilent 默认开语义（写 false 才关）');
     check(/只回一个 \[silent\]/.test(MAIN_LF), '主动搭话的 prompt 给了"不说"的出口');
-    check(/res\?\.ok && res\.silent\)[\s\S]{0,320}?return \{ ok: true, silent: true \};/.test(MAIN_LF),
+    /* W26 先记账后生成：沉默也要 settleDelivery 收账，两行之间因此多了记账调用；
+     * return 也带上了 reason / head（给账本与人设复盘用）。按前缀匹配，不钉闭括号。 */
+    check(/res\?\.ok && res\.silent\)[\s\S]{0,800}?return \{ ok: true, silent: true/.test(MAIN_LF),
       '主进程识别沉默并原样转告（正文早已被清洗层剥掉）');
     const silentBranch = PET_LF.slice(
       PET_LF.indexOf('if (res?.ok && res.silent)'),

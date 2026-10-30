@@ -210,7 +210,7 @@ const PET = read('renderer/pet.js');
       ok(iMix < iLerp, 'mixEmoDecay 在插值循环之前（回落复用错峰插值）');
       ok(ticker.includes('cfg?.appearance?.emotionDecay !== false'),
         '开关读法 `!== false`（默认开，老配置无此键）');
-      ok(ticker.includes('decayActive') && ticker.includes('emoDecayAmt(emotion, decayMs)'),
+      ok(ticker.includes('decayActive') && /emoDecayAmt\(emotion,\s*decayMs/.test(ticker),
         '启动条件 + 曲线推进都在主循环里');
       /* 关掉开关 = 回满强度（不硬跳） */
       const iElse = ticker.indexOf('} else if (decayAmt !== 1) {');

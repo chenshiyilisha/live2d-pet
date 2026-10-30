@@ -123,13 +123,13 @@ console.log('\n══════ D. 与 pet.js / config.js 的接线 ═══�
 
   ok(/import \{ parseQuietHours, inQuietHours, msUntilQuietEnd \} from '\.\/quiet-hours\.js'/.test(PET),
     'pet.js 把三个函数都引进来了');
-  ok(/if \(inQuietHours\(quietRange, new Date\(\)\)\) return 'quiet_hours'/.test(PET),
+  ok(/inQuietHours\(quietRange, new Date\(\)\)/.test(PET) && /return 'quiet_hours'/.test(PET),
     "闸门里有免打扰这一条（返回 'quiet_hours' 供日志辨认）");
   ok(/if \(why === 'quiet_hours'\) \{ scheduleAfterQuietHours\(\); return; \}/.test(PET),
     '🔴 撞上免打扰**不是** 2 秒重试 —— 走排到时段结束那条路（否则空转一整晚）');
   const sched = PET.slice(PET.indexOf('function scheduleAfterQuietHours()'), PET.indexOf('function pokeIdleTimer()'));
-  ok(/Math\.min\(Math\.max\(ms, 60 \* 1000\), 30 \* 60 \* 1000\)/.test(sched),
-    '排的时长两头都夹住了（下限 1 分钟、上限 30 分钟 —— 配置写错也不至于冻一整天）');
+  ok(/Math\.min\(Math\.max\(ms, 60 \* 1000\), 12 \* 60 \* 60 \* 1000\)/.test(sched),
+    '排的时长两头都夹住了（下限 1 分钟、上限 12 小时 —— 盖住默认 23-8，不整夜空转）');
   ok(/quietRange = parseQuietHours\(cfg\?\.proactive\?\.quietHours\)/.test(PET),
     '区间在配置变更时重算（refreshProactiveConfig）');
 

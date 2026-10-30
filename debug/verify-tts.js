@@ -67,9 +67,14 @@ const finishCurrent = () => {
     path.join(dir, 'params.mjs'),
     fs.readFileSync(path.join(SRC, 'renderer', 'params.js'), 'utf8')
       .replace(/'\.\/profiles\/([A-Za-z0-9_-]+)\.js'/g, "'./profiles/$1.mjs'"));
+  /* tts.js 现在多了一个同级依赖 tts-emotion.js（语音情绪映射，无二级 import）。
+   * 漏复制 = 临时目录 ERR_MODULE_NOT_FOUND，整个套件在 import 就死了。 */
+  fs.copyFileSync(path.join(SRC, 'renderer', 'tts-emotion.js'), path.join(dir, 'tts-emotion.mjs'));
   fs.writeFileSync(
     path.join(dir, 'tts.mjs'),
-    read(path.join('renderer', 'tts.js')).replace(/from '\.\/params\.js'/, "from './params.mjs'")
+    read(path.join('renderer', 'tts.js'))
+      .replace(/from '\.\/params\.js'/, "from './params.mjs'")
+      .replace(/from '\.\/tts-emotion\.js'/, "from './tts-emotion.mjs'")
   );
   const T = await import(pathToFileURL(path.join(dir, 'tts.mjs')).href);
 
@@ -399,7 +404,14 @@ const finishCurrent = () => {
     const iState = up.indexOf("patState !== 'idle'");
     ok(iEsc > 0 && iState > 0 && iEsc < iState,
       'mouseup 里先看 patEscaped 再看 patState（挣脱后的松手不该算点击）');
-    ok(/PAT\.escapeMs/.test(noComment), '挣脱用 PAT.escapeMs（不写死数字）');
+    /* 逃脱阈值后来过了一层触摸模式缩放：PAT.escapeMs → touch-mode.baseTh() → pet.js 用 th.escapeMs。
+     * 判据仍是「不写死数字」：pet.js 只许引用 th.escapeMs，常量必须真在 params.js 里，
+     * 且 pet.js 不许出现 `patMs >= 8000` 这种字面量（否则改常量等于没改）。 */
+    const paramsNoC = read(path.join('renderer', 'params.js'));
+    ok(/th\.escapeMs/.test(noComment)
+      && /escapeMs:\s*\d+/.test(paramsNoC)
+      && !/patMs\s*>=\s*\d{3,}/.test(noComment),
+      '挣脱阈值走常量（PAT.escapeMs → th.escapeMs，不写死数字）');
   }
 
   /* 收尾清理 */

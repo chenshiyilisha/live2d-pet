@@ -112,7 +112,10 @@ console.log('\n══════ C. 主进程接线 ══════\n');
     '托盘勾选立刻生效（不用重启）');
   /* 2026-10-22 起这两行之间还有心境层的启动（loadAndDrift + moodTick），
    * 断言只钉「refreshMediaWatcher 在启动路径上被调过」，不钉紧邻关系。 */
-  check(/refreshMediaWatcher\(\);\s*\n[\s\S]{0,400}warnIfModelsMissing\(\)/.test(MAIN), '启动时按配置起进程');
+  /* 启动路径：refreshMediaWatcher() → （心境 loadAndDrift + moodTick + 各模块启动）→
+   * warnIfModelsMissing()。中间后来插了心境层与在线感几段，窗口 400 → 2000；
+   * 判据仍是「同一条启动流程里、media 起在模型体检之前」，不是随便找一处命中。 */
+  check(/refreshMediaWatcher\(\);\s*\n[\s\S]{0,2000}warnIfModelsMissing\(\)/.test(MAIN), '启动时按配置起进程');
   check(/stopMediaWatch\(\)/.test(MAIN.replace(/function stopMediaWatch[\s\S]*?\n}/, '')),
     '🔴 退出时显式杀进程（Windows 上父进程退出不带走子进程）');
   check(/ipcMain\.handle\('media:get'/.test(MAIN) && /isOn\('media', 'enabled'\) \? getMedia\(\) : null/.test(MAIN),

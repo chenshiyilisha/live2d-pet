@@ -14,8 +14,10 @@
  */
 
 const {
-  PROVIDERS, providerById, currentProviderId, isLocalUrl, isUsable, toPatch, fromWorkBuddyModels
+  PROVIDERS, providerById, currentProviderId, isLocalUrl, isUsable, toPatch, fromWorkBuddyModels,
+  featuredProviders, moreProviders, isTestGreen, suggestTimeouts, TIMEOUT_CLOUD, TIMEOUT_LOCAL
 } = require('../src/main/llm-providers');
+const { LLM_TIMEOUT } = require('../src/main/llm');
 
 let failures = 0;
 let total = 0;
@@ -74,10 +76,15 @@ const deepseek = providerById('deepseek');
 const patch = toPatch(deepseek);
 check(patch.provider === 'deepseek' && patch.baseUrl === deepseek.baseUrl && patch.model === deepseek.model,
   '普通预设：provider + baseUrl + model 一起给');
+check(patch.stallMs === TIMEOUT_CLOUD.stallMs && patch.totalMs === TIMEOUT_CLOUD.totalMs,
+  '云端预设带云端超时（M9）');
 check(!('apiKey' in patch), '预设**不动** apiKey（用户已填的 key 不能被覆盖）');
 check(JSON.stringify(toPatch(providerById('custom'))) === JSON.stringify({ provider: 'custom' }),
   '自定义项只改 provider，不覆盖已填的地址');
 check(toPatch(null) === null, '空入参返回 null');
+const ollamaPatch = toPatch(providerById('ollama'));
+check(ollamaPatch.stallMs === TIMEOUT_LOCAL.stallMs && ollamaPatch.totalMs === TIMEOUT_LOCAL.totalMs,
+  '本地预设带本地超时（M9）');
 
 /* ── E. fromWorkBuddyModels ──────────────────────────────── */
 console.log('\nE. fromWorkBuddyModels（WorkBuddy models.json）');
@@ -129,8 +136,61 @@ check(currentProviderId({ provider: 'workbuddy', model: 'm' }) === 'workbuddy', 
 check(currentProviderId({}) === 'custom', '空配置 = 自定义（不抛）');
 check(currentProviderId(undefined) === 'custom', 'undefined 不抛');
 
-/* ── F. 负对照：断言必须能红 ─────────────────────────────── */
-console.log('\nF. 负对照（故意给错期望，上面这套断言必须翻红）');
+/* ── F. M5 设置页 / M3 拉列表（源码级） ──────────────────── */
+console.log('\nF. M5 设置页 + M3 拉列表（main.js 接线）');
+{
+  const fs = require('fs');
+  const path = require('path');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'main.js'), 'utf8');
+  check(/模型设置/.test(main) && /extraBody/.test(main) && /stallSec/.test(main),
+    '设置页含模型设置 / extraBody / 超时（秒）');
+  check(/function listLlmModels\(/.test(main) && /\/models`/.test(main),
+    'listLlmModels 打 GET …/models');
+  check(/拉取列表/.test(main) && /__fillModels/.test(main),
+    '页内「拉取列表」把 id 填进 datalist');
+  check(/label: '模型设置…'/.test(main), '托盘入口改叫「模型设置…」');
+  check(/async function testLlm\(override\)/.test(main),
+    'testLlm 接受 override（页内先测再存）');
+}
+
+/* ── G. M8 目录精简 + 绿标 / M9 超时 ─────────────────────── */
+console.log('\nG. M8 云端目录精简 + 绿标 · M9 场景超时');
+const featured = featuredProviders();
+const more = moreProviders();
+check(featured.length >= 4, `featured 至少 4 条（实测 ${featured.length}）`);
+check(featured.some((p) => p.id === 'deepseek') && featured.some((p) => p.id === 'qwen'),
+  'featured 含 DeepSeek + 通义');
+check(featured.some((p) => p.local) && featured.some((p) => p.custom),
+  'featured 含本地 + 自定义');
+check(more.every((p) => !p.featured), '更多列表全非 featured');
+check(featured.length + more.length === PROVIDERS.length, 'featured ∪ 更多 = 全表');
+check(isTestGreen({
+  baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat',
+  tested: { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' }
+}) === true, '指纹一致 → 绿');
+check(isTestGreen({
+  baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat',
+  tested: { baseUrl: 'https://api.deepseek.com/v1', model: 'other' }
+}) === false, '模型名变 → 掉绿');
+check(isTestGreen({ baseUrl: 'https://api.deepseek.com/v1', model: 'x' }) === false, '无 tested → 不绿');
+check(suggestTimeouts(true).stallMs === TIMEOUT_LOCAL.stallMs, 'suggestTimeouts(true) → 本地');
+check(suggestTimeouts('http://127.0.0.1:11434/v1').stallMs === TIMEOUT_LOCAL.stallMs,
+  'suggestTimeouts(本机 url) → 本地');
+check(suggestTimeouts('https://api.deepseek.com/v1').stallMs === TIMEOUT_CLOUD.stallMs,
+  'suggestTimeouts(云端) → 云端');
+check(TIMEOUT_LOCAL.stallMs === LLM_TIMEOUT.localStallMs &&
+  TIMEOUT_LOCAL.totalMs === LLM_TIMEOUT.localTotalMs,
+  'TIMEOUT_LOCAL 与 llm.js LLM_TIMEOUT.local* 一致');
+check(TIMEOUT_CLOUD.stallMs === LLM_TIMEOUT.stallMs &&
+  TIMEOUT_CLOUD.totalMs === LLM_TIMEOUT.totalMs,
+  'TIMEOUT_CLOUD 与 llm.js 默认超时一致');
+const mainSrc = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'main', 'main.js'), 'utf8');
+check(/featuredProviders\(\)/.test(mainSrc) && /moreProviders\(\)/.test(mainSrc),
+  '托盘菜单用 featured / 更多');
+check(/isTestGreen/.test(mainSrc) && /tested:/.test(mainSrc), 'testLlm 成功写 tested 绿标');
+
+/* ── H. 负对照：断言必须能红 ─────────────────────────────── */
+console.log('\nH. 负对照（故意给错期望，上面这套断言必须翻红）');
 let red = 0;
 const mustFail = (fn, label) => {
   total++;

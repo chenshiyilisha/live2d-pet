@@ -358,7 +358,10 @@ const {
   console.log('\n══════ F. 接线 ══════\n');
 
   {
-    ok(/const \{ createMoodEngine \} = require\('\.\/mood'\)/.test(MAIN), 'main.js 引了 mood 模块');
+    /* 解构里必须真有 createMoodEngine —— 后来又加了 setPrideSoftMul / setRateMul
+     * （傲气软化、漂移倍率），钉死整串解构的话每加一个导出就假红一次。 */
+    ok(/const \{[^}]*\bcreateMoodEngine\b[^}]*\} = require\('\.\/mood'\)/.test(MAIN),
+      'main.js 引了 mood 模块');
     ok(/moodEngine\.loadAndDrift\(moodFile\(\)\)/.test(MAIN), '启动时读档（含离线补漂+重聚）');
     ok(/moodTimer = setTimeout\(moodTick, 10 \* 1000\)/.test(MAIN), 'tick 自调度（setTimeout 链，不用 setInterval）');
     ok(/moodEngine\.save\(moodFile\(\)\)/.test(MAIN) && /stopMoodTimer\(\);/.test(MAIN)

@@ -92,7 +92,8 @@ globalThis.SpeechSynthesisUtterance = class {
     ok(/playSystem\(text, finish\)/.test(pw), '播放链路失败会回退 playSystem（不哑）');
     ok(/if \(!buf \|\| !ctx\)/.test(pw), '合成没结果 / 没有 AudioContext 都走回退');
     const ps = between(ttsNoC, 'function playSystem', 'async function playWinrt');
-    ok(/lipActive = false/.test(ps), '回退时把口型交回正弦波（lipActive=false）');
+    ok(/lipActive = false/.test(ps), '回退时关掉真实波形（lipActive=false）');
+    ok(/startTextSim/.test(ps), 'G11：system/回退走文字模拟口型');
 
     /* 打断：必须停自己播的那一段 */
     const stop = between(ttsNoC, 'function stopAudio', 'function interrupt');
@@ -112,7 +113,9 @@ globalThis.SpeechSynthesisUtterance = class {
     /* 每帧包络 */
     ok(/export function lipEnv\(dt\)/.test(tts), 'lipEnv 按帧输入 dt（平滑与帧率无关）');
     const lip = between(ttsNoC, 'export function lipEnv', '\n}');
-    ok(/if \(!lipActive\) return null/.test(lip), 'lipEnv 在没有真实波形时返回 null（调用方据此回正弦波）');
+    ok(/if \(textSim\) return stepTextSim/.test(lip) || /textSim\) return stepTextSim/.test(lip),
+      'G11：无波形时优先文字模拟；都无才 null 回正弦');
+    ok(/return null/.test(lip), 'lipEnv 无波形且无 textSim 时仍返回 null');
     ok(/getFloatTimeDomainData/.test(lip), '包络来自 AnalyserNode 的时域数据');
     ok(/LIP_ATTACK/.test(lip) && /LIP_RELEASE/.test(lip), '快攻慢放（不是单速平滑，否则嘴巴像节拍器）');
     ok(/FFT_SIZE\s*=\s*512/.test(tts), 'fftSize=512（32ms @16k，约一个音节的粒度）');
@@ -123,7 +126,11 @@ globalThis.SpeechSynthesisUtterance = class {
       "getAC 有 typeof window 防御（Node 里 import 这个文件不该抛）");
 
     /* 诊断快照要能看出引擎与包络 */
-    ok(/engine: engineOf\(\), lip: lipActive, lipLevel/.test(tts), 'ttsQueueState 带 engine / lip 字段（探针读它）');
+    /* 按字段断，不钉整串 —— 这对象后来加了 degrade（引擎降级档），
+     * 钉整串的话每次加字段都会假红，反而促使别人去改断言而不是看代码。 */
+    const qs = between(tts, 'export function ttsQueueState()', '\n}');
+    ok(/engine: engineOf\(\)/.test(qs) && /lip: lipActive/.test(qs) && /lipLevel/.test(qs),
+      'ttsQueueState 带 engine / lip 字段（探针读它）');
   }
 
   /* ============================================================
@@ -134,7 +141,12 @@ globalThis.SpeechSynthesisUtterance = class {
     const tick = between(petNoC, 'const env = lipEnv(dt)', 'PIXI.UPDATE_PRIORITY.LOW');
     ok(/const env = lipEnv\(dt\)/.test(petNoC), 'ticker 里调 lipEnv');
     ok(/if \(env !== null\)/.test(tick), 'env 非 null 时直接采用真实包络');
-    ok(/mouthLevel = env/.test(tick) && /setParam\(P\.MOUTH_OPEN, mouthLevel\)/.test(tick),
+    /* 写入已收口到 setMouthOpen()（内部按 mouthOpenMax 夹幅，自制降档模型要用）。
+     * 两段都断：分支把包络交给它 + 它内部真的落到 P.MOUTH_OPEN —— 只断函数名
+     * 等于没断，改名/空壳都能骗过。 */
+    const setMo = between(petNoC, 'function setMouthOpen(v)', '\n}');
+    ok(/mouthLevel = env/.test(tick) && /setMouthOpen\(mouthLevel\)/.test(tick)
+      && /setParam\(P\.MOUTH_OPEN/.test(setMo),
       '真实包络写进 ParamMouthOpenY');
     /* 🔴 顺序：lipEnv 必须在 SPEAKING 判断**之前**（否则队列念完嘴回不去） */
     const iEnv = petNoC.indexOf('const env = lipEnv(dt)');
@@ -173,6 +185,8 @@ globalThis.SpeechSynthesisUtterance = class {
     const stopS = between(petNoC, 'function stopSpeaking()', '\n}\n');
     ok(/stopSpeak\(\)/.test(stopS) && /resetSpoken\(\)/.test(stopS) && /setState\(State\.IDLE\)/.test(stopS),
       'stopSpeaking = 停朗读 + 清账 + 把 state 收回 IDLE（裸的 stopSpeak 不做后两件）');
+    ok(/mouthLevel\s*=\s*0/.test(stopS) && /MOUTH_OPEN/.test(stopS),
+      'G20：打断后嘴型立刻归零（mouthLevel + ParamMouthOpenY）');
     ok(/if \(changed && quiet\) \{\s*stopSpeaking\(\);/.test(petNoC),
       '全屏静默那一路用的是 stopSpeaking()（静默解除后 proactive 才不会被永久拦死）');
 
@@ -277,9 +291,12 @@ globalThis.SpeechSynthesisUtterance = class {
       path.join(dir, 'params.mjs'),
       fs.readFileSync(path.join(SRC, 'renderer', 'params.js'), 'utf8')
         .replace(/'\.\/profiles\/([A-Za-z0-9_-]+)\.js'/g, "'./profiles/$1.mjs'"));
+    /* tts.js 的同级依赖 tts-emotion.js 也得搬过去（无二级 import，纯映射表）。 */
+    fs.copyFileSync(path.join(SRC, 'renderer', 'tts-emotion.js'), path.join(dir, 'tts-emotion.mjs'));
     fs.writeFileSync(
       path.join(dir, 'tts.mjs'),
       tts.replace(/from '\.\/params\.js'/, "from './params.mjs'")
+        .replace(/from '\.\/tts-emotion\.js'/, "from './tts-emotion.mjs'")
     );
     const T = await import(pathToFileURL(path.join(dir, 'tts.mjs')).href);
 
@@ -309,7 +326,9 @@ globalThis.SpeechSynthesisUtterance = class {
     T.enqueueSpeech('合成失败也要念');
     await flush();
     ok(spoken.includes('合成失败也要念'), '合成返回 null → 回退系统音色，这句话照样念出来');
-    ok(T.lipEnv(0.016) === null, '回退后口型交回正弦（lipEnv 仍返回 null）');
+    const envAfter = T.lipEnv(0.016);
+    ok(typeof envAfter === 'number' && envAfter >= 0,
+      'G11：回退后文字模拟口型（lipEnv 为数字，不再 null→正弦）');
 
     /* ④ 合成直接抛错 → 同样回退（prefetch 收敛异常） */
     reset();
@@ -374,11 +393,18 @@ globalThis.SpeechSynthesisUtterance = class {
     const mk = (spoken) => {
       /* 沙箱：两个 tts 出口换成假的，history 由用例给。
        * ⚠️ 每次新建一个 —— 前一个用例跑完的 history 不能串味。 */
-      const box = { console, __heard: spoken, __reset: 0, history: [] };
+      const box = {
+        console, __heard: spoken, __reset: 0, history: [],
+        /* G3 后 truncate 会读 isSpeaking / state / busy / replyBuffer —— 沙箱补齐。
+         * 默认 idle：空 heard 时不应因 state===SPEAKING 误判为「开了口没念到」。 */
+        state: 'idle', busy: false, replyBuffer: ''
+      };
       vm.createContext(box);
       vm.runInContext(
         'function spokenText() { return __heard; }\n' +
         'function resetSpoken() { __reset++; }\n' +
+        'function isSpeaking() { return !!__heard; }\n' +
+        'const State = { SPEAKING: "speaking", IDLE: "idle" };\n' +
         snippet +
         '\n;globalThis.__t = { truncateHistoryOnInterrupt };',
         box

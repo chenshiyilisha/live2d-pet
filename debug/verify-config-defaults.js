@@ -70,7 +70,9 @@ const ON_BY_DEFAULT = [
 const STILL_OFF = [
   ['monitor', 'floating', '系统状态悬浮显示'],
   ['asr', 'enabled', '语音输入（离线识别）'],
-  ['update', 'autoDownload', '发现新版直接下载']
+  ['update', 'autoDownload', '发现新版直接下载'],
+  ['mcp', 'enabled', 'MCP 工具骨架'],
+  ['appearance', 'hoverFade', '悬停渐隐穿透（W6，默认关）']
 ];
 
 console.log('\n══════ 1. 新装（没有配置文件）走默认值 ══════\n');
@@ -86,6 +88,11 @@ rmCfg();
   for (const [s, k, label] of STILL_OFF) {
     check(cfg[s]?.[k] === false, `仍默认不勾选：${label}（${s}.${k}）`);
   }
+  check(cfg.memory?.forget?.enabled === false,
+    '仍默认不勾选：记忆到期遗忘（memory.forget.enabled）');
+  check(cfg.hotkeys?.enabled === false, '仍默认不勾选：全局热键（hotkeys.enabled）');
+  check(cfg.motion?.multiScreenHop === false,
+    '仍默认不勾选：新屏 hop（motion.multiScreenHop）');
   check(config.DEFAULT_CONFIG.motion.wanderIdleMin === 3,
     '溜达的间隔参数保留（关的是开关，不是参数 —— 用户打开后立刻可用）');
 }

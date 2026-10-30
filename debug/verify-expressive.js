@@ -58,19 +58,27 @@ const stripComments = (s) =>
   } finally {
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
   }
-  const { EMOTION, EMO_SPEED, EMO_SPEED_DEFAULT, PARAM } = M;
+  const { EMOTION, EMO_SPEED, EMO_SPEED_DEFAULT, PARAM, EMOTION_ALIAS, MOUTH_OPEN_MAX, resolveEmotion } = M;
 
-  console.log('[A] params.js —— EMOTION 八个情绪的字段集必须完全相同');
+  /* W32：不再硬卡「情绪数=8 / 字段数=16」——引擎按字段集遍历，条数是档案
+   * 的事。自证三条：键集一致 / emoSpeed 对齐 /（下面 C）param 有 ID。
+   * 协议 8 标签：本体或 emotionAlias 必须能解析到实档（W33）。 */
+  console.log('[A] params.js —— 档案自证（情绪字段集一致 + 协议可解析）');
   {
     const names = Object.keys(EMOTION);
-    ok(names.length === 8, `情绪数 = 8（${names.join(',')}）`);
+    ok(names.length >= 1, `至少 1 个情绪（${names.length}：${names.join(',')}）`);
     const expect = [
       'calm', 'happy', 'smile', 'think', 'shy', 'serious', 'surprised', 'sleepy'
     ];
-    ok(expect.every((n) => names.includes(n)), '情绪名与 [emo:xxx] 协议（config.js 的 EMOTION_TAGS）一字不差');
+    for (const tag of expect) {
+      const hit = resolveEmotion ? resolveEmotion(tag) : (EMOTION[tag] ? tag : EMOTION_ALIAS?.[tag]);
+      ok(!!hit && !!EMOTION[hit],
+        `协议标签 ${tag} → ${hit || '∅'}（本体或 emotionAlias）`);
+    }
 
-    const base = Object.keys(EMOTION.calm).sort();
-    ok(base.length === 16, `字段数 = 16（实际 ${base.length}：${base.join(',')}）`);
+    const pivot = names.includes('calm') ? 'calm' : names[0];
+    const base = Object.keys(EMOTION[pivot]).sort();
+    ok(base.length >= 1, `字段数 ≥ 1（实际 ${base.length}：${base.join(',')}）`);
     for (const n of names) {
       const k = Object.keys(EMOTION[n]).sort();
       const missing = base.filter((f) => !k.includes(f));
@@ -82,7 +90,8 @@ const stripComments = (s) =>
 
   console.log('[B] params.js —— EMO_SPEED 必须覆盖每一个情绪字段（两个表的键集相等）');
   {
-    const fields = Object.keys(EMOTION.calm).sort();
+    const pivot = Object.keys(EMOTION).includes('calm') ? 'calm' : Object.keys(EMOTION)[0];
+    const fields = Object.keys(EMOTION[pivot]).sort();
     const speeds = Object.keys(EMO_SPEED).sort();
     const noSpeed = fields.filter((f) => !speeds.includes(f));
     const orphan = speeds.filter((f) => !fields.includes(f));
@@ -146,7 +155,8 @@ const stripComments = (s) =>
      * 这里直接拿真表回查情绪表。 */
     const LIM = M.EMO_RANGE;
     {
-      const fields = Object.keys(EMOTION.calm).sort();
+      const pivot = Object.keys(EMOTION).includes('calm') ? 'calm' : Object.keys(EMOTION)[0];
+      const fields = Object.keys(EMOTION[pivot]).sort();
       const ranges = Object.keys(LIM).sort();
       const miss = fields.filter((f) => !ranges.includes(f));
       const extra = ranges.filter((f) => !fields.includes(f));
@@ -164,7 +174,8 @@ const stripComments = (s) =>
     const spread = (f) => Math.max(...Object.values(EMOTION).map((e) => e[f]))
                        - Math.min(...Object.values(EMOTION).map((e) => e[f]));
     for (const f of ['ahoge', 'bodyY', 'bodyZ']) {
-      ok(spread(f) > 0.5, `${f} 在八个情绪里有实际变化幅度（${spread(f).toFixed(2)}）`);
+      if (!(f in Object.values(EMOTION)[0])) continue; // 降档档案可能砍掉
+      ok(spread(f) > 0.5, `${f} 在各情绪里有实际变化幅度（${spread(f).toFixed(2)}）`);
     }
     // 不对称：至少一个情绪左右眉真的不一样，否则 browLX/RX 白加
     const asym = Object.entries(EMOTION).filter(([, e]) => e.browLY !== e.browRY || e.browLX !== e.browRX);
@@ -174,7 +185,8 @@ const stripComments = (s) =>
   console.log('[E] pet.js —— EMOTION 的每个字段都在 applyEmotion 里接了线');
   {
     const r = stripComments(read('renderer/pet.js'));
-    for (const f of Object.keys(EMOTION.calm)) {
+    const pivot = Object.keys(EMOTION).includes('calm') ? 'calm' : Object.keys(EMOTION)[0];
+    for (const f of Object.keys(EMOTION[pivot])) {
       ok(new RegExp(`emoCur\\.${f}\\b`).test(r), `applyEmotion 写了 emoCur.${f}`);
     }
     // 旧的单值 browY 不该再残留（改成 browLY/browRY 了）
@@ -222,7 +234,8 @@ const stripComments = (s) =>
   console.log('[H] params.js —— 摸头 A-B-C 的调制（真调 buildEmoTarget，不是正则）');
   {
     const { PAT, PAT_DELTA, buildEmoTarget } = M;
-    const FIELDS = Object.keys(EMOTION.calm);
+    const pivot = Object.keys(EMOTION).includes('calm') ? 'calm' : Object.keys(EMOTION)[0];
+    const FIELDS = Object.keys(EMOTION[pivot]);
     const out = {};   // 调用方复用的对象，和主循环里一样
 
     /* ① PAT_DELTA 的键必须在情绪字段集里。
@@ -249,6 +262,9 @@ const stripComments = (s) =>
         `起手(${PAT.rise}) 比收尾(${PAT.fall}) 快 —— 手放上去要跟手，拿开要愣一下`);
       ok(PAT.shyMs < PAT.nagMs,
         `先害羞(${PAT.shyMs}ms) 再抗议(${PAT.nagMs}ms) —— 顺序反了她会先骂人再脸红`);
+      /* W13：生气档夹在抗议与挣脱之间。 */
+      ok(PAT.nagMs < PAT.angryMs && PAT.angryMs < PAT.escapeMs,
+        `抗议(${PAT.nagMs}) < 生气(${PAT.angryMs}) < 挣脱(${PAT.escapeMs})`);
       /* 挣脱必须排在抗议**之后**：先提醒、不听再翻脸。反过来就是
        * "一句话不说就甩手"，用户不知道自己哪里惹到她了。 */
       ok(PAT.nagMs < PAT.escapeMs,
@@ -283,24 +299,50 @@ const stripComments = (s) =>
           }
         }
       }
-      ok(bad === 0, `8 个情绪 × 3 个摆动周期全程不越界${bad ? `（${bad} 处，首例 ${first}）` : ''}`);
+      ok(bad === 0, `${Object.keys(EMOTION).length} 个情绪 × 3 个摆动周期全程不越界${bad ? `（${bad} 处，首例 ${first}）` : ''}`);
     }
 
     /* ⑤ 调制真的改了目标（不然这一整套是死代码） */
     {
-      buildEmoTarget(out, EMOTION.happy, 1, 0.3);
-      const moved = FIELDS.filter((f) => Math.abs(out[f] - EMOTION.happy[f]) > 1e-6);
-      ok(moved.length >= 8, `摸头改了 ${moved.length} 个通道（${moved.join(',')}）`);
+      const baseEmo = EMOTION.happy || EMOTION[Object.keys(EMOTION)[0]];
+      buildEmoTarget(out, baseEmo, 1, 0.3);
+      const moved = FIELDS.filter((f) => Math.abs(out[f] - baseEmo[f]) > 1e-6);
+      ok(moved.length >= Math.min(8, FIELDS.length),
+        `摸头改了 ${moved.length} 个通道（${moved.join(',')}）`);
     }
 
     /* ⑥ 摆动是真的在动：同一通道在不同相位值不同 */
     {
-      buildEmoTarget(out, EMOTION.happy, 1, 0);
-      const z0 = out.headZ;
-      buildEmoTarget(out, EMOTION.happy, 1, 1.9);
-      ok(Math.abs(out.headZ - z0) > 0.3,
-        `headZ 随相位变化（${z0.toFixed(2)} → ${out.headZ.toFixed(2)}）`);
+      const baseEmo = EMOTION.happy || EMOTION[Object.keys(EMOTION)[0]];
+      if ('headZ' in baseEmo) {
+        buildEmoTarget(out, baseEmo, 1, 0);
+        const z0 = out.headZ;
+        buildEmoTarget(out, baseEmo, 1, 1.9);
+        ok(Math.abs(out.headZ - z0) > 0.3,
+          `headZ 随相位变化（${z0.toFixed(2)} → ${out.headZ.toFixed(2)}）`);
+      }
     }
+  }
+
+  console.log('[J] W33/W34 —— emotionAlias + mouthOpenMax');
+  {
+    ok(typeof M.EMOTION_ALIAS === 'object' && M.EMOTION_ALIAS !== null, 'EMOTION_ALIAS 已导出');
+    ok(typeof MOUTH_OPEN_MAX === 'number' && MOUTH_OPEN_MAX > 0 && MOUTH_OPEN_MAX <= 1.5,
+      `MOUTH_OPEN_MAX 合理（${MOUTH_OPEN_MAX}）`);
+    ok(typeof resolveEmotion === 'function', 'resolveEmotion 已导出');
+    ok(resolveEmotion('calm') === 'calm', '本体 calm 原样返回');
+    ok(resolveEmotion('__no_such_emo__') === null, '未知且无别名 → null');
+    const r = stripComments(read('renderer/pet.js'));
+    ok(/resolveEmotion\(name\)/.test(r), 'setEmotion 走 resolveEmotion');
+    ok(/function setMouthOpen\(/.test(r), '口型走 setMouthOpen 夹取');
+    ok(/MOUTH_OPEN_MAX/.test(r), 'pet.js 引用 MOUTH_OPEN_MAX');
+    ok(/setHoverFade|hoverFade/.test(r), 'W6 悬停渐隐接线存在');
+    /* 连点阈值后来走 touch-mode 的 pokeThresholds（触摸模式要按模式缩放），不再写死 8。
+     * patAngry 仍是「抗议后继续摸 → 只转一次生气」的闩。 */
+    ok(/clickStreak >= pokeTh\.annoy/.test(r) && /patAngry/.test(r), 'W13 连点/过摸生气档接线存在');
+    const main = read('main/main.js');
+    ok(/refreshTopWatchdog|topWatchTimer/.test(main), 'W30 置顶看门狗存在');
+    ok(/pet:hover-fade|hoverFadeActive/.test(main), 'W6 主进程 hover-fade IPC 存在');
   }
 
   console.log('[I] pet.js —— 摸头的接线（按下起手 / 松手收尾 / 抢占 / 主循环顺序）');

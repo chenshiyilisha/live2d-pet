@@ -77,7 +77,11 @@ console.log('[B] main.js —— 分片路由收拢 + 生命周期接线');
   ok(end >= 2 && abort >= 2, `endStream(${end}) / abortStream(${abort}) 成对接线`);
   /* success 短句绝不能在有正文后无条件 showStatus：endStream 已放流，
    * arbiter 会放行，「搞定啦」会盖掉刚流出的回复。 */
-  ok(/if \(!workChunkSeen\) bubble\.showStatus\('搞定啦/.test(m),
+  /* 台词后来走 P4 招牌池（workLine('success', …)），所以不钉「搞定啦」字面量；
+   * 关键两点：① 守卫必须是 !workChunkSeen；② 全文件只许有这一处 success 出口
+   * （多一处又能在有正文后盖掉回复）。 */
+  const succShows = (m.match(/bubble\.showStatus\(workLine\('success'/g) || []).length;
+  ok(/if \(!workChunkSeen\) bubble\.showStatus\(workLine\('success'/.test(m) && succShows === 1,
     'success 短句仅在无正文时露（有 chunk 不盖对话气泡）');
   /* 报错要把真实原因（响应中断 / 连接失败）放进气泡，不能只写「出了点问题」。 */
   ok(/emitWorkState\('error',\s*\{\s*message:\s*res\?\.error/.test(m),
@@ -415,7 +419,8 @@ console.log('[K] C3 打字光标 + D1 停留时长随字数（2026-10-28 第三�
     `区间本身合理（${C.READ_MS_MIN}~${C.READ_MS_MAX}ms，短到看不完 / 长到挡事都不行）`);
 
   /* 开关关掉必须回到固定值 —— 那条区间是**估的**，必须能一键退出。 */
-  ok(/const ms = readTimeOn\(\) \? readTimeMs\(utterChars\) : AUTO_HIDE_MS;/.test(s),
+  /* 语速后来加了倍率（bubbleReadMul()，跟朗读语速联动），所以参数表不再只有一个。 */
+  ok(/const ms = readTimeOn\(\) \? readTimeMs\(utterChars[\s\S]{0,60}?\) : AUTO_HIDE_MS;/.test(s),
     '停留时长走开关：关掉 floatBubbleReadTime → 回到固定 AUTO_HIDE_MS');
   ok(/chatOpt\('floatBubbleReadTime'/.test(s), 'floatBubbleReadTime 走配置现读（规矩 4）');
   /* 🔴 字数必须**每句清零**：不清就变成"这一句按上一句的字数停"，短话跟着长话停 14s。 */
@@ -455,9 +460,11 @@ console.log('[L] 情绪角标（2026-10-28 方案 A）');
   /* 🔴 情绪集**跟着当前模型档案走**，不写死 8 个 —— 换模型（hiyori ↔ 鲸鱼娘）
    *    时这条断言自动跟着变，不会"换了个模型角标就少一半"。 */
   const params = stripComments(read('renderer/params.js'));
-  const profName = (params.match(/export const EMOTION = (\w+)\.emotion/) || [])[1];
+  /* 档案表改成热换后是 `export let EMOTION = HIYORI.emotion`（let 而非 const，
+   * 因为 applyProfile() 要换表）。变量名是大写常量，文件名是小写 → 归一。 */
+  const profName = (params.match(/export\s+(?:const|let)\s+EMOTION\s*=\s*(\w+)\.emotion/) || [])[1];
   ok(!!profName, `从 params.js 认出当前档案（${profName}）`);
-  const prof = stripComments(read(`renderer/profiles/${profName}.js`));
+  const prof = stripComments(read(`renderer/profiles/${String(profName).toLowerCase()}.js`));
   const emoBlock = (prof.match(/emotion:\s*\{([\s\S]*?)\n  \}/) || ['', ''])[1];
   const emos = [...emoBlock.matchAll(/^\s{4}(\w+):/gm)].map((x) => x[1]);
   ok(emos.length >= 8, `档案里有 ${emos.length} 个情绪：${emos.join('/')}`);

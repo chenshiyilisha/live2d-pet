@@ -27,19 +27,19 @@
 
 | ID | 项 | 草案 |
 |---|---|---|
-| P1 | 人设预设包 | 托盘：傲娇/元气/天然呆/三无/温柔/冷静 → `personaParts` |
-| P2 | 状态台词池 | 搭话/工作态/久别；JSONC；可旁路 LLM |
-| P3 | OCEAN 轻量滑条 | 2～3 维 → proactive 间隔、衰减、气泡字数、pride |
-| P4 | 招牌状态减法 | 每套人格只强化 idle/working/error/success |
+| P1 | ✅ 人设预设包（2026-10-30） | 托盘「角色设定」子菜单：默认/傲娇/元气/天然呆/三无/温柔/冷静 → `personaParts`；不碰 emotion/thought 协议槽 |
+| P2 | ✅ 状态台词池（2026-10-30 雏形） | `line-pools.js`：工作态 success/error 轮换；久别 ≥4h 离线搭话走 FAREWELL_LINES；情绪分池仍在 pet.js |
+| P3 | ✅ OCEAN 轻量滑条（2026-10-30） | 托盘「性格微调」E/N/A/T 四维三档；→ idle 间隔 / 正负衰减 / 气泡停留 / pride 软化（`ocean.js`）；W10 话痨叠 T |
+| P4 | ✅ 招牌状态减法（2026-10-30） | `SIGNATURE_LINES/EMO`：6 套人格各强化 idle/working/success/error；`personaId` + work 短句/表情偏置 |
 
 ### B2 中期 □
 
 | ID | 项 |
 |---|---|
-| P5 | Temperament 慢层（mood 日均 → 气质偏置，不改人设文） |
-| P6 | 双模态：陪伴 / 专业 |
-| P7 | 视角蒸馏模板 → `personaParts` 草稿 |
-| P8 | Character Card V2/V3 导入 |
+| P5 | ✅ Temperament 慢层（2026-10-30） | mood 日均 EMA → 漂移乘子 + 语气 hint；`temperament.js`，不改人设文 |
+| P6 | ✅ 双模态：陪伴 / 专业（2026-10-30） | `chat.mode` companion/work；专业只追加语气约束 |
+| P7 | ✅ 视角蒸馏模板（2026-10-30） | 托盘「视角蒸馏…」短答 → identity/style/method/extra；不碰协议槽 |
+| P8 | ✅ Character Card V2/V3 导入（2026-10-30） | 托盘「导入角色卡…」→ identity/style/extra；不碰协议槽 |
 
 ### B3 明确不做
 
@@ -53,19 +53,19 @@
 
 | ID | 项 |
 |---|---|
-| X1 | 运行时切模型（hiyori / whale）+ whale 署名 |
-| X2 | 专注/勿扰三档（盖过单一 quietHours） |
-| X3 | 拖文件「吃下」→ 可进 memory |
-| X4 | 甩抛补全（单摆 / flip / 动画轮换） |
+| X1 | ✅ 运行时切模型（2026-10-30） | 托盘「人物模型」hiyori/whale；`applyProfile` + `mountModel` 热换；whale 署名 toast；默认仍 hiyori |
+| X2 | ✅ 专注/勿扰三档（2026-10-30） | 托盘「状态」陪伴/日常/勿扰；陪伴忽略 quietHours + idle×0.7；勿扰全天不主动（`presence.js`） |
+| X3 | ✅ 拖文件「吃下」（2026-10-30） | 拖 txt/md/json… ≤32KB → `memory:eat-file` 落 other 事实 + toast |
+| X4 | ✅ 甩抛补全（2026-10-30） | `interaction.swing/flip`（默认关）：拖拽单摆倾角 + 左飞水平翻转 |
 
 ### C2 中期 □
 
 | ID | 项 |
 |---|---|
-| X5 | 前台/系统边缘搭话（CPU/电池/切应用，可沉默） |
-| X6 | 作息学习（活跃直方图） |
-| X7 | 工作事件 ↔ mood |
-| X8 | 记忆召回解释（`PET_SNAPSHOT=memory`） |
+| X5 | ✅ 前台/系统边缘搭话（2026-10-30 雏形） | `edgeCues` 默认关；低电量/高 CPU/切应用 → proactive hint，可 [silent] |
+| X6 | ✅ 作息学习（2026-10-30） | 24h 直方图 + 周衰减；`gateProactive` 默认关 |
+| X7 | ✅ 工作事件 ↔ mood（2026-10-30） | success→happy / error→serious 轻推轴 |
+| X8 | ✅ 记忆召回解释（2026-10-30） | `PET_SNAPSHOT=memory` 打 recall 解释到日志 |
 
 ---
 
@@ -75,37 +75,46 @@
 
 | ID | 项 | 注 |
 |---|---|---|
-| G1 | 安静时段 + 跨午夜 | ◐ `proactive.quietHours` 已有雏形，核对半截再补 |
-| G2 | 屏幕上下文接线 | fullscreen 已有前台名 → mood/搭话 |
-| G3 | 打断后历史只记听到的 | TTS 打断错位 |
-| G4 | `[emo:]` 指数衰减回中性 | ◐ 衰减层曾落地；对照是否仍「挂一整晚」 |
-| G5 | model profile 自动扫描 | cdi3/physics3 → 骨架 |
-| G6 | 药盒式一次性指令 | 只改下一句 |
+| G1 | ✅ 安静时段 + 跨午夜（2026-10-30 核对） | `quiet-hours.js` 跨零点已齐；排程上限 30m→12h（默认 23-8 不再整夜空转） |
+| G2 | ✅ 屏幕上下文接线（2026-10-30 雏形） | fullscreen 缓存前台进程名 → 主动搭话 hint（不抄标题；监视关则空） |
+| G3 | ✅ 打断后历史只记听到的（2026-10-30） | busy 可打断；流式半截落账；`chatAbort` 掐旧流；TTS 未开口 → `...` |
+| G4 | ✅ `[emo:]` 衰减回中性（2026-10-30 核对） | 衰减到底同步把情绪标签回 `calm`（台词池不再挂旧情绪过夜） |
+| G5 | ✅ model profile 自动扫描（2026-10-30） | `model-scan.js` + `tools/scan-model-profile.js`：cdi3/physics3 → 建议 param / 覆盖率 / 物理冲突 |
+| G6 | ✅ 药盒式一次性指令（2026-10-30） | 托盘「下一句指令」：5 颗药 + 手写；`【仅本轮】` 注入后即焚 |
 
 ### D2 中期 □
 
 | ID | 项 |
 |---|---|
-| G7 | 主动时机信息增益（没话别找话） |
-| G8 | 内心 OS 弱展示（`[think:]`） |
-| G9 | 输出侧人设护栏 |
-| G10 | TTS 并发生成按序播 |
-| G11 | 口型文字模拟降级 |
-| G12 | MCP（默认关 + 逐授权） |
-| G13 | 对话导出 MD/JSON |
-| G14 | 截屏前先藏自己 |
+| G7 | ✅ 主动时机信息增益（2026-10-30） | `info-gain.js`：无线索/旧回复占场 → skip silent |
+| G8 | ✅ 内心 OS 弱展示（2026-10-30） | `chat.showThink` 默认开；关则仍剥标签不画 |
+| G9 | ✅ 输出侧人设护栏（2026-10-30） | `persona-guard` off/med/strict；禁客服腔；silent 直通；失败 toast |
+| G10 | ✅ TTS 并发生成按序播（2026-10-30） | 主进程 `MAX_PARALLEL=3`；渲染层入队 prefetch + 队列按序播 |
+| G11 | ✅ 口型文字模拟降级（2026-10-30） | system/回退：`textSim` 按字推进，标点降幅；优于正弦 |
+| G12 | ✅ MCP 骨架（2026-10-30） | `mcp.js` 默认关；无 SDK；call 需授权且骨架返回 not-connected |
+| G13 | ✅ 对话导出 MD/JSON（2026-10-30） | 设置「导出对话」→ MD / JSON；纯函数 `chat-export.js` |
+| G14 | ✅ 截屏前先藏自己（2026-10-30） | `hideFromCapture` +「藏 3 秒」；主窗/气泡 `setContentProtection` |
 
 ### D3 零碎 / 工程 □
 
 | ID | 项 |
 |---|---|
-| G15 | 透明区点击穿透 |
-| G16 | drowsy → sleep 状态机 |
-| G17 | 启动偶现双模型（bug） |
-| G18 | 鲸鱼娘真脸情绪 + 表情槽 |
-| G19 | 记忆 Phase2 / 可选 FTS5（不上向量）—— **改造清单已出、未开工**：`docs/memory-phase2-plan.md`（2a 只降档不删 / 2b 遗忘默认关） |
-| G20 | verify-lip：打断后嘴型归零 |
-| G21–G30 | 语气基线、主动可沉默、手动看一眼、说话人、热键、多屏 hop、FACS、立绘兜底、verify-arch …（细项见变更记录前版；实现时按 ID 开） |
+| G15 | ✅ 透明区点击穿透（2026-10-30 气泡） | 气泡窗 `setIgnoreMouseEvents(true,{forward})`；主窗原有角色命中穿透 |
+| G16 | ✅ drowsy → sleep（2026-10-30） | 精力低+闲置≥12m → `State.SLEEP`；点击/摸头/聊天叫醒 |
+| G17 | ✅ 启动偶现双模型（2026-10-30） | `mountModel` 挂载前扫空 `stage` 孤儿 holder |
+| G18 | ✅ 鲸鱼娘真脸情绪 + 表情槽（2026-10-30） | `whale.js` 连续脸重调（无弯眼补偿）；托盘「表情槽预览」 |
+| G19 | ✅ 记忆 Phase2a+2b 开关（2026-10-30） | 2a 日结只降不删；2b `forget.enabled` 默认关 · 墓碑/复活 · migrated 不删 |
+| G20 | ✅ verify-lip 打断嘴型归零（2026-10-30） | `stopSpeaking` 立刻 `mouthLevel=0` + 写回 MOUTH_OPEN |
+| G21 | 语气基线 | ASR 旁路能量/语速 vs 本人基线；需录音通路再开 |
+| G22 | ✅ 主动由头四类 + 可沉默（2026-10-30） | `info-gain` head=`cue/reply/idle/none`；`allowSilent` 已有 |
+| G23 | ~~手动「看一眼」~~ **✅**：`interaction.glance`（默认关）· 藏窗 → `desktopCapturer` ≤768 JPEG · 需 `isLlmReady` · 托盘「看一眼屏幕」 |
+| G24 | 说话人 familiar | matched/likely/unknown → social；需第二说话人场景 |
+| G25 | ✅ 伪造用户句护栏（2026-10-30） | `persona-guard` med 起拦「你刚才说过：…」 |
+| G26 | ✅ 全局热键骨架（2026-10-30） | `hotkeys.enabled` 默认关；显隐 / 停朗读 |
+| G27 | ✅ 多屏 hop（2026-10-30） | `motion.multiScreenHop` 默认关；display-added → 新屏角 |
+| G28 | FACS/AU 语义层 | 换模覆盖率自动降级；换模痛时再做 |
+| G29 | 多帧立绘兜底 | 自制模型降级；见 `custom-model-plan` |
+| G30 | ✅ `verify-arch`（2026-10-30） | 扫 require：main 不环、renderer 不碰 electron |
 
 ---
 
@@ -113,40 +122,40 @@
 
 | ID | 项 | 出处味道 |
 |---|---|---|
-| W1 | 限时看屏授权 + 倒计时收回 | Convai |
+| W1 | ~~限时看屏授权 + 倒计时收回~~ **✅**：`glance-grant` 会话内存 · 3m/10m 预设 · 到期 toast+收回 · 永久开关仍可用 · 托盘剩时 | Convai |
 | W2 | 记忆日记本 UI（浏览/删）+ 夜间矛盾降权 | Nexus / Convai |
 | W3 | 导入模型预检（缺资源仍显示并说明） | Nexus 0.4.7 |
 | W4 | 窗口当地形（走窗顶/爬边） | mochi / mushroom |
-| W5 | 位置钉 + 闲置够久才稀有换位 | armada |
-| W6 | 悬停渐隐穿透 | armada |
-| W7 | 提醒倒计时跟锁屏清零重计 | PawPal |
-| W8 | OS 级截屏排除（`setContentProtection` 类） | PawPal |
-| W9 | 时段 idle 动作池 | 月薪喵 |
-| W10 | 忙碌度 / 话痨滑条（可并 P3） | mushroom |
-| W11 | 情绪分轨 TTS | live2dpet |
-| W12 | 统一 PetEvent 调度 | live2dpet |
-| W13 | 连点/过摸生气档 | Vibe |
-| W14 | TTS→默认音→静音降级机 | Live2DPet |
-| W15 | 「看看」口令截屏 | AI-Desktop-Pet |
-| W16 | 连接真测一句才算就绪 | Nexus；**Coopanion Start 页同款** |
+| W5 | ~~位置钉 + 闲置够久才稀有换位~~ **✅**：`motion.positionPin`（默认关）· 放下钉 14/34/44 分 · 到期+闲置≥60s 才 hop 一步再钉 | armada |
+| W6 | ~~悬停渐隐穿透~~ **✅**：`appearance.hoverFade`（默认关）· 停身上 ≥700ms → 透明度 ≤0.32 + 整窗穿透 · 离身/出窗/关开关熄 · 托盘「悬停渐隐穿透」 | armada |
+| W7 | ~~提醒倒计时跟锁屏清零重计~~ **✅**：锁屏清 timeout；解锁按 `durationMs` **完整间隔重排**；番茄钟当前相位同样重开。`onScreenLock/Unlock` | PawPal |
+| W8 | ~~OS 级截屏排除~~ **✅（=G14）**：`appearance.hideFromCapture` → `setContentProtection`；托盘「截屏/录屏排除自己」 | PawPal |
+| W9 | ~~时段 idle 动作池~~ **✅**：`appearance.timeOfDayIdle` · `idle-tod.js` 早/午/晚/夜池 · 闲置 2/4 分钟两档 | 月薪喵 |
+| W10 | ~~忙碌度 / 话痨滑条~~ **✅**：`personality.T` 话痨三档（叠 P3）· idle×E×T（中性 ×1）；寡言≈少插嘴 | mushroom |
+| W11 | ~~情绪分轨 TTS~~ **✅**：`tts.emotionVoice`（默认开）· `tts-emotion.js` 按 emotion 叠 rate/pitch · 托盘可关 | live2dpet |
+| W12 | ~~统一 PetEvent 调度~~ **✅**：`pet-events.js` 薄总线 · `emitWorkState` 先 `petEvents.emit` 再 IPC | live2dpet |
+| W13 | ~~连点/过摸生气档~~ **✅**：戳 4 惊讶→6 委屈→8 `serious`；摸头 `nagMs`→`angryMs`(5s)`serious`→`escapeMs` 挣脱 | Vibe |
+| W14 | ~~TTS→默认音→静音降级机~~ **✅**：winrt 失败 → 本会话粘滞 system → speechSynthesis 挂则 `playSilent`（文字口型）；`ttsDegradeLevel()` | Live2DPet |
+| W15 | ~~「看看」口令截屏~~ **✅**：短口令 `看看/看一眼/帮我看看…` → 同 G23；长句不误伤 | AI-Desktop-Pet |
+| W16 | ~~连接真测一句才算就绪~~ **✅**：`isLlmReady=usable∧绿标`；`llm.requireTested`（默认关）卡对话；看屏始终要 ready | Nexus / Coopanion |
 | W17 | 外挂多 Agent hooks（可选） | CoPet |
 | W18 | 首次引导气泡向导 | Coopanion：称呼/人设/走动量/选模/下语音包 |
-| W19 | 触摸响应档 Quiet/Eager/Custom | Coopanion Habits；可并 X2 |
-| W20 | 活动态气泡（思考/读/写…）可点穿 | Coopanion Activity bubbles |
+| W19 | ~~触摸响应档 Quiet/Eager/Custom~~ **✅**：`interaction.touchMode` quiet/normal/eager · 连戳门槛+摸头时序缩放 · normal=Custom 基线（单项仍可关） | Coopanion Habits |
+| W20 | ~~活动态气泡可点穿~~ **✅（=G15）**：气泡窗 `setIgnoreMouseEvents(true,{forward})` | Coopanion Activity bubbles |
 | W21 | OBS 透明叠加导出 | Coopanion Habits |
 | W22 | 记忆 Markdown 工作区 + 版本 | Coopanion `PARTNER.md`+git；对照 G19，**勿整抄 AGPL 实现** |
-| W23 | 记忆「重要度」**纯函数打分**（不调模型，可单测） | surfcore `MEMORY_CARD.md` §4 |
-| W24 | 记忆**四档清晰度、每天最多降一档**，遗忘＝删正文只留计数；**离线补跑连降（≤30 天）** | surfcore §5；与规矩 34 同构 |
-| W25 | 「最初 / 初次相遇」**独立于重要度的第二条轴**（稳定散列定概率，永不淘汰、单独成区） | surfcore §4.5 |
-| W26 | 主动搭话**先记账后生成**（先写「已投递」再调模型，中途被杀判 `interrupted`） | surfcore `SUBSYSTEM-PET.md` §6.4 |
-| W27 | 主动搭话**具名 reason** + **零副作用 preview** | surfcore §6.3 / §6.8 |
+| W23 | ~~记忆「重要度」纯函数打分~~ **✅（∈G19）**：`memory-score.scoreImportance` · 不调模型 | surfcore §4 |
+| W24 | ~~记忆四档清晰度+日结/离线补跑~~ **✅（∈G19）**：vivid/clear/fuzzy/trace · 每天最多降一档 · `CATCHUP_MAX_DAYS=30` · forget 删正文留墓碑 | surfcore §5 |
+| W25 | ~~「最初 / 初次相遇」独立轴~~ **✅**：`firstEncounter` · firstAt+30d 稳定 sha1 概率 · ≤3 条 · 清晰度地板 clear · 不遗忘/不淘汰 · 注入「最初的日子」 | surfcore §4.5 |
+| W26 | ~~主动先记账后生成~~ **✅**：`proactive-ledger` JSONL · pending→delivered/interrupted/silent · `proactive.bookFirst` | surfcore §6.4 |
+| W27 | ~~具名 reason + preview~~ **✅**：返回 `reason`/`head` · IPC `chat:proactive-preview` 零副作用 | surfcore §6.3/6.8 |
 | W28 | 主动识屏：白名单应用切换 + 停留/闲置/冷却/日上限/dry-run；截图**内存不落盘**（768 / JPEG70）；结果回写会话 | dsh-pet README；→ **G2** |
-| W29 | Agent 事件**只读 JSONL**（六态、兼容 Claude hooks 事件名、表外忽略、失败静默、>1MB 轮转） | dsh-pet `AGENT_LINK_PROTOCOL.md`；→ 工作状态外扩 |
-| W30 | **置顶看门狗**（explorer 重启/休眠/改 DPI 会丢置顶 → 30s 自检重置） | dsh-pet「已知限制」；先量再决定 |
-| W31 | 不可用入口**置灰 + 行内写明原因**；手填值以它为准、**不偷偷回退** | dsh-pet 菜单/播放器；规矩 24 的实现细则 |
-| W32 | **档案自证**：`verify-expressive` 的「情绪数=8 / 字段数=16」硬断言改为**由档案自证**（键集一致 / emoSpeed 键集 / param 有 ID 三条规则一条不减） | 降档前置；引擎本就按字段集遍历，8·16 是断言不是限制；规矩 9 同路数 |
-| W33 | **`emotionAlias` 未知情绪回退**：8 个 `[emo:xxx]` 协议标签**一个不删**、llm prompt 不动，档案缺失的情绪映射到近似档 | 防「切 A→B 眉毛卡住」静默故障（缺字段=停旧值） |
-| W34 | **`mouthOpenMax`** 口型幅度夹取（档案声明、写参前夹、默认 1.0） | 降档后口腔只需一张张嘴图；psd2live 规范 `either as one image` |
+| W29 | ~~Agent 事件只读 JSONL~~ **✅**：`agent-link.js` · 六态+hooks 映射 · 表外忽略 · byte-offset 尾读 · `agentLink.enabled` 默认关 · 驱动 `emitWorkState` | dsh-pet AGENT_LINK |
+| W30 | ~~**置顶看门狗**~~ **✅**：30s 自检 `isAlwaysOnTop` 丢失则重申 + `setSkipTaskbar(true)`（explorer 重启已知会丢）；静默/用户关置顶时跳过 | dsh-pet「已知限制」 |
+| W31 | ~~不可用入口置灰 + 原因~~ **✅**：`unavailable(label,reason)`；ASR/媒体非 Win、winrt 非 Win、测试连接没 key、导出无历史 | dsh-pet；规矩 24 |
+| W32 | ~~**档案自证**~~ **✅**：`verify-expressive` 去掉 8/16 硬卡；键集一致 + emoSpeed + param ID + 协议标签经本体/`emotionAlias` 可解析 | 降档前置 |
+| W33 | ~~**`emotionAlias`**~~ **✅**：档案字段 + `resolveEmotion` · `setEmotion` 入口解析；hiyori/whale 空表（齐全） | 防眉卡死 |
+| W34 | ~~**`mouthOpenMax`**~~ **✅**：档案声明（默认 1）· `setMouthOpen` 写参前夹 · live binding 随 `applyProfile` | 降档口腔 |
 | W35 | **半身模型档案 L0**（4 情绪 / 8~10 字段 / 无腿）+ 全 AI 链路 PoC（生图→See-Through→manifest→psd2live→Cubism 5） | `custom-model-plan.md` §11；**腿非刚需**（漫步=窗口位移，Walk 是自制的增强） |
 | W36 | ~~气泡**避免窄高盒**：宽度多档自适应~~ **✅ 2026-10-28**：`WIDTH_STEPS=[272,320,368]`，`wantWidth(h,cur,avail)` 按 `h×1.2` 升档；🔴 **一次发言内单调不减**（加宽→变矮→不许收窄，否则流式打字时来回抖）；每句开头重置回 272；只卡**下限**不卡上限（短句横条是自然的）。真机：长回复 272→320（比例 1.33），落定后 700ms 不再变 | tiny-roommate「prefer landscape, avoid narrow tall boxes」；dsh-pet 把 1.65 调到 **1.20** |
 | W37 | ~~气泡位置**轻微有界随机化**（稳定散列，同句同位）+ **间距随高度**（矮近高远）~~ **✅ 2026-10-28**：±8px 确定性散列（每句一次、`place()` 不重算）+ `tipGap` 8→14 随高度插值；尾巴恒回正指人（`bubble:tail`） | tiny-roommate「bounded and subtle」「short closer, taller more breathing room」 |
@@ -156,8 +165,8 @@
 | W41 | 多套**气泡皮肤**可切换（外观下拉） | dsh-pet 已有 5 套；Live2DPet `selectBubbleImage`。**最大项，最后做** |
 | W42 | ~~气泡**情绪角标**（方案 A）~~ **✅ 2026-10-28**：8 情绪 → 小图形挂气泡右上角；信号走 `emitChatEmotion` 唯一出口双发（规矩 27）；**跟标签不跟衰减**（否则角标自己变淡像坏了）；calm 不挂牌、认不出的收牌；角标**绝对定位不占布局**（实测有/无牌 72px = 72px，否则打乱 A3 与高度上报）。图形取 **Lucide（ISC）**现成路径，**不用 emoji 字符**（字形随系统变 + llm.js 清洗器本来就在丢 emoji） | dsh-dfy 原话「爱心/怒气/问号…均为**视觉特效，不是文字占位**」；位置依 **Material Badge** 规范（默认右上角 + 允许压宿主边） |
 
-| W43 | **动作池配置化**：把 `motion.js` 里硬编码的随机动作改成数据段 `animations{idle, turn, move, categories[{id,weight,actions,noMirror}]}` + `animationWeights{idle,turn,move}`（turn/move 权重按 0 算时**不归一化**，份额自然落到分类）；抽 `pick` / `pickSlot` / `rollKind` / `pickWeightedCategory` 成纯函数（排除当前避免连抽，**排除后池空退回原池**） | `PC2005-cloud/dsh-pet` `assets/config.jsonc:241-361` + `shared/pickers.ts`；见 `open-source-reference.md` 第 18 轮 §18.2 |
-| W44 | **事件档位数组**：`events.workStatus[6]`（thinking/working/result/waiting/success/error）**索引即档位、新档只可追加到末尾**；播完分支抽 `decideEndedCue` 式纯函数（档内轮换 / 续播 / 事件结束 / 回归随机）。正好接第 17 轮待补的 `attention` 档 | 同上 `cues.ts`；⚠️ 与我们「配置逐段逐键合并」（规矩 1）天然契合，但**中间插档 = 静默错位**，写进注释 |
+| W43 | ~~动作池 pick 纯函数~~ **✅**：`pickers.js`（`pick`/`pickWeighted`/`rollKind`/`pickWeightedCategory`；排除后空退回原池；权重 0 不归一化）。`animations{}` 配置化仍待素材/视频线 | dsh-pet pickers；§18.2 |
+| W44 | ~~事件档位数组 + decideEndedCue~~ **✅**：`work-cues.js` · `WORK_STATUS` 含 attention（只可追加）· `decideEndedCue` · emit/渲染接 attention | dsh-pet cues.ts |
 | W45 | **换源四条硬细节**（对照我们的实现逐条核）：① `loadeddata` ≠ 开始出画，要等 `play()` 兑现才回执；② `ended` 只认前台元素（后台残留 handler 会掐断当前动画）；③ 加载失败/超时**必须释放 pending**，否则防重分支把它永久吞掉 = **「点了没反应」**；④ blob + **世代号**丢弃迟到结果（= 规矩 16） | 同上 `animation.ts` / `asset-loader.ts`；③ 与规矩 24「关掉的入口不许点了没反应」同族 |
 | W46 | **素材链存档为「第二交付路线」**（不换产品线）：20 段核心动作（idle / turn / drag / click×5 / 工作状态×6）≈10MB 就能撑起一个可用形象；管线 = AI 绿幕视频 → 抠像（**手工**，自动 HSV 残边）→ 归一化 → 640×360 webm(VP9-alpha) → Safari 另出 HEVC-alpha `.mov` | `custom-model-plan.md` §11 降档路线；🔴 **许可**：代码 MIT、**素材「禁止商用」**、形象 CC BY-NC-SA 4.0 → **只借结构，一行素材不能进包**（规矩 29） |
 | W47 | **TTS 加 OpenAI 兼容 provider**（借 gsv-rvc-voice-bridge 的网关模式，MIT）：
@@ -255,18 +264,18 @@
 |---|---|---|
 | M1 | ✅ **本地允许空 Key**（2026-10-29 完成） | 判定收到 `llm-providers.isUsable`：**有 key 或端点在本机**才可用。`streamLLM` / `memory.extractViaLlm` / 主进程记忆闸门 / 渲染层（改读 `llm.usable` 派生字段）四处一起改 |
 | M2 | ✅ **连接预设一键填 + WorkBuddy 导入**（2026-10-29 完成） | 托盘「设置 → 模型接入」：9 条预设（DeepSeek / 通义 / 智谱 / Kimi / 硅基流动 / OpenRouter / Ollama / LM Studio / 自定义）+ 从 `~/.workbuddy/models.json` 导入自定义模型 + 填写 Key 小窗（不扩 IPC 面，同改名对话框套路）+ **真测一句**（M4 提前做掉：按 401/404/429/超时分别给可动手的结论）。⚠️ 切预设**不动** apiKey；旧配置按 baseUrl 反查打勾项 |
-| M3 | **拉模型列表** | `GET …/v1/models` → 下拉选；失败可手填（Ollama/LM Studio 官方兼容端均有） |
-| M4 | ✅ **真测一句**（2026-10-29，随 M2 一起） | `testLlm()` 发极短 chat（max_tokens 32、15s 超时）；失败按状态码翻译：401/403 key 无效 · 404 地址或模型名不对 · 429 限流/额度 · AbortError 超时。→ 只剩 M5（设置页）|
-| M5 | **设置页露出来** | 勿再只靠「打开 JSON」：Base URL、Key（可空提示）、Model、超时、extraBody 高级折叠；引导可叠 W18 |
+| M3 | ✅ **拉模型列表**（2026-10-30） | 设置页「拉取列表」→ `GET …/models` 填 datalist；失败可手填；Ollama `models[]` / OpenAI `data[]` 都认 |
+| M4 | ✅ **真测一句**（2026-10-29，随 M2 一起） | `testLlm(override?)` 发极短 chat；页内可先测再存；失败按状态码翻译 |
+| M5 | ✅ **设置页露出来**（2026-10-30） | 「模型设置…」：Base URL / Model / Key / 卡住超时 / 整轮上限 / extraBody 高级折叠 + 页内测试与拉列表 |
 
 ### G-LLM 中期
 
 | ID | 项 | 注 |
 |---|---|---|
-| M6 | 多配置档切换 | 「家里 Ollama / 公司 DeepSeek」一键切，不重装 |
-| M7 | 本地首包引导 | 检测 11434/1234 是否在听；给 `ollama pull` 文案，不内置权重 |
-| M8 | 云端目录精简 | DeepSeek / 通义兼容 / OpenAI 兼容 默认条目 + 自测通过才绿 |
-| M9 | 超时按场景 | 本地首字慢：`stallMs` 可单独抬；与云端默认分开 |
+| M6 | ✅ 多配置档切换（2026-10-30） | `llm.profiles` + `activeProfile`；托盘「配置档」存/切/覆盖/删；切后顶层字段同步 |
+| M7 | ✅ 本地首包引导（2026-10-30） | 「检测本机端点…」探 Ollama/LM Studio；命中则填 baseUrl；文案指路 pull，不内置权重 |
+| M8 | ✅ 云端目录精简（2026-10-30） | 托盘顶层 DeepSeek/通义/本地/自定义；其余「更多…」；`tested` 指纹自测才 ✓ |
+| M9 | ✅ 超时按场景（2026-10-30） | 切本地预设 stall 45s / total 180s；云端 20s / 120s（`TIMEOUT_LOCAL/CLOUD`） |
 
 **明确不做**：内置捆 GGUF、自研推理引擎、非 OpenAI 协议各写一套客户端。
 
@@ -274,11 +283,18 @@
 
 ## H. 建议开干顺序
 
-1. **M1 → M2 → M4 → M5**（本地能连 + 预设 + 真测 + 设置可见）— 对接体验一天可感  
-2. **M3 / M6** — 选模与多档  
-3. **P1 + P2**（人设）— 连上之后才更有味道  
-4. **P3 / X1 / G1–G4** → 其余  
-5. **Tauri 迁壳（§J）** — 与上并行不抢；满足触发条件再开 T0（详见 `tauri-migration.md`）
+1. ~~**M1 → M2 → M4 → M5**~~ ✅（含 M3 拉列表）  
+2. ~~**M6**~~ ✅ 多配置档  
+3. ~~**P1 + P2 + P3**~~ ✅；~~**X1**~~ ✅ 运行时切模型  
+4. ~~**G1–G4 / X2**~~ ✅  
+5. ~~**P4 / X3 / X4 / M7**~~ ✅  
+6. ~~**M8 / M9 / G5 / G6**~~ ✅  
+7. ~~**X5 / G13**~~ ✅  
+8. ~~**P5 / P6 / P8 / G7 / G8 / G14 / G15**~~ ✅  
+9. ~~**G19 2a / G9 / P7 / X6–X8 / G16 / G20**~~ ✅  
+10. ~~**G10–G12 / G17 / G19 2b**~~ ✅  
+11. ~~**G18 / G22 / G25–G27 / G30**~~ ✅ → 续 G21/G23/G24/G28/G29 / W  
+10. **Tauri 迁壳（§J）** — 暂缓（用户指定先不做 T0）
 
 ---
 
@@ -335,3 +351,21 @@
 | 2026-10-29 | 🔴 **「两个她」第四次 = 真凶（用户第三次报「还是出现了两个模型」）**：底座无辜 —— 真因是**启动期窗口连缩**（宽 324→312→310、高 344→342），每次缩小都 resize 画布，而「缩小」正是合成层残留的唯一来路（旧帧比新视口大）。修法：`syncStageWidth` **只增不减**（`want <= innerWidth+2` 只记账不上报；窗口透明 + 命中测试穿透让多出的空白无害）+ `applyStageWidth` **不调 `refreshWinSize`**（高度只在屏幕真变时变）。实测 `canvasResize` 3 次 → **1 次**；负对照短路该判断立刻回到 3 次。回归 `verify-resize-clear.js` [C] 段 |
 | 2026-10-29 | 🔴 **「幻影参数」大 bug**：框架 `getParameterIndex` 拿字符串和 `CubismId` 对象做 `!=` 比较 → 永远 miss → 写进 `_notExistParameterValues`；`getParameterValueById` 读的是同一张表，所以**读回来自洽、画面不动、零报错**。⇒ whale 的 16 字段情绪、口型、摸头 delta **从未真正画出来过**。修法：`paramIndexOf` 建「名→索引」表（按 model 实例缓存）+ 全走 `set/getParameterValueByIndex`。回归 `verify-param-channel.js`（12 条） |
 | 2026-10-29 | **情绪贴纸（whale）**：44 个 exp3 里挑 7 个「贴纸类专属参数」映射到情绪档（星星眼/吐舌/问号/流汗/阴暗/感叹号/闭眼口水），随 `decayAmt` 淡入淡出；共享参数自动过滤、绝对写 `def+value×强度`、归零写回默认值；开关 `appearance.stickers`。真机五档全亮（happy 星星瞳 / think 红问号 / shy 汗滴 / serious 灰脸 / sleepy 口水）。回归 `verify-stickers.js`（46 条） |
+| 2026-10-30 | **按开干顺序落地**：M5 模型设置页（超时 + extraBody + 页内测试）· M3 拉 `/models` 列表 · P1 六套人设预设（托盘子菜单）· P2 工作态/久别台词池（`line-pools.js`）。回归 `verify-llm-providers.js` + `verify-line-pools.js` |
+| 2026-10-30 | **M6 + P3 + X1**：多配置档（`llm-profiles.js`）· OCEAN 三档性格微调（`ocean.js` → idle/衰减/气泡/pride）· 运行时切 hiyori/whale（`applyProfile` + 署名）。回归 `verify-llm-profiles.js` / `verify-ocean.js` / `verify-model-switch.js` |
+| 2026-10-30 | **G1–G4 / X2**：安静排程 12h 上限 · 前台进程 hint · 打断可掐流并截历史 · 衰减到底回 calm 标签 · 状态三档陪伴/日常/勿扰。回归 `verify-quiet-hours.js` / `verify-presence.js` |
+| 2026-10-30 | **P4 / X3 / X4 / M7**：人格招牌四态 · 拖文件进记忆 · 单摆/翻转 · 本机端点检测。回归 `verify-p4-x3-x4.js` / `verify-local-guide.js` / `verify-line-pools.js` |
+| 2026-10-30 | **M8 / M9 / G5 / G6**：目录精简+绿标 · 本地/云端超时 · cdi3 扫描骨架 · 药盒下一句。回归 `verify-llm-providers.js` / `verify-model-scan.js` / `verify-oneshot.js` |
+| 2026-10-30 | **X5 / G13**：边缘线索（电量/CPU/切应用，默认关）· 对话导出 MD/JSON。回归 `verify-edge-cues.js` / `verify-chat-export.js` |
+| 2026-10-30 | **P5/P6/P8/G7/G8/G14/G15**：气质慢层 · 陪伴/专业 · 角色卡导入 · 信息增益 · think 开关 · 截屏隐藏 · 气泡穿透。回归 `verify-temperament.js` / `verify-info-gain.js` / `verify-character-card.js` / `verify-g8-g14-g15.js` |
+| 2026-10-30 | **G19 Phase2a**：重要度纯函数 · 清晰度四档 · 迁移/日结只降不删 · 模糊注入前缀。回归 `verify-memory-phase2a.js` + `verify-memory.js` |
+| 2026-10-30 | **G9/P7/X6–X8/G16/G20**：人设护栏 · 视角蒸馏 · 作息直方图 · 工作↔mood · memory 快照 · drowsy→sleep · 打断嘴归零。回归 `verify-persona-guard.js` / `verify-rhythm-distill-sleep.js` / `verify-lip.js` |
+| 2026-10-30 | **G10/G11/G12/G17/G19 2b**：TTS 有限并发 · 文字口型 · MCP 骨架 · mount 清 stage · forget 默认关+墓碑。回归 `verify-g10-g12.js` + `verify-config-defaults.js` |
+| 2026-10-30 | **G18/G22/G25–G27/G30**：whale 真脸情绪+表情槽预览 · 主动由头四类 · 伪造用户句 · 热键/多屏 hop 默认关 · verify-arch。回归 `verify-g18-g30.js` / `verify-arch.js` |
+| 2026-10-30 | **W6/W13/W30/W32–W34**：悬停渐隐穿透 · 连点/过摸生气档 · 置顶看门狗 · 档案自证+emotionAlias+mouthOpenMax。回归 `verify-expressive.js` |
+| 2026-10-30 | **W7/W8/W14/W31**：锁屏清零重计 · OS 截屏排除(=G14) · TTS 三级降级 · 不可用置灰。回归 `verify-w7-w14-w31.js` |
+| 2026-10-30 | **G23/W15/W16**：看一眼屏幕（藏窗截屏→多模态）·「看看」口令 · 真测就绪门闩。回归 `verify-glance.js` |
+| 2026-10-30 | **W5/W9/W26/W27**：位置钉稀有换位 · 时段 idle 池 · 主动先记账 · reason/preview。回归 `verify-w5-w9-w26.js` |
+| 2026-10-30 | **W10/W19/W20/W23/W24**：话痨维 T · 触摸 quiet/normal/eager · 气泡穿透(=G15) · 记忆重要度/清晰度(=G19)。回归 `verify-w10-w19-w20.js` + `verify-ocean.js` |
+| 2026-10-30 | **W11/W25/W43**：情绪分轨 TTS · 初次相遇独立轴 · pickers 纯函数。回归 `verify-w11-w25-w43.js` |
+| 2026-10-30 | **W1/W12/W29/W44**：限时看屏授权 · PetEvent 总线 · Agent JSONL · workStatus+attention。回归 `verify-w1-w12-w29-w44.js` |

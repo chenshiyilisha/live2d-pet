@@ -69,7 +69,10 @@ const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
 try {
   fs.rmSync(STAGE, { recursive: true, force: true });
 } catch (err) {
-  const stale = path.join(os.tmpdir(), `ayan-stage-stale-${Date.now()}`);
+  // 🔴 必须同盘：os.tmpdir() 可能在别的盘（E: 仓库 / C: 临时），跨盘 rename 会
+  // EXDEV。挪到 build/ 下的 stale 目录（同盘），并顺手清掉上一次的残留。
+  const stale = path.join(ROOT, 'build', `stale-${Date.now()}`);
+  fs.rmSync(stale, { recursive: true, force: true });
   fs.renameSync(STAGE, stale);
   console.log(`旧 stage 删除受阻（${err.code || err.message}），已移至 ${stale}`);
 }

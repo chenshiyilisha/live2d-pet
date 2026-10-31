@@ -134,8 +134,8 @@ const readSrc = (p) => fs.readFileSync(path.join(SRC, p), 'utf8').replace(/\r\n/
     ok(D.param.BROW_L_FORM === null && D.param.BROW_R_FORM === null,
       'BROW_L/R_FORM = null（这模型没有眉毛形态参数）');
     ok(D.param.CHEEK === null, 'CHEEK = null（这模型没有连续脸红参数，脸红是 key7 贴纸）');
-    ok(D.param.EYE_L_SMILE === undefined || D.param.EYE_L_SMILE === null,
-      'EYE_L_SMILE 未接（这模型没有微笑眼参数）');
+    ok(D.param.EYE_L_SMILE === 'EyeSmile',
+      'W59 纠正：EYE_L_SMILE → EyeSmile（之前按 hiyori 口径找 ParamEyeLSmile 判「没有微笑眼」是误判）');
 
     /* 顺带把「接上了什么」打出来。 */
     const wired = Object.entries(D.param).filter(([, id]) => id);

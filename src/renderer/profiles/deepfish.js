@@ -110,8 +110,14 @@ export const DEEPFISH = {
     MOUTH_FORM: 'ParamMouthForm',
     EYE_L: 'ParamEyeLOpen',
     EYE_R: 'ParamEyeROpen',
-    /* EYE_L_SMILE / EYE_R_SMILE 缺失 —— 这模型没有微笑眼参数
-     * （它的"圈圈眼/爱心眼"是 key3/key4 贴图开关，不接）。 */
+    /* 🔴 W59（2026-10-31 纠正）：这模型**有**微笑眼参数 —— `EyeSmile`。
+     * 之前按 hiyori 口径找 `ParamEyeLSmile` 找不到就判「没有微笑眼」，
+     * 白砍了一半表情表现力。真相：cdi3.json 里是 `EyeSmile`（**无 Param
+     * 前缀**、且无 L/R 之分，单个参数管两眼）。
+     * physics3.json 实测它是物理**输入**（Source）→ 写入安全、每帧不被覆盖。
+     * EYE_L_SMILE 与 EYE_R_SMILE 指向同一个 ID：pet.js 连写两次，put() 幂等。 */
+    EYE_L_SMILE: 'EyeSmile',
+    EYE_R_SMILE: 'EyeSmile',
     BROW_L_Y: 'ParamBrowLY',
     BROW_R_Y: 'ParamBrowRY',
     /* 🔴 这模型没有眉毛 X 位移和形态参数（只有 Angle 系，见 cdi3.json

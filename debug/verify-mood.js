@@ -78,8 +78,11 @@ const {
   }
 
   {
-    /* valence 回中是指数：v−0.5 = (v₀−0.5)·e^(−|pull|·min)，10 秒 ×60 步 */
+    /* valence 回中是指数：v−0.5 = (v₀−0.5)·e^(−|pull|·min)，10 秒 ×60 步
+     * ⚠️ W51：连点递减会压低起点（0.06×0.7+0.06×0.4+… 达不到 1），
+     * 本用例验的是**漂移机制**（回中指数），递减由 verify-w51 单独覆盖 → 关掉。 */
     const m = createMoodEngine();
+    m.setDedentEnabled(false);
     const v0 = 1.0;                                  // 用事件把 valence 顶满
     for (let i = 0; i < 8; i++) m.onClick();         // 0.55 + 0.06×8 → clamp 1
     ok(m.axes.valence === v0, '起点顶满 1.0（事件累积）');

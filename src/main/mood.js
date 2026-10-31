@@ -99,6 +99,9 @@ function setRateMul(m) {
 }
 function getRateMul() { return { ...rateMul }; }
 
+/* W51：互动收益递减。开关在**引擎实例**上（S.dedentEnabled，默认开）——
+ * 不用模块级变量：verify 会造多个引擎，模块级会串味。 */
+
 /* ───────────────────────── 阈值 ───────────────────────── */
 /* 表情偏置的起算线（PetMood 同值）：穿过才算「心情不错/闷/累」，
  * 中段不偏置 —— 否则偏置永远非零，「与没这功能逐位一致」就没法保证了。 */
@@ -127,7 +130,32 @@ function nightFactor(hour) {
 }
 
 /* ───────────────────────── 存档 ───────────────────────── */
+/* 存档版本：字段是**加法式**演进（新字段缺省即初值，旧代码忽略新字段）——
+ * 所以加 W51 计数字段不需要升版本。 */
 const SAVE_VERSION = 1;
+
+/* ───────────────────────── W51：互动收益递减 ──────────────────────────
+ * 出处 dsh-mood（MIT）：「摸摸/投喂/逗各 5 次/天，100%→70%→40%→20%→5%」。
+ * 放我们这儿：点击/摸头/用户说话带来的**心情增益**随今日次数递减 ——
+ * 「一直点她就一直开心」违背真实互动；次数多了收益自然变薄。
+ * 收益阶梯：第 n 次互动（从 0 开始）乘 dedentStep(n)：
+ *   0 → 1.0（首次全额）· 1 → 0.7 · 2 → 0.4 · 3 → 0.2 · ≥4 → 0.05。
+ * 拖动不产生心情增益（本来就没有 valence 增量），不在递减范围。 */
+function dedentStep(n) {
+  if (n <= 0) return 1.0;
+  if (n === 1) return 0.7;
+  if (n === 2) return 0.4;
+  if (n === 3) return 0.2;
+  return 0.05;
+}
+
+/* 今日键（本地日）：跨天判定用。rollRate() 里比对，不等于就重置计数。 */
+function todayKey(now) {
+  const d = new Date(Number(now) || Date.now());
+  return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+}
+
+
 
 function clamp01(v) {
   if (!Number.isFinite(v)) { this._nanSeen++; return 0; }
@@ -165,10 +193,27 @@ function createMoodEngine() {
     _epoch: 0,
     _dragging: false,
     _patSince: 0,
+    _rateDay: '',
+    _rateCount: 0,
+    dedentEnabled: true,
     _lastLine: ''
   };
 
   const cl = clamp01.bind(S);
+
+  /* W51：收益乘数滚动。每次产生 valence 增益的互动开头调一次（一个入口一次）。
+   * 跨日重置计数。开关关（S.dedentEnabled=false）时 mul 恒 1.0（与没这功能逐位一致）。 */
+  function rollRate(now) {
+    if (!S.dedentEnabled) return 1.0;
+    const today = todayKey(now);
+    if (S._rateDay !== today) {
+      S._rateDay = today;
+      S._rateCount = 0;
+    }
+    const mul = dedentStep(S._rateCount);
+    S._rateCount++;
+    return mul;
+  }
 
   /* ───────── 每步漂移。⚠️ 实时 tick 与离线补漂**同走这里**
    *（PetMood 2026-10-14 的教训：离线自己抄一份漂移公式，两份悄悄跑偏，
@@ -219,9 +264,11 @@ function createMoodEngine() {
   }
 
   /* ───────── 外部事件 ───────── */
+  /* W51：点击/摸头/用户说话 → 先滚收益乘数，再乘到 valence 增益上。
+   * ⚠️ 一个入口只滚一次（onClick 同时改 valence/energy/pride，只取一个 mul）。 */
   function onClick() {
     S.interactions++;
-    S.valence = cl(S.valence + GAIN.clickValence);
+    S.valence = cl(S.valence + GAIN.clickValence * rollRate());
     S.energy = cl(S.energy + GAIN.clickEnergy);
     S.pride = cl(S.pride + softPride());
     S.social = 0;                        // 互动渴望被满足
@@ -253,7 +300,7 @@ function createMoodEngine() {
     S._patSince = 0;
     if (sec <= 0) return;
     S.interactions++;
-    S.valence = cl(S.valence + GAIN.patValencePerSec * sec);
+    S.valence = cl(S.valence + GAIN.patValencePerSec * sec * rollRate());
     S.pride = cl(S.pride + softPride());
     S.social = 0;
     derive();
@@ -262,7 +309,7 @@ function createMoodEngine() {
   /* 用户主动说话 = 最强的「被搭理」 */
   function onUserChat() {
     S.interactions++;
-    S.valence = cl(S.valence + GAIN.chatValence);
+    S.valence = cl(S.valence + GAIN.chatValence * rollRate());
     S.pride = cl(S.pride + softPride());
     S.social = 0;
     derive();
@@ -323,6 +370,14 @@ function createMoodEngine() {
       S.pride = sanitizeAxis(d.pride, S.pride, dirty);
       S.interactions = Number(d.interactions) || 0;
       S.reunions = Number(d.reunions) || 0;
+      /* W51：收益递减计数也持久化 —— 重启不重置「今天已经互动过几回」。
+       * rateDay 校验格式（防手改配置塞脏字符串）；rateCount 夹到 [0,50]。 */
+      if (typeof d.rateDay === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d.rateDay)) {
+        S._rateDay = d.rateDay;
+      }
+      if (Number.isFinite(Number(d.rateCount))) {
+        S._rateCount = Math.max(0, Math.min(50, Math.floor(Number(d.rateCount))));
+      }
       const away = Math.floor((Date.now() - (Number(d.t) || 0)) / 1000);
       /* ⚠️ 已经判定损坏的存档，时间戳同样不可信（PetMood S12b 的教训：
        *    拿坏档的钟补漂 8 小时 = 开局就是空壳，恰好是清洗想避免的事）。 */
@@ -343,6 +398,9 @@ function createMoodEngine() {
         t: Date.now(),
         valence: S.valence, social: S.social, energy: S.energy, pride: S.pride,
         interactions: S.interactions, reunions: S.reunions,
+        /* W51：收益递减计数（跨重启保持「今天互动几回」） */
+        rateDay: S._rateDay,
+        rateCount: S._rateCount,
         version: SAVE_VERSION
       };
       const tmp = filePath + '.tmp';
@@ -372,6 +430,11 @@ function createMoodEngine() {
     step, applyOffline, loadAndDrift, save, snapshot, promptLine,
     onClick, onDragBegin, onDragEnd, onPatStart, onPatEnd,
     onUserChat, onAssistantEmotion,
+    /* W51：收益递减开关（实例级，主进程从 config 读后调） */
+    setDedentEnabled: (on) => { S.dedentEnabled = on !== false; },
+    getDedentEnabled: () => S.dedentEnabled,
+    getRateCount: () => S._rateCount,
+    getRateDay: () => S._rateDay,
     /* 测试口（只读语义，别在外头改） */
     get axes() { return { valence: S.valence, social: S.social, energy: S.energy, pride: S.pride }; },
     get nanSeen() { return S._nanSeen; },
@@ -401,6 +464,7 @@ function moodTemperature(axes) {
 
 module.exports = {
   createMoodEngine, nightFactor, setPrideSoftMul, setRateMul, getRateMul,
+  moodTemperature, dedentStep, todayKey,
   moodTemperature,
   RATE, GAIN, REUNION_MIN_SEC, REUNION_HOLD_SEC, OFFLINE_CAP_SEC,
   VAL_HAPPY, VAL_SERIOUS, ENERGY_LOW, PRIDE_EROSION_AT

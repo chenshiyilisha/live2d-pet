@@ -3443,6 +3443,8 @@ function moodTick() {
     /* P5：日均采样 → 气质乘子 */
     temperament.observe(moodEngine.axes);
     setRateMul(temperament.rateMul());
+    /* W51：互动收益递减开关（参数型，不进托盘；每 tick 重读，改 config 即刻生效） */
+    moodEngine.setDedentEnabled(isOn('appearance', 'dedentEnabled'));
     pushMoodSnapshot();
     const now = Date.now();
     if (now - moodSaveAt >= 60 * 1000) {

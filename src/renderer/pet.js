@@ -46,10 +46,8 @@ let facingDir = 1;
 let tiltRad = 0;
 
 /* 档案键解析的**唯一出口**（别在别处再写一遍 MODELS[name] 判断）：
- * 表里没有的键、以及**已退役**的键（档案里 `retired: true`，例如 deepfish，
- * 见 profiles/deepfish.js 头注释）一律回落到默认模型。退役模型的档案与
- * 接线代码仍留在仓库里，只是不允许被挂上 —— 所以判据放在这里，而不是
- * 把注册表删掉。 */
+ * 表里没有的键、以及档案里标记 `retired: true` 的键（将来下线某个模型时
+ * 用，见 profiles/deepfish.js 头注释）一律回落到默认模型。 */
 function resolveModelName(name) {
   const n = String(name || '').trim();
   return MODELS[n] && MODELS[n].retired !== true ? n : MODEL_NAME;

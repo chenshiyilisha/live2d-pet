@@ -450,3 +450,76 @@ psd2live / See-Through 整条生态都是围着半身长出来的，我们正好
 §10.7 的结论不受影响：形体赛道 3D 已赢。
 降档让 2D 的定位更清楚 —— **轻量 / 低内存 / 可快速换皮的备选身**，
 不再跟 3D 比形体。这也意味着 §11.5 的 L2 没有排期理由。
+
+---
+
+## 12. psd2live 端到端 PoC 已跑通（2026-10-31 深夜）
+
+§8 第 1 条「待拍板」的 PoC **已执行并成功**。这是本次会话最大的突破。
+
+### 12.1 工具链落位
+
+| 组件 | 版本 | 落位 | 许可 |
+|---|---|---|---|
+| PSD2Live 便携版 | 3.6.7 | `tools/psd2live/PSD2Live.exe` | GPL-3.0（只跑不分发，无 copyleft 义务） |
+| tml 示例素材 | 1.0.0 | `tools/psd2live/tml/` | 示例 |
+| Cubism Core（我们 runtime 自带） | — | `node_modules` / 本地 CDN | 已验证 |
+
+### 12.2 端到端跑通证据
+
+命令：
+```
+./PSD2Live.exe --input tml/tml/psd-input/tml.psd --output run/tml --lang zh
+```
+产出 `run/tml/`：
+- `tml.moc3` —— 头 `MOC3\x05\x00\x00\x00`（**Cubism 5，版本 5**）
+- `tml.model3.json` —— `Version: 3`（标准），含：
+  - `Groups`: `EyeBlink` [ParamEyeLOpen, ParamEyeROpen] / `LipSync` [ParamMouthOpenY]
+  - `Expressions`: 4 个（微笑/悲伤/生气/惊讶）—— 参考版 0.1.0 **0 个**，新版本多出 4 个表情
+  - `Motions`: Idle / Blink / Nod / Shake 四组
+  - `Physics`: `tml.physics3.json`
+  - `DisplayInfo`: `tml.cdi3.json`
+  - `Textures`: `tml.4096/texture_00.png`
+- 与参考输出 `tml/tml/moc3-cmo3-output/` 逐项对齐
+
+### 12.3 生死线：Cubism Core 兼容
+
+对比我们的现有模型：
+| 模型 | moc3 头 | Cubism 版本 |
+|---|---|---|
+| hiyori | `MOC3\x03` | 3 |
+| whale | `MOC3\x04` | 4 |
+| deepfish | `MOC3\x05` | 5 |
+| **psd2live 产出** | **`MOC3\x05`** | **5** |
+
+→ psd2live 产出的 moc3 版本与 deepfish（我们 runtime 已能加载）**完全一致**。
+→ **runtime 加载这条生死线已过。** 路线从「能不能做」正式转为「先跑通哪一步」。
+
+### 12.4 发现：psd2live 3.6.7 已非 10-28 记录的"半身向"
+
+§9 表里记的是「767★ Kotlin，只配当 PoC」。实际拉下来：
+- 805★，**2026 仍在提交**
+- 是**完整桌面编辑器**（网格/变形器/物理模拟/时间轴/骨骼 IK）+ **CLI 无人值守导出** + **MCP 服务**
+- **默认导出 Cubism 5.0**，直出 `.moc3` + 全套 `model3/physics3/motion3/exp3/pose3` + 纹理
+- 支持 **layout manifest**（JSON 描述分层，可绕过 PSD）—— 这对程序化生成极关键
+
+### 12.5 See-Through 拆层链路的现况
+
+用户提的链路「NovelAI 立绘 → See-Through 拆层 → psd2live 绑骨」里，**See-Through 这一环本地走不通**：
+- `shitagaki-lab/see-through` 需要 **torch + CUDA GPU**
+- 本机 `nvidia-smi` 不存在、`import torch` 失败 → **无 GPU/torch**
+- ⇒ 拆层要么外包、要么用 layout manifest 手工分层、要么找替代（见 §10）
+
+### 12.6 下一步（推进实际制作）
+
+§11 降档后的新标准（够用级）：
+1. `ParamMouthOpenY` 存在且 0→1 能张开
+2. 至少 4 个情绪可切换、字段跟着走
+3. 半身几何标定过得去（headTopY 量得出、底座不压人、两档窗口复验）
+
+制作路径（路线 A 全自动，零人工外购）：
+1. **源图**：ImageGen 生成全身立绘（白底，分层友好）
+2. **拆层**：layout manifest 手工分层（See-Through 无 GPU 走不通）
+3. **绑骨**：psd2live CLI 一条命令
+4. **runtime 适配**：新建 `profiles/<new>.js`，冒烟测试
+

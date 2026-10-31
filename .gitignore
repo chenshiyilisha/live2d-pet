@@ -14,6 +14,10 @@ src/assets/live2dcubismcore.min.js
 # 本地开发时解压到 src/assets/ 即可，与 Cubism Core 同理它不会被提交。
 src/assets/models/
 
+# 第三方工具下载（PSD2Live 便携版 297MB，GPL-3.0）—— 不随本仓库分发。
+# 文档见 docs/custom-model-plan.md §12，本地下载解压后即可用。
+tools/psd2live/
+
 # 调试运行的产物 —— 日志与截图都是可再生的。
 # ⚠️ debug/ 下的 .js / .sh / .html 是**可复用的验证工具**（tray-dump.js、
 #    itest.html、probe.sh、driver*.js …），不能一起 ignore 掉。

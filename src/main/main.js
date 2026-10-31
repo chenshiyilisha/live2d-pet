@@ -2174,18 +2174,17 @@ function personalitySubmenu(cfg) {
 /* 菜单上可选的模型 = **产品线**。这里没有的模型不允许出现在配置里，
  * 也不允许被渲染层挂上（下面三处消费点都按这张表过滤）。
  *
- * 🔴 deepfish（大肥鱼）2026-10-31 **退役**（用户拍板）：不上菜单、不进安装包。
- *    档案 `profiles/deepfish.js` 与 params.js 四张注册表**都留着** —— 那是
- *    一套完整的「第三方 VTS 模型接入 + 大画布实测取景」实现，将来接别的
- *    第三方模型（或做模型市场）直接照抄；只是这个素材本身不随产品走
- *    （素材自带「禁止二次分发」条款，署名：神宫凉子 / 霓虹猫）。
- *    想临时复活：这里取消注释 + 档案里 `retired` 改回 false（**两处都要**，
- *    只改一处就是"菜单能点但挂不上"或反过来），别处不用动 ——
- *    档案里的 alignByMeasure / 几何常数都是实测值，直接可用。 */
+ * 2026-10-31：deepfish（大肥鱼，即 DeepSeek 平台的免费鲸鱼娘皮）**重新启用**，
+ * 回到菜单。素材 187M 全在本地（20+ 表情 / 8 动作 / 5 纹理），取景用
+ * alignByMeasure 实测对齐，是实测值、直接可用。
+ * 署名照素材自带要求写在下面的 toast 里（神宫凉子 / 霓虹猫）。
+ *
+ * ⚠️ 想再让它下线：这里删掉那一项 **＋** 档案里置 `retired: true`（两处都要，
+ * 只改一处就是「菜单能点但挂不上」或反过来），别处不用动。 */
 const APPEARANCE_MODELS = [
   { id: 'hiyori', label: '日和' },
-  { id: 'whale', label: '鲸鱼娘' }
-  // { id: 'deepfish', label: '大肥鱼' }   // 已退役，见上
+  { id: 'whale', label: '鲸鱼娘' },
+  { id: 'deepfish', label: '大肥鱼' }
 ];
 
 function applyAppearanceModel(id) {
@@ -2197,6 +2196,8 @@ function applyAppearanceModel(id) {
   const row = APPEARANCE_MODELS.find((m) => m.id === want);
   if (want === 'whale') {
     toast('已切到鲸鱼娘 · 素材源自 VTube Studio 模型包（Andersen216 补 model3）');
+  } else if (want === 'deepfish') {
+    toast('已切到大肥鱼 · 素材源自神宫凉子 / 霓虹猫 免费公开模型，禁止二次分发');
   } else {
     toast(`已切到「${row ? row.label : want}」`);
   }

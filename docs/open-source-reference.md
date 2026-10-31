@@ -3326,3 +3326,73 @@ https://github.com/FuRongJun-1999/dsh-memory                 545★ MIT · 灵�
 https://github.com/nefelibata5136-code/surfcore-life            5★ MIT · 大肥鱼自主调参 9 工具闭环（预览→执行→验证→回滚）
 https://github.com/NoMindSama/qq-dsh-bridge                    8★ MIT · DSH 接 QQ · 四层记忆 + 闲置边界压缩
 ```
+
+---
+
+# 23. jingyu-live2d-agent 复看：它是**大肥鱼模型的官方编排工具**（2026-10-31，第 23 轮）
+
+> 用户第二次给这个仓库。第 21 轮（§21.7）只判了「无 LICENSE → 只借思路」，
+> 这轮为了修 deepfish 取景问题又翻了一遍源码，**结论升级**：它不只是"思路可借"，
+> 它里面的 `core-inventory.json` / `model_profile.py` 是**这个模型的权威参数目录**，
+> 与我们自己的接入互相印证（并且纠正了我们的一处判断）。
+
+| 项 | 事实（api.github.com 核实） |
+|---|---|
+| 仓库 | `InariNGT-Ofiicial/jingyu-live2d-agent`（注意 owner 拼写少一个 f，不是笔误） |
+| 数据 | 8★（21 轮时 5★）· Python · 287KB · 2026-10-30 建 · 89 个文件 |
+| 许可 | 根目录**无 LICENSE**（只有 `THIRD-PARTY.txt` / `licenses/`）→ 默认保留一切权利，**代码不可复制** |
+| 素材 | 明确「不包含角色模型、贴图、PSD、Cubism Core」，并写清署名（神宫凉子 / 霓虹猫）与禁二次分发 |
+
+## 23.1 交叉验证：它的画布真值 == 我们离线量的
+
+`core-inventory.json` 里 `canvas = {CanvasWidth:3749, CanvasHeight:7697, CanvasOriginX:1874.5, CanvasOriginY:3848.5, PixelsPerUnit:3749}`，
+`parameterCount 509 / partCount 147 / drawableCount 715` —— 与我们在
+`debug/calib-inkbox.js` 里从 moc3 顶点量出来的数字**完全一致**（715/147/509、3749×7697）。
+👉 说明我们这条离线量法是对的，可以放心当"换模型第一手数据"。
+
+## 23.2 🔴 纠正：这模型**有**可用的连续表情参数，我们之前找错了名字
+
+我们按 hiyori 的口径找 `ParamEyeLSmile`（不存在）就下结论"没有微笑眼"。
+它的 `model_profile.py` 把语义输入参数列为白名单，里面是这些名字：
+
+```
+AngleX/Y/Z · PositionX/Y/Z · LeanInput · ParamEyeBallX/Y
+ParamEyeLOpen/ROpen · ParamMouthForm · ParamMouthOpenY
+EyeSmile · MouthSmile_L/R · ParamBrowLY/RY · BrowInnerUp
+CheeckPuff · JawOpen · ParamBreath · Mouthpucker/Funnel/X/PressLipOpen/PuckerWiden
+REyeSquint/LEyeSquint · TongueOut · NoseNeer · MouthRollUpper/Lower
+```
+
+→ **`EyeSmile`（无 Param 前缀）/ `MouthSmile_L`/`MouthSmile_R` 是存在的**，
+我们档案里 `EYE_L_SMILE/EYE_R_SMILE` 置空、`mouthForm` 只靠 ParamMouthForm，
+表情表现力被自己砍掉了一半。记为 backlog（见 enhancement-backlog W59）。
+
+⚠️ 但它把参数分成"语义输入"和"物理输出"，我们仍要自己验 —— 已过的
+`verify-deepfish [A]` 就是这道闸（物理输出不可直写）。新增这几个 ID 前先跑它。
+
+## 23.3 手势 = 三段动作 + 四个关节参数（我们完全没有这层）
+
+`GESTURE_JOINTS`：抚胸（Param62/59/60/61）、竖食指（Param36/39/41/42 + Param43）、
+持狗尾草（Param36/39/41/42）。它的做法是「用作者原动作进入/退出 + 只在手势有效姿态内
+改关节」，即**动作负责切换、参数负责微调**。我们 motionSlots 全空，短期内不追（体量太大），
+但这条思路值得记：**手势不是一段动画，是"动画壳 + 关节参数"的组合**。
+
+## 23.4 `patch_renderer.py`：和我们这次踩的渲染问题**不是同一类**，别误借
+
+它给 `web/vendor/cubism4.min.js` 打补丁，把 `multiplyColors`/`screenColors`
+逐 drawable 传进片元着色器（对齐 CubismWebFramework 5-r.1 的 `cubismshader_webgl.ts`），
+范围明写「Dynamic per-drawable multiply/screen colors, including clipped and
+inverted-mask fragments」。**它是颜色通道回填，不是遮罩数量问题。**
+
+我们这次遇到的是 `not supported mask count : 13`（模型 49 个遮罩 > 单 render texture
+上限 36 → SDK 把**所有**遮罩塌到同一块整幅缓冲）。结论见
+`enhancement-backlog` 的「deepfish 取景修复」条目：**它不是这次"看不见"的原因**
+（337 个未遮罩 drawable 本来能画，实测也确实画得出来），但**是潜在的画面错误源**，
+换更复杂的动作时可能显形。
+
+## 23.5 判决
+
+- **代码不可抄**（无 LICENSE）。可抄的只有"事实"：参数名表、画布真值、手势关节分组。
+- 对我们最有用的一条：**表情参数名以它的白名单为准去核 cdi3**（W59）。
+- 这个仓库本身是"自然语言 → 动作时间线"的独立工作台，与我们的桌宠形态不冲突，
+  也没必要整合（它要 VTS/网页舞台，我们是常驻桌宠）。

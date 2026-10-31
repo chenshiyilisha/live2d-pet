@@ -65,14 +65,34 @@ export const DEEPFISH = {
      * 标定方法：窗口高 342/280/420 三档各跑 32s×~112 帧采样，取整窗
      * 墨水包围盒；必须至少两组不同 petScale（不同 s/vh 比）联立，
      * 否则拟合共线（见 whale 档案头注释的教训）。 */
-    anchorY: 'bottom',       // 站姿模型：顶部锚定（hiyori 口径）
-    inkTopCRatio: 0.2,       // ← 占位，待实测
-    petScale: 0.253,         // ← 占位，待实测
-    headPadRatio: 0.0431,    // ← 占位，待实测
-    inkTopK: 319,            // ← 占位，待实测
-    inkH: 2111,              // ← 占位，待实测
-    inkW: 2499,              // ← 占位，待实测
-    inkCxK: 1410,            // ← 占位，待实测
+    anchorY: 'top',          // 站姿模型：顶部锚定（hiyori 口径，见下方标定说明）
+    /* ---- 几何标定：2026-10-31 用 debug/calib-inkbox.js 从 moc3 顶点实测 ----
+     * 为什么不用截图量（calib-whale.js 那条路）：本机 GPU 是软件合成
+     * （[gpu] compositing/rasterization = disabled_software），8K 纹理下
+     * 大窗口渲染极慢、小窗口经常在贴图传完前就截图，量出一片空白；
+     * 而且 ?pet= 压小时窗口会裁掉下半身。顶点是**离线**读的，不依赖窗口。
+     *
+     * 量出来的画布真值：3749×7697（hiyori 2976×4175 / whale 4068×4068），
+     * 墨水包围盒 x 159..3748、y 542..7334（canvas px，原点左上）。
+     *
+     * 🔴 inkTopCRatio 记 **0**：本模型的画布就贴在 holder 原点（实测
+     *   rawBounds 恒为 [0,0,...]，且 pet=0.63 时实测墨水顶 = off.y +
+     *   542×s 与推算逐像素吻合），所以「墨水顶 = vh×C + K×s」里 C 项
+     *   不存在，K 直接就是包围盒上沿的 canvas 坐标。 */
+    inkTopCRatio: 0,
+    /* 🔴 本模型必须**实测对齐**：档案常数是"落点 = 常数 × s"的线性假设，
+     * 而它的画布 3749×7697 下这条不成立 —— 实测（?snap=fit 读画布像素）
+     * 模型落在画布左下 (4,305)，推算却是 (70,13)，差出半个画布；画布又是
+     * 窗口的 2.898 倍，于是人物整体落在窗口外，屏幕上只剩呆毛尖。
+     * 置 true 后 layout() 用 measureCanvasInk() 量到的包围盒对齐
+     * （墨水中心 → 窗口中线、墨水顶 → HEAD_PAD），下面那组常数只作兜底。 */
+    alignByMeasure: true,
+    petScale: 0.57,          // 全身可见：脚底 ≈ 窗口底，头顶留 HEAD_PAD（@H296 标定）
+    headPadRatio: 0.0431,    // 顶部留白比例（沿用全项目口径，光学微调）
+    inkTopK: 542,            // 墨水顶（canvas px，实测）
+    inkH: 6793,              // 墨水总高 542 → 7334
+    inkW: 3589,              // 轮廓最大宽（含张开的衣袖；穿透判定用）
+    inkCxK: 1875,            // **头顶带中心线**（canvas 中心，实测）
     /* 自带 8 个动作全部 Loop:true 但首尾不闭合（VTS 模型包通病，
      * 与 whale 官方动作同判据）→ 一个都不留，交给插件 idle 调度接管。 */
     keepLoopGroups: [],

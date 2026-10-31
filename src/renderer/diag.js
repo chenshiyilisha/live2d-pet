@@ -509,6 +509,150 @@ export function attachSnapProbes(live) {
     }, 14000);
   }
 
+  /* 诊断：模型在**画布内**的真实落点（?snap=fit）
+   *
+   * 解决的问题：换模型后"什么都看不见"，而 `model.getBounds()` 只报画布尺寸
+   * （恒为 [0,0,CANVAS×s]），窗口截图又会把窗口外的部分裁掉 —— 两头都看不出
+   * 模型到底画在画布的哪个角落。
+   *
+   * 做法：直接把**整个 canvas 的像素读回来**（renderer.extract.pixels），扫
+   * alpha>0 的包围盒。canvas 是窗口的 ZOOM 倍，所以模型画在窗口外也能量到。
+   *
+   * 输出（canvas 逻辑像素）：inkBox=[l,t,r,b] + 换算出的 canvas 单位
+   * （÷s，拿去和 profiles/<m>.js 的 inkTopK/inkH/inkW/inkCxK 对照）。
+   */
+  if (new URLSearchParams(location.search).get('snap') === 'fit') {
+    const scan = () => {
+      const app = live.app();
+      const gl = app.renderer.gl;
+      /* 🔴 readPixels 的网格是**设备像素**（drawingBufferWidth），不是
+       * renderer.width（逻辑宽）。按逻辑宽解析会整体错位（踩过：DPR=1.5 时
+       * 报出来的框偏到画布右边，看起来像"模型画到了画布外"）。 */
+      const dw = gl.drawingBufferWidth;
+      const dh = gl.drawingBufferHeight;
+      const res = app.renderer.resolution || 1;
+      let px;
+      try {
+        /* ⚠️ 别用 renderer.extract.pixels()：这个构建里它的 filter 状态是空的，
+         * 直接抛 "reading 'effects'"。走原生 readPixels —— 渲染器的
+         * preserveDrawingBuffer 是开的（命中测试/量头顶要读回像素），所以有效。 */
+        px = new Uint8Array(dw * dh * 4);
+        gl.readPixels(0, 0, dw, dh, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      } catch (e) {
+        console.log('[pet] fit extract-fail', e && e.message);
+        return;
+      }
+      /* GL 原点在左下：读到的是"自下而上"的行序，输出时换算回 canvas 坐标
+       * （左上原点，与 INK_* 同口径），并除以 resolution 回到逻辑像素。 */
+      let l = 1e9, t = 1e9, r = -1, b = -1;
+      for (let row = 0; row < dh; row++) {
+        const y = dh - 1 - row;              // GL 行 → canvas 行（设备像素）
+        for (let x = 0; x < dw; x++) {
+          if (px[(row * dw + x) * 4 + 3] > 8) {
+            if (x < l) l = x;
+            if (x > r) r = x;
+            if (y < t) t = y;
+            if (y > b) b = y;
+          }
+        }
+      }
+      l = l / res; t = t / res; r = r / res; b = b / res;
+      const s = live.holder()?.scale?.x || 0;
+      const box = r < 0 ? null : [l, t, r, b];
+      console.log('[pet] fit', JSON.stringify({
+        canvas: [Number((dw / res).toFixed(1)), Number((dh / res).toFixed(1))],
+        s: Number(s.toFixed(5)),
+        box,
+        /* canvas 单位（与档案里的 inkTopK/inkH/inkW 同量纲） */
+        units: box && s ? {
+          left: Math.round(l / s), top: Math.round(t / s),
+          w: Math.round((r - l + 1) / s), h: Math.round((b - t + 1) / s)
+        } : null
+      }));
+    };
+    const T = (ms, fn) => setTimeout(fn, ms);
+    T(2500, scan);
+    T(9000, scan);
+    T(16000, scan);
+  }
+
+  /* 诊断：模型「皮肤体检」（?snap=skin）
+   *
+   * 用途：**换模型后人物不显示**时，先分清是哪一类原因 —— 是
+   *   ① drawable 本来就被参数/部件关掉了（opacity≈0，素材问题）；
+   *   ② 还是画了但被遮罩裁没了（Cubism 单 render texture 只支持 36 个遮罩，
+   *      超出时 setupLayoutBounds 会把**所有**遮罩压到同一块整幅缓冲上）；
+   *   ③ 还是贴图没绑上。
+   *
+   * 只读 core 的**现成数组**（`core._model.drawables.opacities` 等），
+   * 不遍历顶点 —— 遍历顶点会破坏 WASM 内部缓冲（pet.js 头注释坑 4）。
+   *
+   * 配 `?snap=ink` 一起看：ink 给你"画面上到底有多少墨"，
+   * skin 告诉你"模型里有多少东西本该被画"。两者差得远 = 遮罩/贴图问题。 */
+  if (new URLSearchParams(location.search).get('snap') === 'skin') {
+    const dump = () => {
+      const im = live.model()?.internalModel;
+      const m = im?.coreModel?._model;
+      if (!m) return { err: 'no core._model' };
+      const d = m.drawables;
+      const n = d.count;
+      /* 每个贴图槽上有多少 drawable、其中多少是"开着的" */
+      const byTex = {};
+      let vis = 0;
+      let visMasked = 0;
+      const clipSet = new Set();
+      for (let i = 0; i < n; i++) {
+        const t = d.textureIndices[i];
+        const row = byTex[t] || (byTex[t] = { n: 0, visible: 0 });
+        row.n++;
+        if (d.opacities[i] > 0.01) { row.visible++; vis++; }
+        if (d.opacities[i] > 0.01 && d.maskCounts[i] > 0) visMasked++;
+        /* 遮罩"编号"：Cubism 内部按 (drawable, maskIndex) 去重成 clip context，
+         * 这里用 masks 数组的引用条数近似"总遮罩引用数"。 */
+        for (let k = 0; k < d.maskCounts[i]; k++) clipSet.add(i + ':' + k);
+      }
+      const parts = Array.from(m.parts.opacities || []);
+      const r = im?.renderer;
+      return {
+        drawables: n,
+        visible: vis,
+        visibleMasked: visMasked,
+        maskRefs: clipSet.size,
+        byTex,
+        partsOn: parts.filter((v) => v > 0.01).length,
+        partsTotal: parts.length,
+        renderer: r
+          ? {
+              renderTextures: r.getRenderTextureCount?.(),
+              maskBufferSize: r.getClippingMaskBufferSize?.(),
+              usingMasking: r.isUsingMasking?.()
+            }
+          : null,
+        canvas: [im?.originalWidth, im?.originalHeight],
+        /* 底座（含加载转圈）的 DOM 矩形 —— 截图量 ink 时它是**恒在窗口底部**的
+         * 一块墨，若量到的 ink 恰好等于它，那"人物不显示"就与底座无关，
+         * 是模型真的没画出来（别把转圈当成人物，踩过一次）。 */
+        stats: (() => {
+          const el = document.getElementById('stats');
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          const cs = getComputedStyle(el);
+          return {
+            rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
+            display: cs.display,
+            opacity: cs.opacity,
+            visibility: cs.visibility
+          };
+        })()
+      };
+    };
+    const T = (ms, fn) => setTimeout(fn, ms);
+    /* 三个时点各打一次：刚挂上 / 动作跑起来 / 20s 后（物理+表情都稳了） */
+    T(1500, () => console.log('[pet] skin@1.5s', JSON.stringify(dump())));
+    T(9000, () => console.log('[pet] skin@9s', JSON.stringify(dump())));
+    T(20000, () => console.log('[pet] skin@20s', JSON.stringify(dump())));
+  }
+
   /* 诊断：窗口宽度随对话 UI 伸缩（?snap=talk）
    *
    * 验那条链路：常驻窗口只包住人物和底座，气泡 / 输入条一露出来就撑宽。

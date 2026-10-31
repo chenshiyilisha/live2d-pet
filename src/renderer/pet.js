@@ -2095,6 +2095,13 @@ let INK_H = MODELS[curModelName].inkH;
 let INK_W = MODELS[curModelName].inkW;
 let INK_CX_K = MODELS[curModelName].inkCxK;
 
+/* 实测的「模型墨水在**画布内**的包围盒」（逻辑像素，画布左上原点）。
+ * 由 measureCanvasInk() 从画布像素里读出来；换模型 / 改缩放会清空重测。
+ * 只有档案里 `alignByMeasure: true` 的模型才用它对齐（见 layout 里的注释）。 */
+let inkBoxMeasured = null;
+/* 测量代际：换模型 / 缩放变化会让旧的异步测量作废，避免拿旧框去对齐新模型。 */
+let inkMeasureGen = 0;
+
 /* 把 geometry / scale 从 MODELS 表刷进上面这些运行时变量。
  * 改用户缩放走它，保证只剩一处真相（MODELS 表）。 */
 function applyModelGeometry(name) {
@@ -2107,6 +2114,10 @@ function applyModelGeometry(name) {
   INK_CX_K = m.inkCxK;
   HEAD_PAD_RATIO = m.headPadRatio;
   PET_SCALE = PET_SCALE_OVERRIDE ?? (m.petScale * userScale);
+  /* 换模型 / 改缩放 → 画布里的落点会变，旧的实测框作废（连代际一起推进，
+   * 让还在路上的那次异步测量别把旧框写回来）。 */
+  inkBoxMeasured = null;
+  inkMeasureGen++;
 }
 applyModelGeometry(curModelName);
 
@@ -2263,8 +2274,27 @@ function layout() {
   CANVAS_OFF.y = anchorBottom
     ? H - (INK_TOP_C + (INK_TOP_K + INK_H) * s)
     : HEAD_PAD - (INK_TOP_C + INK_TOP_K * s);
-  canvas.style.left = `${CANVAS_OFF.x}px`;
-  canvas.style.top = `${CANVAS_OFF.y}px`;
+  /* ---- 实测对齐（档案里 `alignByMeasure: true` 的模型走这条）----
+   *
+   * 为什么需要它：上面两条式子是「模型在画布内的落点 = 档案常数 × s」的
+   * **线性假设**。hiyori / whale 上它成立（那两个模型的常数就是这么标出来的），
+   * 但对 3749×7697 的 deepfish 不成立 —— 实测（?snap=fit 读画布像素）模型
+   * 落在画布左下的 (4,305)，而推算说在 (70,13)，两者差出整整半个画布。
+   * 画布又是窗口的 2.898 倍，于是人物整体落在窗口外，屏幕上只剩呆毛尖 ——
+   * 用户 2026-10-31 报的「只能看到头顶的一撮毛」就是这个。
+   *
+   * 做法：不再推，**从画布像素里量**（measureCanvasInk），量到就用它对齐
+   * （墨水中心 → 窗口中线、墨水顶 → HEAD_PAD）。量不到时退回上面的推算值，
+   * 所以老模型 / 首帧前都不会没着落。
+   *
+   * ⚠️ 只支持顶部锚定（趴姿模型的底部锚定要按"墨水底 → 舞台底"另算，
+   *    whale 走老路，别顺手改它 —— 它那组常数是实测标定过的）。
+   */
+  if (MODELS[curModelName].alignByMeasure && !anchorBottom && inkBoxMeasured) {
+    CANVAS_OFF.x = W / 2 - (inkBoxMeasured.l + inkBoxMeasured.r + 1) / 2;
+    CANVAS_OFF.y = HEAD_PAD - inkBoxMeasured.t;
+  }
+  applyCanvasOff();
 
   // ---- 4) 角色在窗口里的矩形（鼠标穿透判定用）----
   // 用实测墨水的宽高，比旧的 BODY 矩形准（旧值偏小、水平还偏右 48px，
@@ -2369,12 +2399,99 @@ function layout() {
       } catch { /* 同上 */ }
     });
   }
+
+  /* 走实测取景的模型：画完这一帧再量一次落点（见 scheduleInkMeasure）。
+   * 量到会再调一次 layout()，第二次进来 inkBoxMeasured 已就位 → 位置定下来。 */
+  if (MODELS[curModelName].alignByMeasure === true) scheduleInkMeasure();
 }
 
 /* 整窗重绘请求（主进程 webContents.invalidate）。
  * ⚠️ window.pet 可能不存在（最小页面 / 探针页），一律可选链。 */
 function requestRepaint() {
   try { window.pet?.repaint?.(); } catch { /* ignore */ }
+}
+
+/* ---- 实测取景：把「模型在画布内的落点」从像素里量出来 ----
+ *
+ * 背景见 layout() 里「实测对齐」那段注释：档案常数是**线性假设**，对某些
+ * 模型（deepfish 3749×7697）不成立，人物会整体落在窗口外。
+ *
+ * 三条硬约束：
+ *  1. **只在 layout 之后量**（模型刚画过一帧才有像素），而且 layout 的触发
+ *     频率极低（启动 / 窗口尺寸变化 / 换模型 / 改缩放），一次 readPixels
+ *     （1408×1287×4 ≈ 7MB）的代价可以接受 —— 绝不能进每帧路径。
+ *  2. 🔴 读的是**设备像素网格**（`gl.drawingBufferWidth`），不是 `renderer.width`
+ *     （逻辑宽）。按逻辑宽解析会整体错位，把模型报成"在画布右边"（2026-10-31
+ *     踩过，白折腾两轮）。
+ *  3. 移动 canvas 只改元素位置、不改画布内像素 → 量出的框不随 CANVAS_OFF 变，
+ *     所以"量 → 对齐 → 再量"会立刻收敛，不会来回抖。 */
+
+/* 把 CANVAS_OFF 落到 canvas 的 style 上（唯一出口，别再各处直接写 style）。 */
+function applyCanvasOff() {
+  /* 🔬 诊断口子：?dx= / ?dy= 把画布再挪 N 像素（标定/复现在窗口外的模型时用）。 */
+  const q = new URLSearchParams(location.search);
+  const dx = Number(q.get('dx'));
+  const dy = Number(q.get('dy'));
+  if (Number.isFinite(dx)) CANVAS_OFF.x += dx;
+  if (Number.isFinite(dy)) CANVAS_OFF.y += dy;
+  canvas.style.left = `${CANVAS_OFF.x}px`;
+  canvas.style.top = `${CANVAS_OFF.y}px`;
+}
+
+/* 读画布像素，返回墨水的包围盒（逻辑像素，画布左上原点）；没有墨返回 null。 */
+function measureCanvasInk() {
+  try {
+    const gl = app?.renderer?.gl;
+    if (!gl) return null;
+    const dw = gl.drawingBufferWidth;
+    const dh = gl.drawingBufferHeight;
+    if (!dw || !dh) return null;
+    const res = app.renderer.resolution || 1;
+    const px = new Uint8Array(dw * dh * 4);
+    gl.readPixels(0, 0, dw, dh, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    let l = 1e9;
+    let t = 1e9;
+    let r = -1;
+    let b = -1;
+    /* GL 的行序是自下而上 → 换算成 canvas 的行序（左上原点）。 */
+    for (let row = 0; row < dh; row++) {
+      const y = dh - 1 - row;
+      const base = row * dw * 4;
+      for (let x = 0; x < dw; x++) {
+        if (px[base + x * 4 + 3] > 8) {
+          if (x < l) l = x;
+          if (x > r) r = x;
+          if (y < t) t = y;
+          if (y > b) b = y;
+        }
+      }
+    }
+    if (r < 0) return null;
+    return { l: l / res, t: t / res, r: r / res, b: b / res };
+  } catch {
+    return null;
+  }
+}
+
+/* 调度一次实测；量不到就重试（模型是异步加载的，首帧可能还没画出来）。
+ * 量到且与上次差 > 0.75px 才重跑 layout —— 收敛后不再触发，不会自激。 */
+function scheduleInkMeasure(tries = 0) {
+  if (MODELS[curModelName].alignByMeasure !== true) return;
+  const gen = inkMeasureGen;
+  requestAnimationFrame(() => {
+    if (gen !== inkMeasureGen) return;
+    const box = measureCanvasInk();
+    if (!box) {
+      if (tries < 12) setTimeout(() => scheduleInkMeasure(tries + 1), 300);
+      return;
+    }
+    const prev = inkBoxMeasured;
+    const moved = !prev || Math.abs(prev.t - box.t) > 0.75 ||
+      Math.abs(prev.l - box.l) > 0.75 || Math.abs(prev.b - box.b) > 0.75;
+    if (!moved) return;
+    inkBoxMeasured = box;
+    layout();
+  });
 }
 
 // 窗口尺寸 / 屏幕缩放变化时重算（桌宠窗口本身不可缩放，主要是防 DPR 变化）

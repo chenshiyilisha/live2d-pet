@@ -279,6 +279,50 @@ const readSrc = (p) => fs.readFileSync(path.join(SRC, p), 'utf8').replace(/\r\n/
   const gi = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8');
   ok(/src\/assets\/models\//.test(gi), '.gitignore 排除 src/assets/models/（deepfish 素材不进仓库）');
 
+  /* ================= [G] 实测取景（alignByMeasure） =================
+   *
+   * 背景：档案里那组几何常数是「模型落点 = 常数 × s」的**线性假设**。
+   * hiyori / whale 上成立，这个模型不成立 —— 实测模型落在画布左下，
+   * 推算说在左上，差半个画布；画布又是窗口的 2.898 倍 → 人物整体在窗口外，
+   * 屏幕上只剩呆毛尖（用户原话：「只能看到头顶的一撮毛」）。
+   * 修法是不再推、改从画布像素里量（measureCanvasInk）。这一节守四条：
+   *   ① 档案必须声明 alignByMeasure: true；
+   *   ② pet.js 里三件套齐全，且 layout() **确实**走了实测分支；
+   *   ③ 实测读的是**设备像素网格**（drawingBufferWidth）——
+   *      按 renderer.width（逻辑宽）解析会整体错位（踩过，白折腾两轮）；
+   *   ④ 换模型 / 改缩放必须把旧框作废（否则拿上个模型的框去对齐）。
+   * 负对照（人工）：把档案改成 alignByMeasure: false 再跑 `?snap=ink`，
+   * 墨水框立刻缩回窗口底部那一小块 —— 已实测确认。 */
+  console.log('\n[G] 实测取景：不再推算落点，改从画布像素量');
+
+  ok(D.model?.alignByMeasure === true,
+    '档案声明 alignByMeasure: true（走实测对齐）');
+  ok(D.model?.anchorY !== 'bottom',
+    '实测对齐只支持顶部锚定（趴姿模型的底部锚定仍走实测标定常数）');
+
+  ok(/function\s+measureCanvasInk\s*\(/.test(PET),
+    'pet.js 有 measureCanvasInk()');
+  ok(/function\s+applyCanvasOff\s*\(/.test(PET),
+    'pet.js 有 applyCanvasOff()（canvas 位置的唯一出口）');
+  ok(/function\s+scheduleInkMeasure\s*\(/.test(PET),
+    'pet.js 有 scheduleInkMeasure()（layout 后异步量、量不到重试）');
+
+  /* 核心断言：对齐用的是量出来的框，不是那两条推算式子。 */
+  ok(/alignByMeasure\s*&&\s*!anchorBottom\s*&&\s*inkBoxMeasured/.test(
+    PET.replace(/\/\*[\s\S]*?\*\//g, '')),
+  'layout() 里有「档案 alignByMeasure && inkBoxMeasured」的实测分支');
+
+  /* 🔴 设备像素网格（负对照历史：按逻辑宽解析 → 框偏到画布右边）。 */
+  ok(/gl\.drawingBufferWidth/.test(PET),
+    'measureCanvasInk 用 gl.drawingBufferWidth（设备像素网格）');
+  ok(!/renderer\.width\s*\*\s*[^;]*4\]/.test(PET),
+    '没有按 renderer.width 分配 readPixels 缓冲（那样会整体错位）');
+
+  /* 换模型 / 改缩放要作废旧框 */
+  ok(/inkBoxMeasured\s*=\s*null[\s\S]{0,120}inkMeasureGen\+\+/.test(PET),
+    'applyModelGeometry 会清空旧框并推进代际（不拿上个模型的框对齐）');
+
+  /* 换模型的正确流程写进文档，别让下一个人重新踩一遍 */
   console.log(fails === 0 ? '\n全部通过' : `\n${fails} 项失败`);
   process.exit(fails === 0 ? 0 : 1);
 })();

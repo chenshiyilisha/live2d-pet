@@ -2171,12 +2171,21 @@ function personalitySubmenu(cfg) {
  *  运行时切模型（X1）
  * ========================================================== */
 
+/* 菜单上可选的模型 = **产品线**。这里没有的模型不允许出现在配置里，
+ * 也不允许被渲染层挂上（下面三处消费点都按这张表过滤）。
+ *
+ * 🔴 deepfish（大肥鱼）2026-10-31 **退役**（用户拍板）：不上菜单、不进安装包。
+ *    档案 `profiles/deepfish.js` 与 params.js 四张注册表**都留着** —— 那是
+ *    一套完整的「第三方 VTS 模型接入 + 大画布实测取景」实现，将来接别的
+ *    第三方模型（或做模型市场）直接照抄；只是这个素材本身不随产品走
+ *    （素材自带「禁止二次分发」条款，署名：神宫凉子 / 霓虹猫）。
+ *    想临时复活：这里取消注释 + 档案里 `retired` 改回 false（**两处都要**，
+ *    只改一处就是"菜单能点但挂不上"或反过来），别处不用动 ——
+ *    档案里的 alignByMeasure / 几何常数都是实测值，直接可用。 */
 const APPEARANCE_MODELS = [
   { id: 'hiyori', label: '日和' },
-  { id: 'whale', label: '鲸鱼娘' },
-  /* deepfish（大肥鱼）是第三方免费公开模型：禁二次分发 + 署名要求
-   * （神宫凉子 / 霓虹猫）。不上架默认、仅作本地可选。 */
-  { id: 'deepfish', label: '大肥鱼' }
+  { id: 'whale', label: '鲸鱼娘' }
+  // { id: 'deepfish', label: '大肥鱼' }   // 已退役，见上
 ];
 
 function applyAppearanceModel(id) {
@@ -2188,11 +2197,23 @@ function applyAppearanceModel(id) {
   const row = APPEARANCE_MODELS.find((m) => m.id === want);
   if (want === 'whale') {
     toast('已切到鲸鱼娘 · 素材源自 VTube Studio 模型包（Andersen216 补 model3）');
-  } else if (want === 'deepfish') {
-    toast('已切到大肥鱼 · 素材源自神宫凉子 / 霓虹猫 免费公开模型，禁止二次分发');
   } else {
     toast(`已切到「${row ? row.label : want}」`);
   }
+}
+
+/* 存量配置兜底：模型退役后，老配置里还留着 `appearance.model: 'deepfish'`。
+ * 三处消费点（syncAppearance / 托盘单选 / 启动挂载）都按 APPEARANCE_MODELS
+ * 回落 hiyori，所以**不刷盘也不影响运行**；但不刷盘的后果是托盘"人物模型"
+ * 一个单选都不亮、且每次启动都要再回落一遍。这里一次性落盘把状态摆正。
+ * ★ 启动时调用一次（createWindow 之前），别塞进 menu builder —— 菜单
+ *   构建器必须纯。 */
+function normalizeAppearanceModel() {
+  const cur = loadConfig().appearance?.model;
+  if (!cur) return;
+  if (APPEARANCE_MODELS.some((m) => m.id === cur)) return;
+  console.log('[model] 已退役的模型，回落默认', JSON.stringify({ from: cur, to: 'hiyori' }));
+  patchConfig('appearance', { model: 'hiyori' });
 }
 
 /* ============================================================
@@ -5154,6 +5175,7 @@ if (!gotLock) {
         } catch { /* ignore */ }
       }
     });
+    normalizeAppearanceModel();   // 退役模型的存量配置先摆正，再建窗/建菜单
     createWindow();
     createTray();
     startCursorPolling();

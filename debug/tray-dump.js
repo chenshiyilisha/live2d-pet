@@ -47,6 +47,14 @@ const fnSrc = [
    * 后者从 llm-providers 真实 require 进来 —— 别在桩里手写一份标签逻辑，
    * 那样测出来的标题跟真跑的不一样。 */
   sliceFn('llmLabelText'),
+  /* 语音接入那一行显示「语音接入（OpenAI 兼容）」这种标题，靠它算。
+   * 2026-10-31 补：这张 dump 之前一直红在这里（ttsProviderLabel is not
+   * defined），菜单改没改都看不出来 —— 缺的就是这一句。 */
+  sliceFn('ttsProviderLabel'),
+  /* 「配置档」子菜单（2026-10-30 加）是 main.js 自己的函数，一起切进来。 */
+  sliceFn('llmProfilesSubmenu'),
+  sliceFn('personalitySubmenu'),
+  sliceFn('oneshotSubmenu'),
   sliceFn('buildMenuTemplate')
 ].join('\n');
 
@@ -108,6 +116,8 @@ const constSrc = [
    * 两个都从源码切。 */
   sliceLineConst(cfgSrc, 'EMOTION_TAGS'),
   sliceArrConst(cfgSrc, 'PERSONA_PARTS'),
+  /* 「人设」子菜单列的就是这张表（P1 六套预设，2026-10-30 加）。同样从源码切。 */
+  sliceArrConst(cfgSrc, 'PERSONA_PRESETS'),
   /* ⚠️ SCALE_STEP 也要**从源码切**。它是 `const SCALE_STEP = LIMITS.scale.step`
    *    这种派生写法，以前这里是手抄的 0.06 —— 一旦调了 LIMITS.scale.step，
    *    dump 出来的"放大 / 缩小"步长就是假的，而且不会有任何报错。
@@ -176,6 +186,35 @@ const sandbox = {
    * 目录与判定**真实 require**：llm-providers.js 是纯数据/纯函数、不碰 electron，
    * 手抄一份到桩里只会让 dump 出来的菜单与真菜单悄悄脱节。 */
   ...require('../src/main/llm-providers'),
+  /* ---- 语音接入（2026-10-31 补）----
+   * 2026-10-30 加「语音接入」子菜单时 dump 没跟上，之后这张 dump 一直是红的
+   * （ttsProviderLabel / ttsCurrentProviderId not defined）—— 菜单改没改都
+   * 看不出来。tts-providers.js 是纯数据/纯函数（零 require），直接真 require；
+   * `PROVIDERS` 在 main.js 里以 TTS_PROVIDERS 的名字用，这里照样补一个别名。 */
+  ...require('../src/main/tts-providers'),
+  TTS_PROVIDERS: require('../src/main/tts-providers').PROVIDERS,
+  /* ---- 状态三档（2026-10-31 补）---- 同上：presence.js 零 require，直接真 require；
+   * `MODES` 在 main.js 里叫 PRESENCE_MODES。 */
+  ...require('../src/main/presence'),
+  PRESENCE_MODES: require('../src/main/presence').MODES,
+  /* ---- 人设护栏（2026-10-31 补）---- main.js 里 `normalizeLevel` 别名成 guardLevel。 */
+  ...require('../src/main/persona-guard'),
+  guardLevel: require('../src/main/persona-guard').normalizeLevel,
+  /* ---- MCP 工具（2026-10-31 补）---- 菜单要列已配置的 MCP server 数量。
+   * 这里给「一个都没配」的静止状态，标题就是不带后缀的那一档。 */
+  mcp: { listServers: () => [], isToolEnabled: () => true, mcpReady: () => false },
+  /* ---- 限时看屏授权（2026-10-31 补）---- 菜单要显示剩余分钟数；这里给
+   * 「没有授权」的静止状态（active:false）。 */
+  ...require('../src/main/glance-grant'),
+  /* ---- LLM 配置档（2026-10-31 补）---- 标题里的「配置档（N）」靠它算。 */
+  ...require('../src/main/llm-profiles'),
+  /* ---- 性格 OCEAN（2026-10-31 补）---- P3 三档滑杆，菜单标签要显示当前档。 */
+  ...require('../src/main/ocean'),
+  OCEAN_DIMS: require('../src/main/ocean').DIMS,
+  OCEAN_LEVELS: require('../src/main/ocean').LEVELS,
+  normalizeOcean: require('../src/main/ocean').normalize,
+  /* ---- 药盒「下一句」（2026-10-31 补）---- 纯函数模块，直接真 require。 */
+  oneshot: require('../src/main/oneshot'),
   /* 读 WorkBuddy 的 models.json 是唯一带 IO 的环节，这里给桩。
    * 想验「导入有 N 条」那种标题，把 list 换成 fromWorkBuddyModels 的样例即可。 */
   readWorkBuddyModels: () => ({ file: 'X/models.json', list: [] }),
@@ -200,6 +239,14 @@ const sandbox = {
 
 vm.createContext(sandbox);
 vm.runInContext(constSrc, sandbox);   // LIMITS / DEFAULT_CONFIG / clamp* / resolveName …
+
+/* 「人物模型」子菜单的长度由 APPEARANCE_MODELS 决定（appearanceSubmenu 里
+ * `modelId` 那一行按它过滤）。这张表也**从真源码切**，别在桩里手写 ——
+ * 手写就测不出"菜单里到底还剩几个模型"（2026-10-31 deepfish 退役时正是靠
+ * 这里发现表一改、菜单跟着变，而不是另外维护一份）。 */
+const modelsSrc = src.match(/^const APPEARANCE_MODELS = \[[\s\S]*?\n\];/m);
+if (!modelsSrc) throw new Error('找不到 APPEARANCE_MODELS');
+vm.runInContext(modelsSrc[0], sandbox);
 
 /* loadConfig / isOn 必须在 **vm 内部**定义：Node 侧写的闭包看不见 vm 的
  * 词法常量（DEFAULT_CONFIG 是 `const`，不会挂到 global 上），在 Node 里

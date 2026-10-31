@@ -58,6 +58,18 @@ export const DEEPFISH = {
   model: {
     label: '大肥鱼',
     url: '/src/assets/models/deepfish/大肥鱼.model3.json',
+    /* 🔴 2026-10-31 **退役**（用户拍板）：不上菜单、不进安装包、不随产品分发。
+     * 置 true 后 pet.js 的 resolveModelName() 一律回落到默认模型，存量配置里
+     * 残留的 'deepfish' 也不会被挂上。
+     *
+     * 档案与接线代码**全部保留**：这是一套完整的「第三方 VTS 模型接入 +
+     * 大画布实测取景」实现（alignByMeasure 就在下面几行、几何常数是实测值），
+     * 将来接别的第三方模型直接照抄。
+     *
+     * ⚠️ 两处必须一起改：这里 `retired: true` ↔ main.js 的 APPEARANCE_MODELS
+     *    里不列本模型（菜单）。只改一处 = 菜单能选但挂不上 / 能挂但没入口，
+     *    由 verify-deepfish [H] 段盯住。 */
+    retired: true,
     anchorY: 'top',          // 站姿模型：顶部锚定（whale 那种趴姿才用 'bottom'）
     /* ---- 几何标定：2026-10-31 用 debug/calib-inkbox.js 从 moc3 顶点实测 ----
      * 为什么不用截图量（calib-whale.js 那条路）：本机 GPU 是软件合成

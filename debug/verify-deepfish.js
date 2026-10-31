@@ -20,7 +20,12 @@
  *       "谁后写谁赢"，淡出那一帧会把另一通道的贴纸盖掉。**含负对照**。
  *   [E] model3.json 的动作组名必须是 **Idle / TapBody**（首字母大写，
  *       pet.js 调用的组名）；Expressions 段已注册。
- *   [F] 接线层：params.js 四个注册表 + main.js 菜单都有 deepfish。
+ *   [F] 接线层：params.js 四个注册表都还有 deepfish（**代码保留**），
+ *       但 main.js 的 APPEARANCE_MODELS **不再列它**（菜单入口已撤）。
+ *   [H] 退役守卫：档案 `model.retired: true` 会让 pet.js 的 resolveModelName()
+ *       一律回落默认模型 —— 存量配置里残留的 'deepfish' 也挂不上。
+ *       这一节**真跑** resolveModelName（从源码抠出来执行），并带负对照
+ *       （摘掉标志后必须立刻放行）。
  *
  * ⚠️ 素材（src/assets/models/deepfish/）**不进仓库**（gitignore + 素材
  *    自带「禁止二次分发」条款），所以依赖素材的节在缺素材时 SKIP 而不是
@@ -261,10 +266,19 @@ const readSrc = (p) => fs.readFileSync(path.join(SRC, p), 'utf8').replace(/\r\n/
     'params.js 的 PROPS 注册表里有 deepfish');
 
   const MAIN = readSrc('main/main.js');
-  ok(/deepfish/.test(MAIN) && /大肥鱼/.test(MAIN),
-    'main.js 的 APPEARANCE_MODELS 有 deepfish（菜单可见）');
-  ok(/DEEPFISH_CREDIT|神宫凉子|霓虹猫/.test(MAIN),
-    'main.js 切到 deepfish 时有署名 toast（素材自带署名要求）');
+  /* 2026-10-31 退役：deepfish 从**菜单**移除，但档案 / 注册表 / 署名文案都留着
+   * （代码保留）。所以这里断言的是「不在 APPEARANCE_MODELS 里」而**不是**
+   * 「main.js 里没有 deepfish 三个字」—— 后者会把注释里的退役说明也算红。 */
+  const appearanceBlock = (MAIN.match(/const APPEARANCE_MODELS = \[[\s\S]*?\];/) || [''])[0];
+  ok(appearanceBlock.length > 0, 'main.js 里能找到 APPEARANCE_MODELS 表');
+  ok(!/deepfish/.test(appearanceBlock.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')),
+    'APPEARANCE_MODELS **不含** deepfish（已退役，菜单不可选）');
+  ok(/normalizeAppearanceModel/.test(MAIN),
+    'main.js 有 normalizeAppearanceModel()（存量配置回落默认，托盘单选不空转）');
+  ok(/normalizeAppearanceModel\(\);\s*\/\/[^\n]*\n\s*createWindow\(\)|normalizeAppearanceModel\(\);\s*\n\s*createWindow\(\)/.test(MAIN),
+    '启动时先 normalizeAppearanceModel() 再 createWindow（顺序不能反）');
+  ok(/DEEPFISH_CREDIT|神宫凉子|霓虹猫/.test(MAIN) || /DEEPFISH_CREDIT/.test(readSrc('renderer/profiles/deepfish.js')),
+    '署名文案仍在档案里（素材自带署名要求）');
 
   /* pet.js 不调 model.expression() —— 表情由 pet.js 自己的 fetch + setParam 通道管理；
    * model3.json 注册 Expressions 段只是让插件认数据，不触发应用。
@@ -321,6 +335,49 @@ const readSrc = (p) => fs.readFileSync(path.join(SRC, p), 'utf8').replace(/\r\n/
   /* 换模型 / 改缩放要作废旧框 */
   ok(/inkBoxMeasured\s*=\s*null[\s\S]{0,120}inkMeasureGen\+\+/.test(PET),
     'applyModelGeometry 会清空旧框并推进代际（不拿上个模型的框对齐）');
+
+  /* ================= [H] 退役：不上菜单、不许被挂上，代码留着 =================
+   *
+   * 2026-10-31 用户拍板：这个模型不出现在产品里（素材禁二次分发 + 观感），
+   * 但档案 / 注册表 / 接线 / 实测取景那套实现**全部保留**，将来接别的
+   * 第三方模型直接照抄。
+   *
+   * 这里盯的是「**两处必须一起改**」这条纪律：
+   *   · 渲染侧：档案 `model.retired: true` → resolveModelName() 回落默认
+   *   · 主进程侧：main.js 的 APPEARANCE_MODELS 里不列它（菜单入口）
+   * 只改一处 = 菜单能点但挂不上，或能挂但没有入口。
+   *
+   * 🔴 拦 deepfish 的是**真跑一遍 pet.js 里那个函数**（从源码抠出来执行），
+   *    不是在这里抄一份等价逻辑 —— 抄的那份永远不会红。 */
+  console.log('\n[H] 退役：不上菜单、不许被挂上（代码保留）');
+
+  ok(D.model?.retired === true, '档案声明 model.retired: true');
+  ok(/\[DEEPFISH\.name\]\s*:\s*DEEPFISH\.model/.test(PARAMS),
+    'params.js 仍注册 deepfish（代码保留，不是删干净）');
+
+  const fnSrc = (PET.match(/function\s+resolveModelName\s*\(name\)\s*\{[\s\S]*?\n\}/) || [''])[0];
+  ok(fnSrc.length > 0, 'pet.js 里能抠出 resolveModelName 函数体');
+  let resolveModel = null;
+  try {
+    /* eslint-disable-next-line no-new-func */
+    resolveModel = new Function('MODELS', 'MODEL_NAME', `${fnSrc}\nreturn resolveModelName;`)(
+      { hiyori: {}, whale: {}, deepfish: D.model }, 'hiyori');
+  } catch { /* 下面那条断言会红 */ }
+  ok(typeof resolveModel === 'function', 'resolveModelName 可执行（源码级真跑）');
+  ok(resolveModel?.('hiyori') === 'hiyori', '已知模型原样返回');
+  ok(resolveModel?.('deepfish') === 'hiyori',
+    '配置里残留 deepfish → 回落默认模型（不会被挂上）');
+  ok(resolveModel?.('nope') === 'hiyori', '不存在的键 → 回落默认模型');
+
+  /* 负对照：摘掉 retired 标志，**同一个函数**必须立刻放行 deepfish。
+   * 证明拦住它的是这个字段，而不是"注册表里恰好没有"之类的别的原因。 */
+  let negResolve = null;
+  try {
+    negResolve = new Function('MODELS', 'MODEL_NAME', `${fnSrc}\nreturn resolveModelName;`)(
+      { hiyori: {}, whale: {}, deepfish: {} }, 'hiyori');
+  } catch { /* 上面已红 */ }
+  ok(negResolve?.('deepfish') === 'deepfish',
+    '负对照：去掉 retired 标志后 deepfish 立刻可挂（证明是标志在拦）');
 
   /* 换模型的正确流程写进文档，别让下一个人重新踩一遍 */
   console.log(fails === 0 ? '\n全部通过' : `\n${fails} 项失败`);

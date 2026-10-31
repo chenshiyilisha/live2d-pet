@@ -3131,3 +3131,198 @@ https://github.com/SnowLuma/SnowLuma                        3260★ NOASSERTION 
 https://github.com/InariNGT-Ofiicial/jingyu-live2d-agent      5★ 无 LICENSE（根目录仅 licenses/ 第三方清单）· 鲸语动作编排 · 用大肥鱼模型
 https://github.com/DSH-Raising-Plan                          组织 · 8 仓（mnemosyne 9★ + 7 个 0★ 插件）
 ```
+
+---
+
+# 22. 第四批外部源归档：记忆赛道集中对照（2026-10-31，第 22 轮）
+
+> 用户给的 7 个地址全部是**记忆 / Agent 记忆系统**赛道（与 W49 同期），
+> 其中 3 个是「同生态位直接对照」：**ReMe ↔ 我们的 G19 日结 / memory.js**、
+> **surfcore-life ↔ 我们的「角色自主调参」愿景（W50/W51 同源）**、
+> **memsearch ↔ 我们的 summary.md 分层**。逐一核实（api.github.com + README +
+> **LICENSE 原文第一行**，规矩 29）。
+
+## 22.1 总览：七个源一句话判决
+
+| 源 | 星 / 许可（读原文第一行） | 本质 | 判决 |
+|---|---|---|---|
+| `volcengine/OpenViking` | **41206★** · AGPL-3.0 | 上下文数据库：`viking://` 虚拟文件系统，L0/L1/L2 分层摘要 | 🟡 AGPL 只借思想；分层摘要（下 §22.4）值得抄 |
+| `agentscope-ai/ReMe` | 3724★ · Apache-2.0 | 记忆生命周期 capture→index→consolidate→recall | 🟢 Apache 可细读；digest 分层 + proactive_read（下 §22.2）最贴 |
+| `zilliztech/memsearch` | 2811★ · MIT | Markdown 真源 + Milvus 影子索引，3 层召回 | 🟢 MIT 可细读；SHA-256 跳过未变内容（下 §22.5） |
+| `vshulcz/deja-vu` | 1343★ · MIT | 磁盘会话历史 → 本地倒排索引，跨 43 agent | 🟢 MIT 可细读；accepted/rejected 状态标记（下 §22.3） |
+| `FuRongJun-1999/dsh-memory`（灵枢 0.9.12） | 545★ · MIT | 平台型记忆：md 认知图 + 确定性规则裁决 + Rust 内核 | 🟡 MIT 可读但量重；只借「确定性裁决」（下 §22.6） |
+| `nefelibata5136-code/surfcore-life` | 5★ · MIT | **大肥鱼自主调整生活参数**，9 工具闭环 | 🟢 **本轮最贴**：预览→执行→验证→回滚（下 §22.7） |
+| `NoMindSama/qq-dsh-bridge` | 8★ · MIT | DSH agent 接进 QQ，四层记忆 + 闲置边界压缩 | 🟢 MIT 可细读；「闲置边界压缩」与我们全屏静默同域（下 §22.8） |
+
+## 22.2 ReMe：记忆生命周期（Apache-2.0，可细读）
+
+> 「Memory as File, File as Memory」—— 记忆即普通 Markdown（frontmatter + wikilink），
+> 用户可审阅/编辑/移动/备份；索引与元数据全部可重建。**capture → index →
+> consolidate → recall** 四段式：
+
+| 能力 | 入口 | 做什么 | 输出 |
+|---|---|---|---|
+| `auto_memory` | Agent hook / CLI | 对话中蒸馏有用事实，保留过滤后的对话源记录 | `session/dialog/*.jsonl` + `daily/<date>/<name>.md` |
+| `auto_resource` | resource watcher | 外部文件 → 源链接的 daily 卡片 | `daily/<date>/<resource-card>.md` |
+| `auto_index` | 后台 watcher | 摄入 daily+digest，建 BM25/wikilink/向量 | 可搜 chunk |
+| `auto_dream` | cron | 从最近两天变更文件提取 ≤5 个可复用单元，**创建/佐证/精炼/修正** digest 节点 | `digest/**` |
+| `proactive_read` | agent 决定行动前 | 读独立主动刷新流生成的**兴趣主题**，宿主决定是否提及 | `daily/<date>/interests.yaml` |
+
+**与我们 G19 日结的对照**：
+- ✅ `auto_memory` ↔ 我们的对话事实提取（memory.js upsertFacts）同向；
+- ✅ `auto_dream`「创建/佐证/精炼/修正」四动作 ↔ 我们 G19 的「只降不删」+ W49 的 expand/replace —— **ReMe 的 auto_dream 是 W49 的超集**（它还会在 digest 层创建新节点，不只是修改旧事实）；
+- 🟡 **可借真点**：`proactive_read` 与我们的 proactive 闸门同域，但 ReMe 的区分是
+  **「主动刷新流独立生成主题，宿主只读不决定」**——我们 proactive 现在是「宿主自己冒泡」，
+  没有「独立生成 + 宿主挑选」的分层。记 backlog 候选。
+- 🟡 **可借真点**：`interests.yaml`（每日兴趣主题清单）——我们没有这个中间产物，
+  记忆直接以事实形式注入。作为「记忆 → 主题」的可读中间层，记候选。
+
+**许可**：Apache-2.0（LICENSE 第一行原文确认）→ 可细读、可借机制，不搬码。
+
+## 22.3 deja-vu：accepted/rejected 状态标记（MIT，可细读）
+
+> 从磁盘上各 agent 的会话历史建**本地倒排索引**（Go 单二进制），跨 43 个 agent 共享。
+> 核心机制（与我们的 W49 对照）：
+
+| 它的机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| `deja promote <id> --state rejected` | 标记**回滚过的决策**，之后每次命中都提示「试过了、为什么被放弃」 | 🟢 **与 W49 superseded 同构但更通用**：W49 只标记「被取代的事实」，deja 标记「被回滚的决策」 |
+| `--state accepted` | 取回标记 | 🟢 对应 W49 的「改回旧值复活」 |
+| 索引工作而非只索引对话 | 每轮打开的文件、命令及退出码、编辑替换的精确跨度 | 🟡 我们是桌宠不是 coding agent，不适用 |
+| 跨会话恢复 | 43 个 agent 读同一索引；compaction 后保留 77% 决策、0.2% 命令 | 🟡 我们无 compaction 问题（桌宠单 agent） |
+| 密钥剥离 | 建索引时按已知形状（AWS key/token/JWT/PEM）剥离，不留在摘要/分享/同步里 | 🟡 我们是本地桌宠，但我们的 memory 注入会进 LLM prompt → **值得自查：我们的记忆文件里有没有密钥形状的字段** |
+
+**可借真点**：**「知道什么是对的」状态标记**——deja 的 accepted/rejected 是**通用决策状态**，
+W49 的 superseded 只覆盖「事实被换值」。如果我们要让角色记住「上次这个方案被回滚了，
+别再推荐」，需要的是**决策级**状态标记。记 backlog 候选（与 W49 互补，非替代）。
+
+**许可**：MIT（LICENSE 第一行原文确认）。
+
+## 22.4 OpenViking：L0/L1/L2 分层摘要（AGPL-3.0，只借思想）
+
+> 41206★ · **上下文数据库**—— 把知识/记忆/技能组织成 `viking://` 虚拟文件系统，
+> agent 用 `ls/tree/read/grep` 导航，每个目录带生成摘要：
+
+| 层级 | 内容 | 用途 |
+|---|---|---|
+| **L0 (Abstract)** | 一句话摘要 | 快速相关性判断 |
+| **L1 (Overview)** | 核心信息 + 使用场景 | 规划 |
+| **L2 (Details)** | 完整原文 | 按需加载 |
+
+- 目录级 `.abstract.md` + `.overview.md` 让 agent **先看摘要再决定读不读全文**。
+- 评测（LoCoMo）：原生 24–57% → 接 OpenViking 后 80–83%，token 降 34–91%，延迟降 58–66%。
+- `viking://` 组织：`resources/`（文档/代码）、`user/{uid}/memories/preferences/`（偏好）、
+  `skills/`（怎么干活）、`peers/`（其他用户）。
+
+**与我们 G19 summary.md 的对照**：
+- ✅ 我们的 summary.md 是「记忆 → 可注入摘要」的**单层**产物；
+- 🟡 **可借真点**：**分层摘要（L0 一句话 / L1 概览 / L2 详情）**——现在 recall 直接挑事实注入，
+  没有「先看一句话摘要、再决定读哪条」的中间层。G19 若要支持「快速扫一遍再深挖」，
+  这个分层是必要结构。记 backlog 候选（G19 增强）。
+- 🔴 AGPL → **只借思想，一行代码不搬**。
+
+## 22.5 memsearch：Markdown 真源 + 内容哈希（MIT，可细读）
+
+> 2811★ · Milvus 是「**影子索引**」——可重建的缓存，**Markdown 才是真源**。
+> 3 层召回（search → expand → transcript），稠密向量 + BM25 稀疏 + RRF 融合，
+> 文件 watcher 实时索引。
+
+| 它的机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| Markdown 真源 | 记忆就是 .md 文件，人可读/可编辑/可版本控制；Milvus 是派生缓存 | ✅ 我们 memory-facts.json 同向（JSON 真源，无派生索引） |
+| **SHA-256 内容哈希跳过未变** | 「SHA-256 content hashing skips unchanged content」 | 🟡 **可借真点**：我们 memory.js 每次 upsert 都全量重写 store；若加 content hash 层，未变事实不重算 scoreImportance/不重排 → 省算力 |
+| 高层维护（PROJECT.md/USER.md） | 后台维护两个高阶笔记（项目状态/用户偏好），session 后仅 journal 变更 + 最小间隔才刷新，默认关 | 🟡 对应我们的 summary.md；「仅变更才刷新 + 最小间隔」比我们每次日结全量重算更省 |
+| 程序性记忆（Skills from Memory） | 把重复工作流蒸馏成可安装 skill，候选存 git 可 diff/回滚，「inert until installed」 | 🟡 我们是桌宠不是 coding agent，程序性记忆对我们意义小，跳过 |
+
+**可借真点**：**content hash 跳过未变**——我们 memory.js 的 `scoreImportance`/`similarFact`
+是纯函数但每次都跑全量。加 SHA-256（或更轻的字符串 hash）做「事实未变就不重算」的
+短路层，是**小改动、低风险**。记 backlog 候选。
+
+**许可**：MIT（LICENSE 第一行原文确认）。
+
+## 22.6 dsh-memory（灵枢 0.9.12）：确定性裁决（MIT，平台型量重）
+
+> 545★ · **平台而非单组件**：md 认知图（纯 md 文档真源）+ Rust 检索内核 + 蜂群运行时 +
+> 中文编译器 + 蜂巢并发，五件套。**核心理念**：
+
+| 它的机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| **确定性规则裁决** | 「记什么、取什么、能不能写入全部由确定性规则裁决，不依赖 LLM 黑箱」 | ✅ 我们 memory.js 的 clarity/scoreImportance/similarFact 全是确定性纯函数，同向 |
+| 写没写成功只看 `committed` | 「绝不假装通过」 | ✅ 我们的 saveConfig/saveStore 有写失败回退（cfgUnreadable 拒绝落盘） |
+| 遗忘只能显式发起 | 「落盘即长期留存，遗忘只能显式发起、不做静默淘汰」 | ✅ 我们 W2 deleteFact 是显式墓碑；settle 淘汰（forgetEnabled 开时）是显式开关 |
+| 原文即真源 | 检索索引只是派生物 | ✅ 我们 memory-facts.json 是唯一真源 |
+| 零 LLM 写入 | 「写入 0.013–0.020 秒（零 LLM）」vs 同表其余 75.7–658.5 秒 | ✅ 我们 upsertFacts 也是零 LLM 纯函数 |
+| 工具面 30+（cg/stg 基元） | write/link/relation/recall/route/timeline/verify/forget/metacognition/identity/evolution/session/scrub/consolidate/maintain/sustain | 🟡 **远超我们所需**——我们是桌宠单用户，不需要 identity/evolution/swarm。**只借「确定性裁决」理念，不搬工具面** |
+
+**判决**：理念高度一致（确定性纯函数 + 原文即真源 + 显式遗忘），但**平台体量远超桌宠所需**。
+**不展开，只记一条理念印证**：我们 memory.js 的确定性纯函数路线被 545★ 平台独立背书。
+
+**许可**：MIT（LICENSE 第一行原文确认）→ 可读。
+
+## 22.7 surfcore-life：大肥鱼自主调参闭环（MIT，本轮最贴）
+
+> 5★ · 「让大肥鱼自己决定怎样成长」—— Agent 通过 9 个 MCP 工具**自主调整自己的生活参数**
+> （30 项参数，29 可自主、1 需审批）。**与我们 W50/W51 同源**（都是角色自主调参），
+> 但 surfcore-life 把「调参」做成了完整闭环：
+
+| 它的机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| **先看清，再决定** | 每项参数有说明/范围/影响/成本/权限/生效方式；预览关联修改与限制 | 🟡 我们 W50/W51 是「固定映射」——**没有「预览→执行→验证→回滚」的可调闭环** |
+| **保存与生效分别作证** | 配置落盘后**继续等实际消费者回报采用值**；证据过期/版本不符/未被读取时如实显示 | 🔴 **可借真点**：我们 config 改了直接生效，没有「验证真实采用」的回读 |
+| **关联修改一起提交** | 改一个参数可能碰时间窗口/机会数/次数/间隔/预算；提前检查关系，预览展示关联修改 | 🟡 我们 proactive.quietHours 等是单参数，但 W51 dedentEnabled 这类「连带影响」没有关联预览 |
+| **保留选择的来路** | 修改者/原因/前后值/观察/恢复关系都有记录，「不额外调用模型编造心理」 | 🟡 我们 config.json 只存当前值，没有「谁改的/为什么/之前是什么」的来路 |
+| **给改变主意留出口** | 回滚先预览再执行，**保护后来作出的同字段选择**，保留当天已发生的活动 | 🟡 我们没有回滚机制；「保护后来的选择」语义与我们 W49 复活（改回旧值）同向 |
+| 凭据/预算/隐私不开放 | 自主调整有明确范围，凭据/账号授权/预算硬上限不向此接口开放 | ✅ 我们也是（用户手动改 config，无 Agent 自调通道） |
+
+**9 个工具闭环**（发现→理解→预览→执行→验证→观察→回滚）：
+`life_state`（看状态）· `life_catalog/life_explain`（发现/理解）· `life_preview/life_apply`（预览/执行）·
+`life_verify`（验证真实采用）· `life_history/life_observe`（回看/观察）· `life_rollback`（预览回滚）。
+
+**判决**：**本轮最贴我们项目**——同为大肥鱼生态、同为「角色自主调生活节奏」愿景。
+我们 W50（心境→temperature）、W51（收益递减）是**固定规则**，surfcore-life 是**Agent 自主调参闭环**。
+**不搬工具面**（我们是桌面宠物不是 MCP server），但**记两条 backlog 候选**：
+① **参数调优闭环**（预览→执行→验证采用→观察→回滚）——这是 W4 类增强，表外大项；
+② **来路记录**（改了谁/为什么/之前值）——小改动，可独立做。
+
+**许可**：MIT（LICENSE 第一行原文确认）→ 可细读。
+
+## 22.8 qq-dsh-bridge：闲置边界压缩（MIT，可细读）
+
+> 8★ · 把 DSH agent 接进 QQ，**四层记忆 + 一层关于自己**，上下文只在**闲置边界压缩**。
+
+| 它的机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| 闲置边界压缩 | 上下文只在闲置边界压缩（非实时逐轮压缩） | 🟡 与我们全屏静默（规矩 17）同域：我们是在**全屏时**降帧率/静音，没有「闲置边界压缩上下文」 |
+| 四层记忆 + 一层关于自己 | 四层记忆 + 一层「关于自己」的元记忆 | 🟡 我们是单层 memory-facts.json；「一层关于自己」≈ 我们的人设/temperament，但没作为独立记忆层 |
+| 人格三层且会成长 | 人格三层结构，随经历成长 | ✅ 我们 temperament.js（EMA 日均慢层）同向 |
+
+**判决**：体量小（8★），机制与我们部分重叠。**只借「闲置边界压缩」思路**——
+我们 proactive 主动冒泡现在是「定时轮询」，若改成「闲置边界触发」，更贴真实陪伴节奏。
+记 backlog 候选（proactive 增强，表外）。
+
+**许可**：MIT（LICENSE 第一行原文确认）。
+
+## 22.9 本轮结论（按性价比，适配桌宠场景）
+
+1. **memsearch content hash 跳过未变**（§22.5）—— memory.js 加 SHA-256 短路层，
+   **小改动、低风险、立省算力**。中低成本。
+2. **surfcore-life 来路记录**（§22.7）—— config 改动记「谁改/为什么/之前值」，
+   小改动，独立可做。
+3. **ReMe proactive_read 独立主题流**（§22.2）—— 主动刷新与宿主挑选分层，
+   中成本（proactive 改造）。
+4. **OpenViking L0/L1/L2 分层摘要**（§22.4）—— G19 日结增强，中成本。
+5. **deja-vu accepted/rejected 决策状态**（§22.3）—— 决策级回滚标记，与 W49 互补，中成本。
+6. **surfcore-life 参数调优闭环**（§22.7）—— 预览→执行→验证→回滚，表外大项，非优先。
+7. 其余（dsh-memory 平台体量 / qq-dsh-bridge 体量小）—— 归档即止。
+
+## 22.10 来源清单（全部经 api.github.com 核实，LICENSE 读原文第一行）
+
+```
+https://github.com/volcengine/OpenViking                     41206★ AGPL-3.0（LICENSE 第一行=GNU AFFERO GENERAL PUBLIC LICENSE v3）· 上下文数据库 L0/L1/L2
+https://github.com/agentscope-ai/ReMe                        3724★ Apache-2.0（LICENSE 第一行=Apache License v2.0）· 记忆生命周期 capture→index→consolidate→recall
+https://github.com/zilliztech/memsearch                      2811★ MIT · Markdown 真源 + Milvus 影子索引 + content hash
+https://github.com/vshulcz/deja-vu                           1343★ MIT · 会话历史倒排索引 + accepted/rejected 状态标记
+https://github.com/FuRongJun-1999/dsh-memory                 545★ MIT · 灵枢 0.9.12 · md 认知图 + 确定性裁决 + Rust 内核（平台型）
+https://github.com/nefelibata5136-code/surfcore-life            5★ MIT · 大肥鱼自主调参 9 工具闭环（预览→执行→验证→回滚）
+https://github.com/NoMindSama/qq-dsh-bridge                    8★ MIT · DSH 接 QQ · 四层记忆 + 闲置边界压缩
+```

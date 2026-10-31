@@ -178,10 +178,16 @@
   `Him666233/astrbot_plugin_group_chat_plus` 191★ AGPL-3.0；另两个可借机制：
   GWW（按**用户粒度**隔离等待窗口，不劫持他人消息）· 频率调整 AI（按活跃度自适应概率）|
 
-| W49 | **Mnemosyne「已被取代的证据」检索维度**（2026-10-31 归档 §21.3）：记忆事实加 `supersededBy` 状态（被新事实推翻时标记、不再优先召回），与 G19 日结（只降不删）天然兼容；AGPL 只借思想 | dsh-mnemosyne |
-| W50 | **心境 → 采样温度**（2026-10-31 归档 §21.4）：LLM 调用按 mood/情绪档调 temperature（stress 高→冷淡、兴奋→发散），开关默认关 + 气质 A/B；小改动、接 `llm.js` 参数 | dsh-mood（MIT） |
-| W51 | **互动收益递减**（2026-10-31 归档 §21.4）：摸头/戳/投喂收益 100%→70%→40%→20%→5% 递减（同日内），替代 W13 的硬次数上限，体验更软 | dsh-mood（MIT） |
+| W49 | ✅ **已完成**（2026-10-31，提交 `d05c15e`）：Mnemosyne「已被取代的证据」检索维度。memory.js `factRelation`（公共前缀+公共后缀判据）· `markSuperseded/clearSuperseded/isSuperseded` · upsert 区分 expand（合并）/replace（留档不删）· recall/settle 过滤留档 · `listFacts({includeSuperseded})` · refreshFirstEncounters 候选池排除留档 · replace 守卫去掉 `!isFirstEncounter`（锚点不拦换值留档）。回归 `verify-w49.js` 37 项全绿 | dsh-mnemosyne（AGPL 只借思想） |
+| W50 | ✅ **已完成**（2026-10-31，提交 `d7abe42`）：心境 → 采样温度。`moodTemperature(axes)` 纯函数（高情绪 0.9 / 低情绪 0.7 / 低活力 0.7 / 中段 0.8）· `chatStream` 经 `extraBody.temperature` 注入 · 开关 `chat.moodTemperature` 默认开。回归 `verify-w50.js` 18 项全绿 | dsh-mood（MIT） |
+| W51 | ✅ **已完成**（2026-10-31，提交 `5a0e73e`）：互动收益递减。`dedentStep(n)` 阶梯（1.0/0.7/0.4/0.2/0.05）· `todayKey` 跨日重置 · `rollRate` 实例级开关（`appearance.dedentEnabled` 默认开）· onClick/onPatEnd/onUserChat 接上（拖动不滚）· save/load 持久化 rateDay/rateCount。回归 `verify-w51.js` 26 项 + verify-mood 修正全绿 | dsh-mood（MIT） |
 | W52 | **动作编排层**（2026-10-31 归档 §21.7）：自然语言 → Live2D 动作时间线（计划→校验→播放）；表外大项，非优先（当前即时态表情够用）· 无 LICENSE 仓库 → 只借思路 | jingyu-live2d-agent |
+| W53 | **记忆内容哈希跳过未变**（2026-10-31 归档 §22.5）：memory.js 加 SHA-256（或字符串 hash）短路层，未变事实不重算 scoreImportance/不重排。小改动、低风险、立省算力 | memsearch（MIT） |
+| W54 | **配置改动来路记录**（2026-10-31 归档 §22.7）：config.json 改动记「谁改/为什么/之前值」——改了谁、原因、前后值、恢复关系有记录，「不额外调用模型编造心理」 | surfcore-life（MIT） |
+| W55 | **主动刷新独立主题流**（2026-10-31 归档 §22.2）：proactive 与宿主挑选分层——独立刷新流生成兴趣主题（interests.yaml），宿主决定是否提及。中成本 proactive 改造 | ReMe（Apache-2.0） |
+| W56 | **G19 分层摘要 L0/L1/L2**（2026-10-31 归档 §22.4）：一句话摘要 → 概览 → 详情，recall 先看摘要再决定读哪条。G19 日结增强，中成本 | OpenViking（AGPL 只借思想） |
+| W57 | **决策级回滚标记**（2026-10-31 归档 §22.3）：accepted/rejected 状态标记「上次这个方案被回滚了，别再推荐」——决策级，与 W49 事实级互补。中成本 | deja-vu（MIT） |
+| W58 | **闲置边界触发 proactive**（2026-10-31 归档 §22.8）：主动冒泡从「定时轮询」改「闲置边界触发」。表外，proactive 增强 | qq-dsh-bridge（MIT） |
 
 **网上已有、我们已有**：番茄 / 提醒 / 开机自启 / 锁屏静默 / 摸头 / 全屏闸门 / 低电降帧 / 工作状态；甩抛/摸头交互形态与 Coopanion 同类。  
 **不抄主线**：亲密度养成、多宠交友、径向技能轮当主 UI、内置捆小模型、会议 Join、打字蒸汽特效；**Computer use 控键鼠当产品主线**（与安静搭子冲突）。
@@ -369,5 +375,7 @@
 | 2026-10-30 | **W10/W19/W20/W23/W24**：话痨维 T · 触摸 quiet/normal/eager · 气泡穿透(=G15) · 记忆重要度/清晰度(=G19)。回归 `verify-w10-w19-w20.js` + `verify-ocean.js` |
 | 2026-10-30 | **W11/W25/W43**：情绪分轨 TTS · 初次相遇独立轴 · pickers 纯函数。回归 `verify-w11-w25-w43.js` |
 | 2026-10-30 | **W1/W12/W29/W44**：限时看屏授权 · PetEvent 总线 · Agent JSONL · workStatus+attention。回归 `verify-w1-w12-w29-w44.js` |
+| 2026-10-31 | **W49–W51 完成**（提交 d05c15e/d7abe42/5a0e73e）：已取代证据维度 · 心境→temperature · 互动收益递减。全量回归 72 套件 71 绿（updater-load 需 Electron 历史遗留）。backlog 标记完成，新增 W53–W58 | 第 21 轮调研 |
+| 2026-10-31 | **第 22 轮调研归档**（`open-source-reference.md` §22）：7 个记忆赛道源逐条核实（LICENSE 读原文第一行）。OpenViking 41206★ AGPL（L0/L1/L2 分层摘要，只借思想）· ReMe 3724★ Apache（capture→index→consolidate→recall，proactive_read 独立主题流）· memsearch 2811★ MIT（content hash 跳过未变）· deja-vu 1343★ MIT（accepted/rejected 决策状态）· dsh-memory 545★ MIT（确定性裁决，平台体量超所需）· surfcore-life 5★ MIT（本轮最贴：大肥鱼自主调参 9 工具闭环）· qq-dsh-bridge 8★ MIT（闲置边界压缩）。新增 W53–W58 | 用户给的 7 个地址 |
 | 2026-10-31 | **第 21 轮调研归档**（`open-source-reference.md` §21）：7 个外部源逐条核实（Coopanion 许可实证=AGPL-3.0-or-later、Mnemosyne 记忆三层、dsh-mood 心情对照、dsh-pet npm 发行线、SnowLuma=协议框架不碰、鲸语=大肥鱼官方编排工具交叉印证 deepfish 接入、DSH 组织全貌）。新增 W49–W52（已被取代证据维度 / 心境→temperature / 互动收益递减 / 动作编排层） | 用户给的 7 个地址 |
 | 2026-10-30 | **第三方模型「大肥鱼」(deepfish) 接入**（VTS 包改来，Cubism 5）：`profiles/deepfish.js` 档案（8 情绪 × 16 字段 · 10 个安全参数 · 三张表情表 key 参数互不重叠）· `params.js` 四注册表 + `main.js` 菜单（署名 toast）· **头物理链输入是 AngleX/Y/Z**（非 ParamAngle*，与 hiyori 相反）· ParamBrowL/RAngle 是物理输出（与 whale 不同）· 无眉 X/Form、无微笑眼、无连续脸红、无呆毛 → 全部置 null · 素材禁二次分发 → 不进安装包、不进 models.zip · 回归 `verify-deepfish.js`（六段断言 + 两负对照） | 素材自带使用须知（神宫凉子 / 霓虹猫） |

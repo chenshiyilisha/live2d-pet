@@ -263,7 +263,11 @@ const DEFAULT_CONFIG = {
     quietPenalty: true,
     /* W49：已取代证据留档。同槽位换值时旧事实退场（正文/时间保留，注入层不选）。
      * 默认开——「主人喜欢猫→改说喜欢狗」时她不该同时记得两件相悖的事。 */
-    supersede: true
+    supersede: true,
+    /* W53：内容哈希跳过未变。事实对象带 `h` 字段（= sha1(规范化文本) 前 8 位），
+     * recall/settle 热路径上 h 与当前文本一致 → 跳过 scoreFact/retentionOf 重算。
+     * 只是省算力短路（结果恒等），不改变升降/遗忘语义。默认开。 */
+    contentHash: true
   },
   /* G12：MCP 客户端骨架。默认关；无 server、无 SDK 依赖；工具调用需逐条授权。 */
   mcp: {

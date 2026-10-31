@@ -147,6 +147,25 @@ function makeId(text) {
   return crypto.createHash('sha1').update(normalizeKey(text)).digest('hex').slice(0, 12);
 }
 
+/**
+ * W53：内容哈希（纯函数）。= sha1(规范化文本) 前 8 位。
+ * 同一文本永远同值——用来识别「事实正文有没有变」，
+ * 变了才重算 importance（scoreImportance 是纯函数，结果恒等，只省算力）。
+ */
+function factHash(text) {
+  return crypto.createHash('sha1').update(normalizeKey(text)).digest('hex').slice(0, 8);
+}
+
+/**
+ * W53：文本未变判定。f.h 与当前文本的 factHash 一致 → 正文没变。
+ * 任何字段缺失/异常一律 false（不短路，保守重算）。
+ */
+function factHashMatches(f) {
+  if (!f || typeof f.h !== 'string' || !f.h) return false;
+  if (typeof f.text !== 'string' || !f.text) return false;
+  return f.h === factHash(f.text);
+}
+
 /** W25：稳定 0..1（sha1(id+'first') 前 4 字节 / 2^32）。同 id 永远同值。 */
 function hashUnit(id) {
   const buf = crypto.createHash('sha1').update(String(id || '') + 'first').digest();
@@ -404,7 +423,8 @@ function upsertFacts(drafts, opts = {}) {
         pinned: false,
         firstEncounter: false,
         migrated: false,
-        forgotten: false
+        forgotten: false,
+        h: factHash(text)   // W53：内容哈希（正文/种类没变时跳过 importance 重算）
       };
       fact.pinned = isPinned(fact);
       store.facts[tombIdx] = fact;
@@ -431,7 +451,8 @@ function upsertFacts(drafts, opts = {}) {
           fact = clearSuperseded({
             ...prev, text, kind, at: now, updated: now, hits: 0, source,
             importance, clarity: 'vivid', lastSeen: 0, recallCount: 0,
-            pinned: false, firstEncounter: false, migrated: false
+            pinned: false, firstEncounter: false, migrated: false,
+            h: factHash(text)   // W53：换值后正文必变，写新哈希供后续跳过
           });
           store.facts[store.facts.indexOf(prev)] = fact;
         } else {
@@ -449,7 +470,8 @@ function upsertFacts(drafts, opts = {}) {
             recallCount: 0,
             pinned: false,
             firstEncounter: false,
-            migrated: false
+            migrated: false,
+            h: factHash(text)   // W53：内容哈希（正文/种类没变时跳过 importance 重算）
           };
           fact.pinned = isPinned(fact);
           store.facts.push(fact);
@@ -460,12 +482,18 @@ function upsertFacts(drafts, opts = {}) {
         touched.push(fact);
       } else {
         /* expand：新的更具体就替换文案；种类取更「硬」的（name > boundary > …） */
+        const kindBumped = (KIND_BOOST[kind] || 0) > (KIND_BOOST[found.kind] || 0);
         if (text.length > found.text.length) found.text = text;
-        if ((KIND_BOOST[kind] || 0) > (KIND_BOOST[found.kind] || 0)) found.kind = kind;
+        if (kindBumped) found.kind = kind;
         found.updated = now;
         found.hits = (found.hits || 0) + 1;
-        const imp = scoreImportance(found.text, found.kind, found.source);
-        found.importance = Math.max(Number(found.importance) || 0, imp);
+        /* W53：正文与种类都没变 → 沿用旧 importance（scoreImportance 是纯函数，
+         * 对同一 (text,kind,source) 结果恒等，重算只是浪费）；变了 → 重算并刷新 h。 */
+        if (!factHashMatches(found) || kindBumped) {
+          const imp = scoreImportance(found.text, found.kind, found.source);
+          found.importance = Math.max(Number(found.importance) || 0, imp);
+          found.h = factHash(found.text);
+        }
         found.pinned = isPinned(found);
         updated++;
         touched.push(found);
@@ -487,7 +515,8 @@ function upsertFacts(drafts, opts = {}) {
         recallCount: 0,
         pinned: false,
         firstEncounter: false,
-        migrated: false
+        migrated: false,
+        h: factHash(text)   // W53：内容哈希（正文/种类没变时跳过 importance 重算）
       };
       fact.pinned = isPinned(fact);
       store.facts.push(fact);
@@ -940,6 +969,9 @@ module.exports = {
   isSuperseded,
   markSuperseded,
   clearSuperseded,
+  /* W53：内容哈希（内部函数，verify-w53 直接调） */
+  factHash,
+  factHashMatches,
   /* 测试用 */
   _resetCache: () => { cache = null; },
   normalizeKey,

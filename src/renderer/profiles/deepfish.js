@@ -58,14 +58,7 @@ export const DEEPFISH = {
   model: {
     label: '大肥鱼',
     url: '/src/assets/models/deepfish/大肥鱼.model3.json',
-    /* ---- 几何标定：待真机实测后回填（见 verify-deepfish.js 的占位断言）----
-     * ⚠️ 本组数值是**占位**（从 whale 抄的），首次真机跑 PET_SNAPSHOT 前
-     *    必须先量：见 ARCHIVE-details.md「换模型几何标定」流程。
-     *    值域量纲同 whale（canvas 单位 = s 的系数）。
-     * 标定方法：窗口高 342/280/420 三档各跑 32s×~112 帧采样，取整窗
-     * 墨水包围盒；必须至少两组不同 petScale（不同 s/vh 比）联立，
-     * 否则拟合共线（见 whale 档案头注释的教训）。 */
-    anchorY: 'top',          // 站姿模型：顶部锚定（hiyori 口径，见下方标定说明）
+    anchorY: 'top',          // 站姿模型：顶部锚定（whale 那种趴姿才用 'bottom'）
     /* ---- 几何标定：2026-10-31 用 debug/calib-inkbox.js 从 moc3 顶点实测 ----
      * 为什么不用截图量（calib-whale.js 那条路）：本机 GPU 是软件合成
      * （[gpu] compositing/rasterization = disabled_software），8K 纹理下

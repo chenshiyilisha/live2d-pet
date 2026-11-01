@@ -58,10 +58,15 @@ export const DEEPFISH = {
   model: {
     label: '大肥鱼',
     url: '/src/assets/models/deepfish/大肥鱼.model3.json',
-    /* 🔴 2026-10-31 深夜 **撤销退役**（用户改主意：要 DeepSeek 鲸鱼娘上线）。
+    /* 🔴 2026-10-31 深夜再次 **退役**（用户拍板：菜单上去掉）。
      * 素材是 DeepSeek 平台免费角色皮，用户本地自用；素材 187M、20+ 表情、
      * 8 动作、5 纹理全在 src/assets/models/deepfish/。
-     * 上一轮取景（alignByMeasure + 几何常数）已实测修好、未删。 */
+     * 上一轮取景（alignByMeasure + 几何常数）已实测修好、未删。
+     *
+     * retired: true = 下线：菜单不显示、挂载口（resolveModelName）不放行。
+     * 代码全保留（params.js 注册表 / 档案 / 几何常数），想再启用只需摘掉
+     * 这个字段 + main.js 菜单加回（两处必须同改，见 main.js 头注释）。 */
+    retired: true,
     anchorY: 'top',          // 站姿模型：顶部锚定（whale 那种趴姿才用 'bottom'）
     /* ---- 几何标定：2026-10-31 用 debug/calib-inkbox.js 从 moc3 顶点实测 ----
      * 为什么不用截图量（calib-whale.js 那条路）：本机 GPU 是软件合成

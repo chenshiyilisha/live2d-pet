@@ -523,3 +523,34 @@ psd2live / See-Through 整条生态都是围着半身长出来的，我们正好
 3. **绑骨**：psd2live CLI 一条命令
 4. **runtime 适配**：新建 `profiles/<new>.js`，冒烟测试
 
+
+### 12.7 实际打通：MCP manifest 路线（2026-10-31 深夜，首个自研模型上线）
+
+§12.6 路线第 3 步写「psd2live CLI 一条命令」—— **实测走不通**，修正如下：
+
+- **CLI 只接受 PSD 输入**（`--input <path>` = "Layered input PSD"）。
+  ag-psd 写的 PSD 被拒（3 通道无 alpha / 结构与官方不符），CLI 路线废弃。
+- **layout manifest 走 MCP**：`./PSD2Live.exe mcp --port N --token T --profile core --store DIR`
+  是 headless 子命令（无窗口）。用 `app/resources/mcp_proxy.py call <op> <args> --edit`
+  调用，参数**平铺**不包 `{"request": ...}`，`--edit` 自动填 state。
+- **MCP 关键操作**（按序）：`workspace_overview` → `project_import_layout {path}` →
+  `rig_generate {}` → `project_export_model {output_directory}`。
+
+实际生产链路（第一个自研模型「鲸鱼娘（自研）」全流程，2026-10-31）：
+1. ImageGen 生成全身立绘源图（白底，1024×1536）
+2. `tools/imgtool/split-layers.js` 程序化拆层（连通成分分割，16 层 PNG + manifest.json）
+3. MCP `project_import_layout` 导入 → `rig_generate` 绑骨 → `project_export_model` 导出
+4. 产出 moc3（MOC3\x05 = Cubism 5）+ cdi3 + model3 + physics3 + motion3 + exp3 + 纹理
+5. 自修两处：model3.json 补 `HitAreas`（缺失会让 SDK 插件 `null.map()` 崩）、
+   exp3 移入 `expressions/` 子目录（加载器拼的是 `<dir>/expressions/<name>.exp3.json`）
+6. 建 `profiles/whalegirl.js` 注册（alignByMeasure 实测对齐），真机冒烟
+   `model mounted {"name":"whalegirl","drawables":16,"params":20,"motions":["Idle","Blink","Nod","Shake"]}`
+   + `expr ready {"emo":4}`（psd2live 自动生成 4 个 exp3：smile/sad/angry/surprised）
+
+### 12.8 仓库边界
+
+- **模型素材不进仓库**：`src/assets/models/selfmade/`（源图 + export + layers，6.2MB）
+  被 `.gitignore` 的 `src/assets/models/` 覆盖。
+- **链路进仓库**：`tools/imgtool/`（analyze.js / split-layers.js + package.json，
+  node_modules 被忽略）、`src/renderer/profiles/whalegirl.js`、本文档 §12.7。
+- **工具本身不进仓库**：`tools/psd2live/`（297MB 便携版，GPL-3.0，见 §12.1）。

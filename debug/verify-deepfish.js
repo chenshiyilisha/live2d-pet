@@ -266,24 +266,22 @@ const readSrc = (p) => fs.readFileSync(path.join(SRC, p), 'utf8').replace(/\r\n/
     'params.js 的 PROPS 注册表里有 deepfish');
 
   const MAIN = readSrc('main/main.js');
-  /* 2026-10-31 重新启用：deepfish（大肥鱼 / DeepSeek 鲸鱼娘皮）回到**菜单**里。
-   * 断言的是「在 APPEARANCE_MODELS 里能找到它的 id 项」—— 排除注释文本后匹配，
-   * 这样退役说明注释不会误判。 */
+  /* 2026-10-31 深夜再次下线：deepfish（大肥鱼 / DeepSeek 鲸鱼娘皮）从**菜单**移除，
+   * 代码保留。断言的是「在 APPEARANCE_MODELS 里找不到它的 id 项」——
+   * 排除注释文本后匹配，这样退役说明注释不会误判。 */
   const appearanceBlock = (MAIN.match(/const APPEARANCE_MODELS = \[[\s\S]*?\];/) || [''])[0];
   ok(appearanceBlock.length > 0, 'main.js 里能找到 APPEARANCE_MODELS 表');
   const appearanceNoComments = appearanceBlock.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-  ok(/\{\s*id:\s*'deepfish'[\s\S]*?\}/.test(appearanceNoComments),
-    'APPEARANCE_MODELS **含** deepfish（已重新启用，菜单可选）');
-  ok(/\{\s*id:\s*'deepfish'[\s\S]*?label:\s*'大肥鱼'\s*\}/.test(appearanceNoComments),
-    'deepfish 的 label 是「大肥鱼」');
+  ok(!/\{\s*id:\s*'deepfish'[\s\S]*?\}/.test(appearanceNoComments),
+    'APPEARANCE_MODELS **不含** deepfish（已下线，菜单无入口）');
+  ok(!/label:\s*'大肥鱼'/.test(appearanceNoComments),
+    '菜单里不再出现「大肥鱼」label');
   ok(/normalizeAppearanceModel/.test(MAIN),
     'main.js 有 normalizeAppearanceModel()（存量配置回落默认，托盘单选不空转）');
   ok(/normalizeAppearanceModel\(\);\s*\/\/[^\n]*\n\s*createWindow\(\)|normalizeAppearanceModel\(\);\s*\n\s*createWindow\(\)/.test(MAIN),
     '启动时先 normalizeAppearanceModel() 再 createWindow（顺序不能反）');
-  ok(/大肥鱼[\s\S]{0,80}神宫凉子|神宫凉子/.test(MAIN),
-    'main.js 切到 deepfish 时有署名 toast（素材自带署名要求）');
   ok(/DEEPFISH_CREDIT|神宫凉子|霓虹猫/.test(readSrc('renderer/profiles/deepfish.js')),
-    '档案里仍保留署名文案（素材自带署名要求）');
+    '档案里仍保留署名文案（素材自带署名要求；下线不删署名）');
 
   /* pet.js 不调 model.expression() —— 表情由 pet.js 自己的 fetch + setParam 通道管理；
    * model3.json 注册 Expressions 段只是让插件认数据，不触发应用。
@@ -341,20 +339,19 @@ const readSrc = (p) => fs.readFileSync(path.join(SRC, p), 'utf8').replace(/\r\n/
   ok(/inkBoxMeasured\s*=\s*null[\s\S]{0,120}inkMeasureGen\+\+/.test(PET),
     'applyModelGeometry 会清空旧框并推进代际（不拿上个模型的框对齐）');
 
-  /* ================= [H] 启用守卫：菜单有入口、挂载口放行，两处必须一致 =================
+  /* ================= [H] 退役守卫：菜单无入口、挂载口拦截，两处必须一致 =================
    *
-   * 2026-10-31 deepfish **重新启用**（用户拍板：就是 DeepSeek 平台的免费鲸鱼娘皮，
-   * 素材 187M 全在本地）。所以「拦下 deepfish」不再是预期行为 —— 这一节盯的
-   * 是「两处必须一致」这条纪律依然成立，只是方向反过来：
-   *   · 渲染侧：档案里**没有** `retired: true` → resolveModelName() 放行
-   *   · 主进程侧：main.js 的 APPEARANCE_MODELS 里列着它（菜单入口）
+   * 2026-10-31 深夜 deepfish 再次**下线**（用户拍板：菜单上去掉，代码保留）。
+   * 这一节盯的是「两处必须一致」这条纪律，方向已反转：
+   *   · 渲染侧：档案里**有** `retired: true` → resolveModelName() 拦截
+   *   · 主进程侧：main.js 的 APPEARANCE_MODELS 里没有它（菜单无入口）
    * 只改一处 = 菜单能点但挂不上，或能挂但没有入口。
    *
    * 🔴 判据仍然是**真跑一遍 pet.js 里那个函数**（从源码抠出来执行），
    *    不是在这里抄一份等价逻辑 —— 抄的那份永远不会红。 */
-  console.log('\n[H] 启用守卫：菜单有入口、挂载口放行');
+  console.log('\n[H] 退役守卫：菜单无入口、挂载口拦截');
 
-  ok(D.model?.retired !== true, '档案里没有 retired: true（挂载口放行）');
+  ok(D.model?.retired === true, '档案里有 retired: true（挂载口拦截）');
   ok(/\[DEEPFISH\.name\]\s*:\s*DEEPFISH\.model/.test(PARAMS),
     'params.js 仍注册 deepfish（代码保留，不是删干净）');
 
@@ -368,19 +365,19 @@ const readSrc = (p) => fs.readFileSync(path.join(SRC, p), 'utf8').replace(/\r\n/
   } catch { /* 下面那条断言会红 */ }
   ok(typeof resolveModel === 'function', 'resolveModelName 可执行（源码级真跑）');
   ok(resolveModel?.('hiyori') === 'hiyori', '已知模型原样返回');
-  ok(resolveModel?.('deepfish') === 'deepfish',
-    'deepfish 可被挂上（重新启用，不再回落默认模型）');
+  ok(resolveModel?.('deepfish') === 'hiyori',
+    'deepfish 被拦截回落默认（退役中，挂不上）');
   ok(resolveModel?.('nope') === 'hiyori', '不存在的键 → 回落默认模型');
 
-  /* 负对照：给档案**加上** retired 标志，同一个函数必须立刻把它拦回默认。
-   * 证明放行它的是「档案里没有 retired」，而不是"注册表里恰好有"之类的别的原因。 */
+  /* 负对照：给档案**摘掉** retired 标志，同一个函数必须立刻放行 deepfish。
+   * 证明拦住它的是「档案里有 retired」，而不是"注册表里恰好没有"之类的别的原因。 */
   let negResolve = null;
   try {
     negResolve = new Function('MODELS', 'MODEL_NAME', `${fnSrc}\nreturn resolveModelName;`)(
-      { hiyori: {}, whale: {}, deepfish: { retired: true } }, 'hiyori');
+      { hiyori: {}, whale: {}, deepfish: { retired: false } }, 'hiyori');
   } catch { /* 上面已红 */ }
-  ok(negResolve?.('deepfish') === 'hiyori',
-    '负对照：档案置 retired 后 deepfish 立刻回落默认（证明拦住它的是这个字段）');
+  ok(negResolve?.('deepfish') === 'deepfish',
+    '负对照：档案摘掉 retired 后 deepfish 立刻放行（证明拦住它的是这个字段）');
 
   /* 换模型的正确流程写进文档，别让下一个人重新踩一遍 */
   console.log(fails === 0 ? '\n全部通过' : `\n${fails} 项失败`);

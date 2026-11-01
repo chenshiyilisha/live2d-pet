@@ -2174,17 +2174,16 @@ function personalitySubmenu(cfg) {
 /* 菜单上可选的模型 = **产品线**。这里没有的模型不允许出现在配置里，
  * 也不允许被渲染层挂上（下面三处消费点都按这张表过滤）。
  *
- * 2026-10-31：deepfish（大肥鱼，即 DeepSeek 平台的免费鲸鱼娘皮）**重新启用**，
- * 回到菜单。素材 187M 全在本地（20+ 表情 / 8 动作 / 5 纹理），取景用
- * alignByMeasure 实测对齐，是实测值、直接可用。
- * 署名照素材自带要求写在下面的 toast 里（神宫凉子 / 霓虹猫）。
+ * 2026-10-31 深夜再次**下线** deepfish（用户拍板：菜单上去掉，代码保留）。
+ * 素材 187M 全在本地（20+ 表情 / 8 动作 / 5 纹理），取景用
+ * alignByMeasure 实测对齐，是实测值、未删；想再启用只需两处同改：
+ * 这里加回那一项 **＋** 档案里摘掉 `retired: true`（见 profiles/deepfish.js）。
  *
- * ⚠️ 想再让它下线：这里删掉那一项 **＋** 档案里置 `retired: true`（两处都要，
- * 只改一处就是「菜单能点但挂不上」或反过来），别处不用动。 */
+ * ⚠️ 只改一处就是「菜单能点但挂不上」或反过来，别处不用动。 */
 const APPEARANCE_MODELS = [
   { id: 'hiyori', label: '日和' },
   { id: 'whale', label: '鲸鱼娘' },
-  { id: 'deepfish', label: '大肥鱼' }
+  { id: 'whalegirl', label: '鲸鱼娘（自研）' }
 ];
 
 function applyAppearanceModel(id) {
@@ -2196,8 +2195,8 @@ function applyAppearanceModel(id) {
   const row = APPEARANCE_MODELS.find((m) => m.id === want);
   if (want === 'whale') {
     toast('已切到鲸鱼娘 · 素材源自 VTube Studio 模型包（Andersen216 补 model3）');
-  } else if (want === 'deepfish') {
-    toast('已切到大肥鱼 · 素材源自神宫凉子 / 霓虹猫 免费公开模型，禁止二次分发');
+  } else if (want === 'whalegirl') {
+    toast('已切到鲸鱼娘（自研） · ImageGen 生成 + psd2live 绑骨导出');
   } else {
     toast(`已切到「${row ? row.label : want}」`);
   }

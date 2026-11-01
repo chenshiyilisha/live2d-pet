@@ -42,6 +42,9 @@ dist/
 out/
 build/
 
+# 本机手动启动的 user-data 目录（--user-data-dir 指过去）
+.tmp-run/
+
 # WorkBuddy 工作区数据：每日记忆文件与备份，属本机私有内容
 .workbuddy/
 

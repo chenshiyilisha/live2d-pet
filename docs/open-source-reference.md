@@ -3680,3 +3680,143 @@ https://github.com/eric-song-dev/dsh-ikun-pet                      11★ MIT · 
 https://github.com/momori777/Artemis                              438★ 自定义许可 · 不碰
 https://github.com/phoiex/AAAAGENT                                220★ Noncommercial · 不碰
 ```
+
+---
+
+# 27. 非 Live2D / 3D 方向探索（2026-11-11，第 27 轮）
+
+> 用户要求「除了 Live2D、3D 之外的方向探索」。本轮按四条技术路线
+> （精灵图动画 / Lottie 矢量动画 / SVG+CSS 程序化动画 / 照片→像素桌宠流水线）
+> 调研，全部经 api.github.com 核实许可（规矩 29：读 LICENSE 原文第一行）。
+
+## 27.1 路线对比总表
+
+| 路线 | 代表项目 | 许可 | 素材成本 | 动画细腻度 | 对我们的适配 |
+|---|---|---|---|---|---|
+| A. 精灵图帧动画 | Shimeji-ee / OpenAnima / Codex Pets | 多源 MIT | 需手绘 46~72 帧 | 中（逐帧，无骨骼） | 🟡 可作轻量档 |
+| B. Lottie 矢量动画 | MyDesktopPet / LottieFiles | MIT | 矢量 JSON，可程序生成 | 高（补间动画） | 🟡 可作轻量档 |
+| C. SVG+CSS 程序化 | dsh-desktop-pet / lively-mascot | MIT | **零素材**（纯代码画） | 低-中（CSS 动画） | 🔴 **最适合快速落地** |
+| D. 照片→像素桌宠 | DuDuClaw / codex-pet-generator | Apache-2.0 / MIT | 一张照片自动生成 | 中（8×9 帧） | 🟡 可作「导入照片」功能 |
+
+## 27.2 路线 A：精灵图帧动画
+
+### `Ertugrulmutlu/OpenAnima`（MIT）
+
+桌面覆盖层引擎：把 GIF / APNG / WebM / 精灵图 / 帧文件夹直接铺在桌面上当可移动浮窗。
+- 支持 GIF / APNG / WebM / PNG / JPG / WEBP / 帧文件夹 / 精灵条 / Spritesheet
+- 本地运行、轻量、带资产库和桌面检查器
+- **可借**：资产类型覆盖全面（GIF/APNG/WebM 都能播），我们的渲染层可以加一路「图片桌宠」支持
+
+### Shimeji 生态（多源）
+
+经典桌面宠物引擎，Java 系。每个角色 = 46 张透明 PNG（128×128）+ conf/actions.xml + behaviors.xml。
+- 引擎：Shimeji-ee（Kilkakon，Windows）、ShimejiEE（macOS）、ShimeLinux（Linux X11）、wl_shimeji（Wayland）
+- **可借**：`conf/actions.xml` + `behaviors.xml` 的行为声明式描述（把「抛、爬、推」写成 XML，引擎解释执行）
+- 我们的 profiles/<m>.js 已经是 manifest 式，但 actions 是代码里写的，XML 声明式更易扩展
+
+### Codex Pets 精灵图规范（openpets / Codex）
+
+- 8×9 网格、1536×1872、每格 192×208
+- 9 个动画行：idle / run-right / run-left / wave / jump / failed / wait / run / review
+- 配套工具链：repack / inspect / validate / install（Python 脚本，可被 agent 串起来）
+- **可借**：精灵图规格标准化（8×9 网格），我们的 deepfish 如果要做精灵图档可以直接对齐这个规格
+
+## 27.3 路线 B：Lottie 矢量动画
+
+### `alpacachen/MyDesktopPet`（MIT）
+
+macOS 桌面宠物，Swift + AppKit + Lottie for iOS。
+- 内置 2 个狗动画（Lottie JSON），支持导入自定义 Lottie JSON
+- 5 档缩放（50%~200%）、透明浮窗、拖拽、菜单栏控制
+- **可借**：Lottie JSON 导入机制（用户可自己导入 Lottie 动画当桌宠）
+
+### Lottie 生态
+
+- LottieFiles：在线创建 + 海量现成动画（免费/付费）
+- dotLottie Runtime：ThorVG 引擎，120fps，跨平台（Web/iOS/Android/Flutter/Windows）
+- 2025 年 Lottie 成为 IANA 标准 MIME 类型
+- **可借**：Lottie 是矢量、文件小、可无限缩放，比精灵图更适合「轻量档」
+
+## 27.4 路线 C：SVG+CSS 程序化动画（零素材）
+
+### `Ares-song-RD/dsh-desktop-pet`（MIT）
+
+DSH 插件，纯 inline SVG + CSS 动画，**零图片素材、零额外依赖**。
+- 眨眼、摇尾巴、呼噜全部 CSS keyframes
+- 拖拽定位 + localStorage 记忆
+- 单点跳跃 + 随机语音气泡、双击循环情绪、右键菜单
+- 亮/暗主题、设置页（显示开关/动画开关/情绪选择）
+- **可借**：SVG 角色用 CSS 变量控制颜色（`var(--cat-body)`），主题切换零成本
+
+### `lively-mascot`（MIT，npm 包）
+
+零依赖 SVG 吉祥物引擎，40 种情绪、5 个内置角色。
+- `createMascot(slot, { type: 'sprout', size: 180 })` → `mascot.setEmotion('10')`
+- 支持自定义 SVG/HTML 模型、Codex Image 模型生成角色
+- **可借**：情绪→CSS 动画映射（`data-mascot-behaviors` 标签驱动 CSS 规则）
+
+### Deskling（Document Picture-in-Picture API）
+
+纯网页桌宠，用 Document Picture-in-Picture API 开浮窗。
+- 4 个宠物全是 inline SVG + CSS keyframes，**整个应用零 PNG**
+- 眨眼 = `scaleY(.1)` 在 4.5s 循环的 95% 处
+- **可借**：零素材路线（SVG 画角色 + CSS 做动画），最适合快速出原型
+
+## 27.5 路线 D：照片→像素桌宠流水线
+
+### `zhixuli0406/DuDuClaw`（Apache-2.0）
+
+照片 → 像素桌宠，全本地流水线。
+- photo → EXIF 修正 → 背景移除（ONNX BiRefNet-general-lite）→ RGBA 抠图
+- → 像素量化（64px 网格 + 16 色 median-cut）→ 8×9 精灵图烘焙
+- 两种模式：程序化（单张图 + WAAPI 关键帧）/ 精灵图（8×9 逐帧）
+- pet.json manifest（Codex Pets 超集）
+- **可借**：照片→精灵图的完整流水线规格（背景移除 + 像素量化 + 烘焙），我们的 psd2live 是 PSD→Live2D，可以加一路「照片→精灵图」
+
+### `863683348/codex-pet-generator`（MIT）
+
+上传照片 → AI 生成像素桌宠（Qwen-Image / OpenAI Images）。
+- 9 个动画状态：idle / walk / run / jump / sleep / die / action / special / interact
+- 输出 spritesheet.webp + pet.json，直接装到 `~/.codex/pets/`
+- **可借**：AI 生成路线（不是本地 ONNX，是调 API），适合没有本地模型时
+
+### `EASYGOING45/open-pets`（NOASSERTION，需读 LICENSE 原文）
+
+Codex/Claude Code 桌宠工坊，自带 AI Skill（生图→切帧→校验→安装）。
+- Tauri 2 渲染器（~5MB），读 `~/.codex/pets/`
+- Skill 契约：1536×1872 / 8×9 网格 / 192×208 单元
+- **可借**：Skill 封装思路（把「打包精灵图」的领域知识写成 agent 可调用的 Skill）
+
+## 27.6 判决
+
+### 最适合快速落地：路线 C（SVG+CSS 程序化）
+
+- **零素材**：角色用 SVG 画、动画用 CSS keyframes，不需要美术出图
+- **轻量**：整个桌宠一个 SVG + 一段 CSS，几 KB
+- **可程序生成**：SVG 是文本，可以用代码生成（或 AI 生成）
+- **适配我们**：Electron 渲染层天然支持 SVG+CSS，不需要改架构
+
+### 最适合做功能扩展：路线 D（照片→精灵图）
+
+- 用户上传一张照片 → 自动变成像素桌宠
+- 与现有 psd2live 互补（PSD→Live2D 是专业路线，照片→精灵图是大众路线）
+- DuDuClaw 的流水线规格完整（Apache-2.0 可借鉴）
+
+### 可作轻量档：路线 A+B（精灵图 + Lottie）
+
+- 精灵图（Shimeji 规格）和 Lottie 都可以作「轻量模型」的替代
+- 比 Live2D 省资源（不需要 Cubism Core + WASM + 物理演算）
+- 但动画细腻度不如 Live2D（无骨骼、无物理），只能作补充
+
+## 27.7 来源清单（全部经 api.github.com 核实许可）
+
+```
+https://github.com/Ertugrulmutlu/OpenAnima              MIT · 桌面覆盖层引擎（GIF/APNG/精灵图）
+https://github.com/alpacachen/MyDesktopPet              MIT · macOS Lottie 桌宠
+https://github.com/Ares-song-RD/dsh-desktop-pet         MIT · DSH 插件（SVG+CSS 零素材）
+https://github.com/zhixuli0406/DuDuClaw                Apache-2.0 · 照片→像素桌宠流水线
+https://github.com/863683348/codex-pet-generator        MIT · AI 照片→像素桌宠
+https://github.com/EASYGOING45/open-pets                NOASSERTION · Codex 桌宠工坊（需读 LICENSE）
+https://lottiefiles.com/                                Lottie 生态（dotLottie / ThorVG / LottieFiles）
+Shimeji-ee (Kilkakon) / ShimeLinux / wl_shimeji          多源 · Shimeji 精灵图引擎生态
+```

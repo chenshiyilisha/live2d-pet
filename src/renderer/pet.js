@@ -4179,7 +4179,32 @@ const STAT_ITEMS = [
    *    （满载才 75~85℃，目标上限 87℃）。数值对、歧义在含义上。
    * → 靠橙色（区别于三条负载%）+ title 全文说明消歧。 */
   { key: 'temp', label: '温度', get: (s) => (typeof s.tempC === 'number' ? `${s.tempC}°C` : null),
-    cls: 'temp', hint: '独显（GPU）核心温度' }
+    cls: 'temp', hint: '独显（GPU）核心温度' },
+  /* W64：token 用量与估算成本（monitor.usage 开时才有值）。
+   * ⚠️ 永远在 STAT_ITEMS 里占位（get 在 usage 关 / 没数据时返回 null → 整项不画），
+   *    这样底座预留高度一次冻结、开关用量**不触发 canvas resize**（规矩 12）。 */
+  { key: 'usage', label: 'Token', get: (s) => {
+      const u = s?.usage;
+      if (!u || typeof u.all?.total !== 'number') return null;
+      const n = u.all.total;
+      const tok = n >= 10000 ? `${(n / 10000).toFixed(1)}万` : `${n}`;
+      const cost = (typeof u.costAll === 'number') ? ` ¥${u.costAll.toFixed(4)}` : '';
+      return tok + cost;
+    },
+    hint: '累计 token 用量（¥ 为按配置单价的估算成本）' },
+  /* W65：好感度等级（monitor.affinity 开时才有值）。
+   * ⚠️ 同样永远占位（get 在 affinity 关时返回 null → 整项不画），
+   *    开关好感度不触发 canvas resize（规矩 12）。
+   * 显示「等级名 · 当前/下一级阈值」；满级显示「等级名 ·MAX」。 */
+  { key: 'affinity', label: '好感', get: (s) => {
+      const a = s?.affinity;
+      if (!a || typeof a.points !== 'number') return null;
+      if (a.nextThreshold === null || a.nextThreshold === undefined) {
+        return `${a.name} ·MAX`;
+      }
+      return `${a.name} ${a.points}/${a.nextThreshold}`;
+    },
+    hint: '关系深度（对话 +1、摸头 +5，只升不降）' }
 ];
 
 /* 把 0–100 的负载映射成 CSS 的 data-level（样式见 style.css）。

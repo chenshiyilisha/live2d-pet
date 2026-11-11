@@ -542,7 +542,19 @@ const DEFAULT_CONFIG = {
   /* 系统状态 */
   monitor: {
     floating: false,      // 常驻小字悬浮显示
-    intervalMs: 3000
+    intervalMs: 3000,
+    /* W64：token 用量面板（记每轮对话的 prompt/completion token，估算成本）。
+     * 出处：PolinniZhong/dsh-personal-center（MIT）的 Token 用量 + 成本估算。
+     * ⚠️ 记账本身几乎零开销，但面板是新增显示元素，默认关（规矩 14）。 */
+    usage: false,
+    /* W64：按模型单价（¥/百万 token）。没配的模型只记账不计价（成本显示 "—"）。
+     * 形态：{ "deepseek-chat": { "prompt": 1, "completion": 2 } }。
+     * ⚠️ 价格会变，这里只是估算，不当作账单。 */
+    usagePrices: {},
+    /* W65：好感度等级面板（9 级成长体系）。
+     * 出处：zhu1090093659/dsh-pet（Apache-2.0）好感度 9 级。
+     * ⚠️ 好感度一直在后台累计（零开销），开关只控制**是否在底座显示**。 */
+    affinity: false
   },
   /* 全屏 / 游戏时自动静默
    *

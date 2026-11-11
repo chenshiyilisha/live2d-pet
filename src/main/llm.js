@@ -528,7 +528,7 @@ async function streamLLM(messages, { baseUrl, apiKey, model, extraBody, send, se
          * 有的本地服务会把它当成"提供了错误的凭据"直接 401。有 key 才带。 */
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
       },
-      body: JSON.stringify({ ...extra, model, messages, stream: true }),
+      body: JSON.stringify({ ...extra, model, messages, stream: true, stream_options: { include_usage: true } }),
       signal: ac.signal
     });
   } catch (err) {
@@ -546,6 +546,20 @@ async function streamLLM(messages, { baseUrl, apiKey, model, extraBody, send, se
   const reader = res.body.getReader();
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
+
+  /* W64：token 用量采集。OpenAI 兼容协议在最后一个 chunk 带 usage
+   * （请求里加了 stream_options.include_usage）。用量可能分多次更新，
+   * 每次取到就覆盖（后到的更权威）。取不到就保持 null —— 记账层不硬编。 */
+  let usage = null;
+  const captureUsage = (payloadObj) => {
+    if (payloadObj && payloadObj.usage && typeof payloadObj.usage === 'object') {
+      usage = {
+        promptTokens: payloadObj.usage.prompt_tokens || 0,
+        completionTokens: payloadObj.usage.completion_tokens || 0,
+        totalTokens: payloadObj.usage.total_tokens || 0,
+      };
+    }
+  };
 
   try {
     while (true) {
@@ -566,7 +580,9 @@ async function streamLLM(messages, { baseUrl, apiKey, model, extraBody, send, se
           // ⚠️ 只取 delta.content。推理型模型会另发 delta.reasoning_content，
           //    这里**故意丢掉** —— 思考过程不该念给用户听（气泡 + TTS 都会念）。
           //    代价是推理期间界面上什么都不出来，所以配了 extraBody 让上层能关掉思考。
-          const delta = JSON.parse(payload).choices?.[0]?.delta?.content;
+          const parsed = JSON.parse(payload);
+          captureUsage(parsed);
+          const delta = parsed.choices?.[0]?.delta?.content;
           if (delta) filter.push(delta);
         } catch { /* 跳过不完整分片 */ }
       }
@@ -582,7 +598,7 @@ async function streamLLM(messages, { baseUrl, apiKey, model, extraBody, send, se
   /* ⚠️ 先 end() 再 think()/silent()：最后一个标签（含想法/沉默）是 end() 里
    * 那次 drain(true) 才定下来的，顺序反了会漏掉收尾那一个。 */
   const emotion = filter.end();
-  return { ok: true, emotion, think: filter.think(), tone: filter.tone(), silent: filter.silent() };
+  return { ok: true, emotion, think: filter.think(), tone: filter.tone(), silent: filter.silent(), usage };
 }
 
 module.exports = {

@@ -46,6 +46,12 @@ const { startLocalServer } = require('./server');
 const { collectStats, formatStats, startSensorWatch, stopSensorWatch, waitForFirstGpu, HUD_FIELDS, FULL_FIELDS } = require('./sysinfo');
 const { recognizeWav } = require('./speech');
 const { streamLLM, createStreamFilter } = require('./llm');
+/* W64：token 用量台账 + 成本估算（dsh-personal-center 借鉴形态，MIT）。
+ * 只记账 + 展示，不参与对话逻辑。 */
+const usage = require('./usage');
+/* W65：好感度等级（dsh-pet 借鉴形态，Apache-2.0）。
+ * 9 级成长体系，对话/摸头累计积分，底座显示当前等级。 */
+const affinity = require('./affinity');
 /* 模型目录（预设 + 端点判定 + WorkBuddy models.json 解析）。
  * 纯数据/纯函数，断言见 debug/verify-llm-providers.js。 */
 const {
@@ -597,6 +603,28 @@ function refreshTopWatchdog() {
 let statsTimer = null;
 let statsGen = 0;   // 每次重排自增；旧的一轮循环靠它对不上号就自动退出
 
+/* W64：token 用量面板的数据源。只在 monitor.usage 开时返回汇总，
+ * 否则返回 null（渲染层据此整项不画）。
+ * ⚠️ 每轮 push 现算：byDay 被 90 天 TTL 修剪过、量级很小，3s 一次不贵。
+ * ⚠️ 任何异常都吞掉返回 null —— 用量面板坏了不该拖垮状态底座。 */
+function usageSummaryForPush() {
+  const cfg = loadConfig();
+  if (cfg.monitor?.usage !== true) return null;
+  try {
+    return usage.summary(cfg.monitor?.usagePrices || {});
+  } catch { return null; }
+}
+
+/* W65：好感度面板的数据源。只在 monitor.affinity 开时返回，否则 null。
+ * ⚠️ 异常吞掉返回 null —— 好感度面板坏了不该拖垮状态底座。 */
+function affinitySummaryForPush() {
+  const cfg = loadConfig();
+  if (cfg.monitor?.affinity !== true) return null;
+  try {
+    return affinity.info();
+  } catch { return null; }
+}
+
 function refreshStatsTimer() {
   if (statsTimer) { clearTimeout(statsTimer); statsTimer = null; }
   const gen = ++statsGen;
@@ -653,6 +681,10 @@ function refreshStatsTimer() {
     /* 只要悬浮小字真正画的那几项 —— 电量与网速不在这里显示，
      * 取了就是每 3 秒白烧 2.5 秒的 PowerShell（网卡统计在本机很慢）。 */
     const s = await collectStats(HUD_FIELDS);
+    /* W64：带上 token 用量汇总（monitor.usage 开时才有值）。 */
+    s.usage = usageSummaryForPush();
+    /* W65：带上好感度（monitor.affinity 开时才有值）。 */
+    s.affinity = affinitySummaryForPush();
     try { mainWindow.webContents.send('monitor:stats', s); } catch { /* ignore */ }
   };
 
@@ -3042,6 +3074,8 @@ function buildMenuTemplate() {
       ]
     },
     flag('monitor', 'floating', '系统状态悬浮显示', false),
+    flag('monitor', 'usage', 'Token 用量面板（成本估算）', false),
+    flag('monitor', 'affinity', '好感度等级', false),
     flag('reminder', 'enabled', '定时提醒'),
     process.platform === 'win32'
       ? flag('asr', 'enabled', '语音输入（离线识别）', false)
@@ -4223,6 +4257,14 @@ function chatStream(messages, opts = {}) {
     /* 外部中止信号（在途作废）：不传时 streamLLM 的行为与从前逐位一致 */
     signal: opts.signal
   }).then((res) => {
+    /* W64：记账 token 用量（流结束后才拿到 usage）。
+     * ⚠️ 只记成功的轮次；失败/中止的轮次没产生完整用量，不记。
+     * ⚠️ 记账与对话逻辑完全解耦 —— 记不上也不影响聊天。 */
+    if (res?.ok && res.usage && typeof res.usage.totalTokens === 'number') {
+      try {
+        usage.record({ model: llmOpts.model, ...res.usage });
+      } catch { /* 记账失败绝不影响对话 */ }
+    }
     /* 助手腔短语**拦不住** —— 流式的字已经进气泡了，事后删不掉。
      * 这里只统计，用来判断提示词（config.js 的 style / format）到底管不管得住：
      * 日志里频繁出现就说明该把禁用语写得更狠，或者升级成"边收边扣"的硬拦。 */
@@ -4394,7 +4436,11 @@ function registerIpc() {
     const type = ev && ev.type;
     if (type === 'click') moodEngine.onClick();
     else if (type === 'patStart') moodEngine.onPatStart();
-    else if (type === 'patEnd') moodEngine.onPatEnd();
+    else if (type === 'patEnd') {
+      moodEngine.onPatEnd();
+      /* W65：摸头 = 身体互动，好感度 +5（喂食在我们这儿的对应物）。 */
+      affinity.addPoints(affinity.GAIN.pat, 'pat');
+    }
     else return;
     pushMoodSnapshot();
   });
@@ -4758,6 +4804,8 @@ function registerIpc() {
     chatAbort = ac;
     /* 用户开口 = 最强意义上的「被搭理」：想念轴归零（mood.js）。 */
     moodEngine.onUserChat();
+    /* W65：每轮对话 +1 好感度（出处 dsh-pet：+1/轮）。 */
+    affinity.addPoints(affinity.GAIN.chat, 'chat');
     pushMoodSnapshot();
     recordRhythmHit();
     emitWorkState('thinking');
@@ -5309,6 +5357,8 @@ if (!gotLock) {
 
     configureLedger(app.getPath('userData'));  // W26 主动账本
     configureTopicStream(app.getPath('userData'));  // W55 主题流台账
+    usage.setStorePath(path.join(app.getPath('userData'), 'usage.json'));  // W64 token 用量台账
+    affinity.setStorePath(path.join(app.getPath('userData'), 'affinity.json'));  // W65 好感度
     /* W57：rollback 开关从配置读（startTopicStream 每次 tick 过滤被回滚主题）。 */
     const rollbackOn = loadConfig().proactive?.rollback === true;
     topicStream.startTopicStream({

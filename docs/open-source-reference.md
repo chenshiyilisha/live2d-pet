@@ -3475,3 +3475,208 @@ inverted-mask fragments」。**它是颜色通道回填，不是遮罩数量问�
 对应开源借鉴：
 - 放宽历史保留 ← KokoroMemo「近期原文 + 远期摘要」分层思路（§11.21-A3）；
 - 加强事实沉淀 ← Mem0 抽取形态 + KokoroMemo「不乱记」写入闸门（临时剧情/玩笑不轻易变长期记忆）。
+
+---
+
+# 26. 第五批外部源归档：dsh 系桌宠插件全量补扫（2026-11-11，第 26 轮）
+
+> 用户要求「再找一找还有什么可借鉴的开源，主要找找 dsh 开源插件」。
+> §24 只按「近 10 天活跃」筛过，本轮改用 **stars 排序 + 多关键词**
+> （`dsh live2d pet` / `dsh plugin pet` / `deepseek harness live2d` / `dsh deepseek harness plugin`）
+> 全量补扫。LICENSE 一律读原文第一行（规矩 29）。
+
+## 26.1 生态全景
+
+DSH（DeepSeek Harness）生态已远超桌宠赛道：
+
+| 仓库 | 星 | 性质 |
+|---|---|---|
+| `deepseek-ai/deepseek-harness` | 278K★ | 本体（Everything is a Plugin） |
+| `awesome-dsh-plugin/awesome-dsh-plugin` | 24K★ | 插件精选列表 |
+| `dsh-market/dsh-market` | 11K★ | 可视化插件市场 |
+| `zhu1090093659/dsh-web` | 10K★ | Web 插件聚合生态 |
+| `MeteorNOX/DeepSeek-Balance-Whale-Widget` | 7K★ | 余额挂件（非桌宠） |
+| `bowenliang123/dsh-context` | 4.9K★ | 上下文可视化 |
+| `NanmiCoder/dsh-agent-teams` | 2.8K★ | 多 Agent 协作 |
+
+桌宠类插件 30+ 个，同质化严重（精灵图 + 状态轮询 + 气泡），
+**没有出现机制明显超过我们现状的**。以下按「许可干净 + 机制有价值」挑重点。
+
+## 26.2 重点候选（MIT / Apache，可借鉴）
+
+### `PolinniZhong/dsh-personal-center`（115★ · MIT）
+
+个人中心插件：Token 用量统计 + 成本估算 + 全局自定义指令 + 桌宠。
+
+| 机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| Token 用量 + 成本估算 | 今日/累计 token、会话数、工具调用、GitHub 式热力图、per-provider 明细、**峰谷价 + 缓存命中率** | 🟡 可借：我们 W45 换源有 baseUrl/apiKey，但无用量统计与成本面板 |
+| 全局自定义指令 | 类似 ChatGPT「Custom instructions」，应用到本机所有对话 | 🟡 可借：我们的人设是单角色，但「全局指令」可作 persona 之外的系统级补充 |
+| 桌宠 5 情绪 | happy/busy/tired/wallet-pain/dozing，由真实用量驱动 | ✅ 我们已有情绪状态机（规矩 22），不搬 |
+| 会话状态概览 | 双击桌宠跳转会话 | 🟡 我们是单 agent 桌宠，无多会话概念，跳过 |
+
+**判决**：成本统计面板是真点（用户可感知 token 花了多少），记 backlog 候选。
+
+### `zhu1090093659/dsh-pet`（68★ · Apache-2.0）
+
+多宠物注册表 + 好感度 + 碎碎念 + 状态气泡折叠。
+
+| 机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| pet.json manifest 注册表 | 每个宠物 = manifest + atlas，启动时自动发现，零代码扩展 | ✅ 我们 profiles/<m>.js 已是 manifest 式，同向 |
+| 好感度 9 级 | 幼鲸→伙伴→挚友→…→鲸生共渡，+1/轮，喂食 +5 | 🟡 可借：我们 W13 摸头有生气档但无「成长等级」概念 |
+| **碎碎念（inner whispers）** | 会话流式期间偶尔说内心独白，**由结构化结果触发**（test green / error / completion），**不引用模型原文**（无工具名/路径/模型文本），分类行 9s CD、结果行 5s CD、展示 TTL 8s | 🔴 **可借真点**：我们的 proactive 是「宿主冒泡」，没有「结构化事件 → 内心独白」通道。碎碎念比 proactive 更轻、更贴陪伴感 |
+| 状态气泡折叠 | 多会话只一个顶层气泡说话，其余折叠成 +N badge | 🟡 我们是单 agent，无多会话，跳过 |
+| 面板动作注册 | 插件通过 `ctx.pet.registerPanelAction` 注册按钮到桌宠面板 | 🟡 我们有托盘菜单，但「插件往桌宠面板塞按钮」的反向注册机制是新的 |
+
+**判决**：**碎碎念机制**值得抄（记 backlog 候选）；好感度等级可作 W13 增强。
+
+### `AcidGr/dsh-web-whale-maid`（10★ · MIT）
+
+女仆鲸鱼 + 饱食度系统 + 休眠模式。
+
+| 机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| 饱食度（Token 当饭） | 30000 容量，4 档投喂，5 档感知 | 🟡 有趣但偏游戏化，与我们「安静陪伴」定位有偏差，跳过 |
+| **休眠模式** | 一键卸载 DOM（零遮挡）+ 切断所有 LLM 事件 watcher + 毫秒级唤醒（不重载页面） | 🔴 **可借真点**：我们规矩 17 有全屏静默，但那是「降低帧率」，不是「卸载渲染 + 切断事件」。休眠模式更彻底（零 GPU 占用） |
+| 双层持久化 | disk + localStorage 双写 | ✅ 我们 saveConfig/saveStore 已双写（JSON + 备份），同向 |
+| 情绪与 LLM 严格联动 | 只有 LLM 调用发生时才换情绪，否则保持 | ✅ 我们情绪是状态机 + 衰减，比它更精细，不搬 |
+
+**判决**：**休眠模式**值得抄（记 backlog 候选，与全屏静默互补）。
+
+### `liyupi/dsh-kun-like-pet`（113★ · MIT）
+
+坤宠 + 9 状态动画 + 任务完成音效。
+
+| 机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| 9 状态动画 | 沿用 Codex 桌宠精灵图契约（8×9 格） | ✅ 我们 deepfish 用 exp3 表情，机制不同但目标同向 |
+| 轮询 agents 服务 | running/idle + tools/execute + approval/request 事件推导 5 模式 | ✅ 我们 W26 工作状态已是事件驱动，同向 |
+| **任务完成全机可闻** | 宿主进程用系统命令播放音效，任何窗口都响 | 🟡 可借：我们目前无「任务完成」反馈音（只有 TTS） |
+| 调试工具 | `kun_pet_debug` 查状态机内部计数 | ✅ 我们已有 debug 钩子体系，同向 |
+
+**判决**：任务完成音效是小增强，记候选（低优先）。
+
+### `Andersen216/dsh-whale-girl-live2d`（94★ · MIT）
+
+鲸鱼娘桌宠（同题材）+ 一键部署脚本。
+
+| 机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| 一键部署 | curl\|bash 起网页版，自动挑端口、开浏览器；子命令 --doctor/stop/status | 🟡 我们是 Electron 桌宠不是 DSH 插件，部署场景不同，跳过 |
+| 兼容性矩阵 | 明确标注 0.1.x 不支持、0.2.x 对齐 | ✅ 我们版本纪律（v0.4.0 + app-update.yml）更成熟，不搬 |
+| 右键钱包 | 右键直接打开钱包 | 🟡 与桌宠核心无关，跳过 |
+
+**判决**：同题材对照价值 > 机制借鉴价值。归档即止。
+
+### `varsian/ghost`（52★ · Apache-2.0）
+
+本地 VoxCPM 1.5 TTS + Live2D 口型联动。
+
+| 机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| **PCM 驱动口型** | 嘴型跟随实际播放音频的 RMS 包络，按实测延迟对齐（不是按文本长度猜） | 🔴 **可借真点**：我们 W47 TTS 有 provider，但**无口型同步**。PCM 包络驱动是现成方案 |
+| 情绪驱动 Live2D | 情绪标签驱动表情混合、待机、呼吸、说话手势 | ✅ 我们规矩 22 已有情绪→表情映射，同向 |
+| 模块化 bundles | 桌宠与 TTS 桥可独立开关 | ✅ 我们已是模块化，同向 |
+
+**判决**：**口型联动**是真点（记 backlog 候选，需评估 VoxCPM 权重体积与显存）。
+
+### `tequed232/DSH-L2D`（167★ · MIT）
+
+Live2D 行为运行时 + 参数所有权仲裁。
+
+| 机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| **参数所有权仲裁** | Agent 不直接操纵 Cubism 参数，走「语义行为 → 能力解析 → 动作队列 → 仲裁 → 渲染」 | ✅ 我们规矩 31 已是「参数读写只走索引」，同向且更严格（我们连 byId 都禁了） |
+| 动作队列与轨迹 | 连续动作排队执行 | 🟡 我们是即时态（情绪驱动），无队列层。鲸语（§21.7）同域，已记候选 |
+| 模型无关运行时 | 不绑死某个模型 | ✅ 我们 profiles/<m>.js 已是模型无关，同向 |
+
+**判决**：理念高度一致（参数仲裁 + 模型无关），无新增动作。
+
+### `Loping151/dsh-nekowhale-stickers`（182★ · Apache-2.0）
+
+大肥鱼表情包知识库（322 张 + MCP server）。
+
+| 机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| 表情包知识库 | 逐张标注场景/动作/梗，常驻上下文 60 token | 🟡 我们是 Live2D 不是表情包，但「结构化素材索引 + 低 token 常驻」思路可借 |
+| MCP server 形态 | 可被任意 chat bot 调用 | 🟡 我们 W29 只读 JSONL 联动，MCP 是反向通道，暂不展开 |
+
+**判决**：赛道不同（表情包 vs Live2D），归档即止。
+
+### `Yi-111-a/dsh-jingling`（52★ · MIT）
+
+鲸灵 + 可审阅记忆 + 权限隔离。
+
+| 机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| 可审阅记忆 | 只记用户确认过的，随时可改可忘 | ✅ 我们 W2 记忆日记本已有浏览/删，同向 |
+| 角色卡导入 | 只当文本读，绝不执行 | ✅ 我们 resolvePersona 已是纯文本，同向 |
+| **权限隔离** | 陪伴和工作分开：实际工作必须切到 standard 会话 | 🟡 我们是单机桌宠无多会话，但「陪伴不碰工作」理念与我们「桌宠不操作用户电脑」同向 |
+
+**判决**：理念同向，无新增动作。
+
+### `12we21/cute-fat-fish-pet`（35★ · MIT）
+
+蓝毛小女仆 + 看屏幕吐槽 + 离线语音识别。
+
+| 机制 | 原文要点 | 我们的落点 |
+|---|---|---|
+| **看屏幕吐槽** | 可选让桌宠看屏幕并评论 | 🔴 涉及屏幕捕获隐私，与我们「安静陪伴」定位有偏差，**不碰** |
+| 离线语音识别 | stt-worker | 🟡 我们 W47 TTS 有 provider，但 STT 是反向（听用户说话），暂不展开 |
+| 106 手绘动画 | 透明动画精灵图 | ✅ 我们 deepfish 用 Live2D，机制不同 |
+
+**判决**：看屏幕吐槽有隐私风险，不碰。
+
+## 26.3 许可有问题的（不碰）
+
+| 仓库 | 星 | 许可问题 |
+|---|---|---|
+| `momori777/Artemis` | 438★ | NOASSERTION，自定义许可（AI Girlfriend），非标准开源 |
+| `HuanLinOTO/dsh-plugin-pet-rs` | 24★ | **AGPL-3.0**（LICENSE 原文确认）→ 只借思想不搬码 |
+| `cyanfish-x/dsh-live2d-pets` | 33★ | **无 LICENSE** → 默认保留权利 |
+| `Yifffan/dsh-plugin-whale-pet` | 37★ | MIT code only，素材另许可（ASSETS-LICENSE.md）→ 代码可读素材不可 |
+| `phoiex/AAAAGENT` | 220★ | **Noncommercial only; attribution required** → 非商业许可，不碰 |
+
+## 26.4 本轮结论（按性价比）
+
+1. **碎碎念机制**（zhu1090093659/dsh-pet）——结构化事件 → 内心独白，
+   比 proactive 更轻更贴陪伴感。**中成本**，记 backlog 候选。
+2. **休眠模式**（AcidGr/dsh-web-whale-maid）——卸载渲染 + 切断事件，
+   比全屏静默更彻底。**低-中成本**，记 backlog 候选。
+3. **PCM 口型联动**（varsian/ghost）——TTS 播放时嘴型跟 RMS 包络。
+   **中-高成本**（需评估 VoxCPM 权重），记 backlog 候选。
+4. **成本统计面板**（PolinniZhong/dsh-personal-center）——token 用量 + 峰谷价。
+   **中成本**，记 backlog 候选。
+5. **好感度等级**（zhu1090093659/dsh-pet）——9 级成长体系。
+   **低-中成本**，可作 W13 增强。
+6. 其余（部署脚本 / 表情包知识库 / 权限隔离 / 看屏幕吐槽）——
+   赛道不同或隐私风险，归档即止。
+
+## 26.5 来源清单（全部经 api.github.com 核实，LICENSE 读原文第一行）
+
+```
+https://github.com/deepseek-ai/deepseek-harness                278K★ 本体
+https://github.com/awesome-dsh-plugin/awesome-dsh-plugin       24K★ 插件精选
+https://github.com/dsh-market/dsh-market                      11K★ 插件市场
+https://github.com/PolinniZhong/dsh-personal-center            115★ MIT · Token 用量/成本/全局指令/桌宠
+https://github.com/liyupi/dsh-kun-like-pet                    113★ MIT · 9 状态动画/任务完成音效
+https://github.com/louke6572/dsh-Dfy                            94★ MIT · 余额挂件/桌宠/QQ/B站/脱敏记忆
+https://github.com/Andersen216/dsh-whale-girl-live2d            94★ MIT · 鲸鱼娘桌宠/一键部署
+https://github.com/zhu1090093659/dsh-pet                        68★ Apache-2.0 · 多宠物注册表/好感度/碎碎念
+https://github.com/Yifffan/dsh-plugin-whale-pet                 37★ MIT code only · 鲸鱼伙伴
+https://github.com/12we21/cute-fat-fish-pet                     35★ MIT · 蓝毛小女仆/看屏幕吐槽
+https://github.com/cyanfish-x/dsh-live2d-pets                   33★ 无 LICENSE · Agent 状态镜像
+https://github.com/HuanLinOTO/dsh-plugin-pet-rs                  24★ AGPL-3.0 · Rust 桌宠
+https://github.com/tequed232/DSH-L2D                            167★ MIT · Live2D 行为运行时/参数仲裁
+https://github.com/Loping151/dsh-nekowhale-stickers             182★ Apache-2.0 · 表情包知识库/MCP
+https://github.com/varsian/ghost                                 52★ Apache-2.0 · VoxCPM TTS/口型联动
+https://github.com/Yi-111-a/dsh-jingling                          52★ MIT · 鲸灵/可审阅记忆/权限隔离
+https://github.com/AcidGr/dsh-web-whale-maid                     10★ MIT · 饱食度/休眠模式
+https://github.com/Zoria-Lind/dsh-dafeiyu                          9★ MIT · 大肥鱼/任务管理（已停维）
+https://github.com/meto-ventus/dsh-ventus-whale                    8★ MIT · 3D 鲸鱼
+https://github.com/yuxino/dsh-blue-whale-maid                      8★ MIT · 任务通知/费用估算
+https://github.com/eric-song-dev/dsh-ikun-pet                      11★ MIT · 进度条填充
+https://github.com/momori777/Artemis                              438★ 自定义许可 · 不碰
+https://github.com/phoiex/AAAAGENT                                220★ Noncommercial · 不碰
+```

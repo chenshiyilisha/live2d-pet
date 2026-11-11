@@ -184,6 +184,11 @@
 | W58 | **闲置边界触发 proactive**（2026-10-31 归档 §22.8）：主动冒泡从「定时轮询」改「闲置边界触发」。表外，proactive 增强 | qq-dsh-bridge（MIT） |
 | W59 | **deepfish 表情参数名按官方白名单纠正**（2026-10-31 归档 §23.2）：我们按 hiyori 口径找 `ParamEyeLSmile`（不存在）就判「没有微笑眼」，但 jingyu 的 `model_profile.py` 白名单里是 **`EyeSmile` / `MouthSmile_L` / `MouthSmile_R` / `BrowInnerUp` / `CheeckPuff` / `JawOpen`** —— 参数在，只是没 `Param` 前缀。改档案前先跑 `verify-deepfish [A]`（防物理输出）；改完补 [H] 段断言这 6 个 ID 真在 cdi3。小改动、高收益。🔴 **2026-10-31 已重新上线**（就是 DeepSeek 鲸鱼娘皮，用户改主意要它），所以这条不再是"改了看不见"：**现在改完肉眼可见**。建议优先排期 | jingyu-live2d-agent（无 LICENSE，只借事实） |
 | W60 | **遮罩溢出（mask count）**（2026-10-31）：deepfish 49 个遮罩 > Cubism 单 render texture 上限 36 → SDK 打 `not supported mask count : 13` 并把**所有**遮罩塌成一块整幅缓冲（`setupLayoutBounds` 错误分支）。实测**不是**「看不见」的原因（337 个未遮罩 drawable 正常出画），但换复杂动作/表情时可能显形。候选修法：patch `_clippingManager.setupLayoutBounds` 用 4×4 网格（64 容量）。🔴 **2026-10-31 重新上线后变成现役隐患**（模型已在菜单上、用户会切到）：20+ 表情换图时可能显形。建议**先观测**（切到 20+ 表情逐个看有没有破面）再决定要不要 patch SDK。✅ **2026-11-11 静态分析完成**（verify-w60.js 7 项通过：cdi3 无 Drawables 段、Parts=148、expressions=23、retired=true 当前不可观测）。真机观测脚本 observe-masks.js 已就位，**待 deepfish 上线后跑** | 本轮真机排查 |
+| W61 | **碎碎念（inner whispers）**（2026-11-11 归档 §26.2）：会话流式期间偶尔说内心独白，**由结构化结果触发**（test green / error / completion），**不引用模型原文**（无工具名/路径/模型文本），分类行 9s CD、结果行 5s CD、展示 TTL 8s。比 proactive 更轻更贴陪伴感。表外，proactive 增强 | zhu1090093659/dsh-pet（Apache-2.0） |
+| W62 | **休眠模式**（2026-11-11 归档 §26.2）：一键卸载渲染 DOM（零遮挡）+ 切断所有 LLM 事件 watcher + 毫秒级唤醒（不重载页面）。比全屏静默（规矩 17，降帧率）更彻底（零 GPU 占用）。表外，与全屏静默互补 | AcidGr/dsh-web-whale-maid（MIT） |
+| W63 | **PCM 口型联动**（2026-11-11 归档 §26.2）：TTS 播放时嘴型跟实际音频 RMS 包络（按实测延迟对齐，不是按文本长度猜）。需评估 VoxCPM 1.5 权重体积与显存（8G 显存可跑）。表外，W47 TTS 增强 | varsian/ghost（Apache-2.0） |
+| W64 | **成本统计面板**（2026-11-11 归档 §26.2）：今日/累计 token、会话数、工具调用、热力图、per-provider 明细、峰谷价 + 缓存命中率。表外，W45 换源增强 | PolinniZhong/dsh-personal-center（MIT） |
+| W65 | **好感度等级**（2026-11-11 归档 §26.2）：9 级成长体系（幼鲸→伙伴→挚友→…→鲸生共渡），+1/轮，喂食 +5。可作 W13 摸头增强（现在只有生气档，无成长概念）。表外，低-中成本 | zhu1090093659/dsh-pet（Apache-2.0） |
 
 **网上已有、我们已有**：番茄 / 提醒 / 开机自启 / 锁屏静默 / 摸头 / 全屏闸门 / 低电降帧 / 工作状态；甩抛/摸头交互形态与 Coopanion 同类。  
 **不抄主线**：亲密度养成、多宠交友、径向技能轮当主 UI、内置捆小模型、会议 Join、打字蒸汽特效；**Computer use 控键鼠当产品主线**（与安静搭子冲突）。

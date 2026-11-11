@@ -196,7 +196,18 @@ const DEFAULT_CONFIG = {
      * classic = 当前默认（白色圆角 + 柔投影）；其余四套是不同观感。
      * 出处：dsh-pet 已有 5 套皮肤可切；我们也做多套 + 下拉切换。
      * ⚠️ 纯外观开关，不占资源、不打扰；进配置 + 托盘可调。 */
-    bubbleSkin: 'classic'
+    bubbleSkin: 'classic',
+    /* W61：碎碎念（内心独白）。对话流式期间由结构化结果触发（success /
+     * error / thinking / completion），不引用模型原文，展示在角色脚下小字。
+     * 出处：zhu1090093659/dsh-pet（Apache-2.0）碎碎念机制。
+     * 比 proactive 更轻更贴陪伴感。⚠️ 默认开（纯陪伴感，不占资源、不抢气泡）；
+     * 关掉则完全不出碎碎念。 */
+    whisper: true,
+    /* W62：休眠模式。一键卸载渲染（零 GPU）+ 切断事件处理 + 毫秒级唤醒。
+     * 比全屏静默（规矩 17，降帧率）更彻底。
+     * 出处：AcidGr/dsh-web-whale-maid（MIT）休眠模式。
+     * ⚠️ 默认关（占资源类功能，规矩 14）。 */
+    dormancy: false
   },
   // 语音朗读。默认关（会出声，见上面的默认值取舍）：想听再在托盘「功能开关」里开。
   tts: {

@@ -2808,6 +2808,8 @@ function buildMenuTemplate() {
     flag('motion', 'returnOnActivity', '有人操作时回到原位'),
     flag('appearance', 'timeOfDayIdle', '时段闲置表情'),
     flag('chat', 'floatBubble', '对话气泡悬浮在头顶'),
+    flag('chat', 'whisper', '碎碎念（内心独白）'),
+    flag('chat', 'dormancy', '休眠模式（零渲染）', false),
     flag('interaction', 'rightMenu', '在角色身上右键出菜单'),
     touchModeItem,
     flag('interaction', 'headPat', '按住头顶会一直蹭'),

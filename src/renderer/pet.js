@@ -19,6 +19,9 @@ import { abortRecording, configureRecorder } from './recorder.js';
 import { rollFactors } from './jitter.js';
 import { pickIdleEmote } from './idle-tod.js';
 import { pokeThresholds, patThresholds } from './touch-mode.js';
+import {
+  shouldShow, pickWhisper, markShown, renderWhisper, hideWhisper, resetWhisper, TTL_MS
+} from './whisper.js';
 
 // 渲染进程崩溃时默认什么线索都拿不到，先把未捕获异常转发出来
 window.addEventListener('error', (e) => {
@@ -69,6 +72,10 @@ const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const statusEl = document.getElementById('status');
 const statsEl = document.getElementById('stats');
+const whisperEl = document.getElementById('whisper');
+
+/* W61 碎碎念：展示计时器（TTL 到期自动隐藏）。 */
+let whisperTimer = null;
 
 /* ============================================================
  *  运行时状态
@@ -3158,6 +3165,8 @@ window.pet?.onConfigChanged?.(async () => {
     /* W41：气泡皮肤（classic/rounded/flat/dark/minimal）。
      * 主窗 #bubble 通过 body[data-bubble-skin] 切换；浮动气泡窗由 bubble.js 下发。 */
     applyBubbleSkin(cfg?.chat?.bubbleSkin);
+    /* W62：休眠模式（dormancy）。开关切换时停/启 ticker + 收动作。 */
+    applyDormancy();
     /* X1：appearance.model 变了 → 热换档案 + 重挂（署名 toast 由主进程发）。 */
     const nextModel = resolveModelName(cfg?.appearance?.model);
     if (nextModel !== prevModel) {
@@ -3757,6 +3766,8 @@ async function sendMessage() {
   history.push({ role: 'assistant', content: replyBuffer });
   saveHistory();
   flushSpeech();        // 尾巴念掉；正文已经边收边念过（见 feedSpeech）
+  /* W61 碎碎念：流结束（completion）触发一次内心独白（5s CD）。 */
+  triggerWhisperCompletion();
   /* 回复完成 = 冷却期重新起算（覆盖开口时那个时间戳 —— 口径是
    * "最后一次对话交互"，这轮聊完了从这里起算更准）。 */
   lastChatAt = Date.now();
@@ -3898,6 +3909,50 @@ function applyFrameCap() {
   try { PIXI.Ticker.shared.maxFPS = fps; } catch { /* ignore */ }
 }
 
+/* ============================================================
+ *  W62 休眠模式（dormancy）
+ * ==========================================================
+ *
+ *  比全屏静默更彻底：全屏静默只是降帧率（12fps），休眠是**完全停掉
+ *  渲染循环**（ticker.stop()）+ 切断事件处理 + 毫秒级唤醒（不重载页面）。
+ *
+ *  出处：AcidGr/dsh-web-whale-maid（MIT）休眠模式。
+ *
+ *  ⚠️ 与全屏静默（规矩 17）的区别：
+ *    - 全屏静默：降帧率到 12fps，画面还在动（呼吸、眨眼），主进程停推数据
+ *    - 休眠模式：ticker 完全停，画面冻结，渲染层事件处理也停
+ *    - 两者互补：全屏静默是自动判定（打游戏/全屏），休眠是用户主动开关
+ *
+ *  ⚠️ 唤醒：ticker.start() 后下一帧自动恢复，不需要重载页面。
+ *    状态机：dormant（休眠中）↔ active（正常）。
+ * ========================================================== */
+let dormant = false;
+
+function applyDormancy() {
+  const want = cfg?.chat?.dormancy === true;
+  if (want === dormant) return;
+  if (want) {
+    /* 进入休眠：停 ticker + 停朗读 + 收动作 */
+    try { app?.ticker?.stop(); } catch { /* ignore */ }
+    try { PIXI.Ticker.shared.stop(); } catch { /* ignore */ }
+    stopSpeaking();
+    stopEventMotions();
+    patAbort();
+    clearTimeout(idleTimer);
+    clearTimeout(whisperTimer);
+    dormant = true;
+    console.log('[pet] dormancy on');
+  } else {
+    /* 唤醒：重启 ticker + 恢复帧率上限 */
+    try { app?.ticker?.start(); } catch { /* ignore */ }
+    try { PIXI.Ticker.shared.start(); } catch { /* ignore */ }
+    dormant = false;
+    applyFrameCap();
+    console.log('[pet] dormancy off');
+  }
+}
+
+
 /* ---- Q 弹挤压（点击 / 落地）----
  * 只动 holder.scale 的瞬时倍率，layout() 的基准 s 不动；动画结束归 1。
  * prefers-reduced-motion 或开关关 → 直接跳过（dsh-pet 无障碍同款）。 */
@@ -3974,7 +4029,47 @@ window.pet?.on?.('pet:work-state', (d) => {
     stopEventMotions();
     if (!busy && state !== State.SPEAKING) setState(State.IDLE);
   }
+  /* W61 碎碎念：结构化结果触发内心独白。不引用模型原文，比 proactive 更轻。 */
+  triggerWhisper(phase);
 });
+
+/* W61 碎碎念触发器。
+ * ⚠️ 只在对话流程里触发（thinking/working/success/error/completion），
+ *    不碰 idle 以外的自由生成 —— 避免太吵。
+ * ⚠️ 展示在角色脚下小字，不抢气泡。TTL 到期自动隐藏。 */
+function triggerWhisper(phase) {
+  if (cfg?.chat?.whisper === false) return;
+  if (!whisperEl) return;
+  const now = Date.now();
+  /* 映射工作状态 → 碎碎念类别。completion 由流结束触发（见 endStream）。 */
+  const cat = phase === 'success' ? 'success'
+    : phase === 'error' ? 'error'
+    : phase === 'thinking' ? 'thinking'
+    : phase === 'working' ? 'thinking'
+    : null;
+  if (!cat) return;
+  if (!shouldShow(cat, now)) return;
+  const text = pickWhisper(cat);
+  if (!text) return;
+  markShown(cat, now);
+  renderWhisper(whisperEl, text);
+  clearTimeout(whisperTimer);
+  whisperTimer = setTimeout(() => hideWhisper(whisperEl), TTL_MS);
+}
+
+/* 流结束（completion）也触发一次碎碎念（5s CD，比分类行短）。 */
+function triggerWhisperCompletion() {
+  if (cfg?.chat?.whisper === false) return;
+  if (!whisperEl) return;
+  const now = Date.now();
+  if (!shouldShow('completion', now)) return;
+  const text = pickWhisper('completion');
+  if (!text) return;
+  markShown('completion', now);
+  renderWhisper(whisperEl, text);
+  clearTimeout(whisperTimer);
+  whisperTimer = setTimeout(() => hideWhisper(whisperEl), TTL_MS);
+}
 
 /* X4 单摆 / 翻转 —— 改 holder 的 rotation / scale.x，不碰 layout 基准。 */
 function applyHolderPose() {

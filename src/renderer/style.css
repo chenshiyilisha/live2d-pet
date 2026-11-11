@@ -250,6 +250,32 @@ body[data-bubble-skin="minimal"] #bubble::after {
 }
 #status.show { opacity: 1; }
 
+/* ---------------- 碎碎念（W61）：角色脚下小字内心独白 ----------------
+ *
+ * 比气泡小一号、斜体、半透明，不抢气泡也不挡人物。
+ * 只在结构化结果触发时短暂出现（TTL 8s），平时完全看不见。
+ * 位置在左下角（与 #status 错开，避免撞位）。 */
+#whisper {
+  position: absolute;
+  right: 14px;
+  bottom: calc(var(--stats-h, 0px) + 6px);
+  font-size: 11px;
+  font-style: italic;
+  color: #9ca3af;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 2px 7px;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+  max-width: calc(100% - 28px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#whisper.show { opacity: 1; }
+
 /* ---------------- 系统状态：窗口底部的"底座"（可选，默认关） ----------------
  *
  * 压在窗口最下沿、横向铺开，像底座上的铭牌。

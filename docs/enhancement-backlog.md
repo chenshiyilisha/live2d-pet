@@ -162,7 +162,7 @@
 | W38 | ~~气泡**淡出动画** + 入场加 `scale` 展开~~ **✅ 2026-10-28**：出场 `bubble:fade`→`.fading` 160ms 后真 hide（与入场对称）；入场由主进程 `bubble:show` 驱动（常驻动画只有第一句有）+ `scale .96→1`；实测淡出中 alpha 132/255 | 现行为不对称；OpenAlice 留白正是为 scale 动画准备的 |
 | W39 | ~~气泡描边**用 drop-shadow 不用 border** + 两层阴影~~ **✅ 2026-10-28**：两层阴影（1/2 + 3/8）+ 描边 `chat.floatBubbleOutline`（**默认关**，用户曾两轮减描边）；强度实测定 1px/0.65，尾巴根部无内部边线 | dsh-pet 气泡二次修复「根因一」；**直接加 border 会重现该 bug** |
 | W40 | ~~气泡**上方弧线三候选** + 回退顺序 + 零相交优先 + 尾巴随位转向~~ **✅ 2026-10-28**：`pickAnchor()` 纯函数；**常规恒 top**（正上方最自然），只在 ① top 被屏幕边 clamp ② 头顶上方放不下退回窗内 时才用 left/right（inside 时偏一侧 = 盖肩膀不是盖脸）；可用判据 =「想要的 x 不被 clamp」（不需要人物宽度实量）；尾巴回正上限改随宽度算 `w/2−26` | tiny-roommate「allowed family = top-left/top/top-right，side 不参与」；dsh-pet 安全布局器「优先零相交」 |
-| W41 | 多套**气泡皮肤**可切换（外观下拉） | dsh-pet 已有 5 套；Live2DPet `selectBubbleImage`。**最大项，最后做** |
+| W41 | 多套**气泡皮肤**可切换（外观下拉） | dsh-pet 已有 5 套；Live2DPet `selectBubbleImage`。**最大项，最后做**。✅ **2026-11-11 完成**：5 套皮肤（classic/rounded/flat/dark/minimal），托盘「外观与形象 → 气泡皮肤」单选切换；主窗 `#bubble` 走 `body[data-bubble-skin]` CSS 变量，浮动气泡窗走 `bubble.html` 同款皮肤。verify-w41.js 43 项全过（含 7 条负对照：非法皮肤值回落 classic）。回归 verify-config-defaults/verify-bubble/verify-card-menu/verify-proactive 全绿 |
 | W42 | ~~气泡**情绪角标**（方案 A）~~ **✅ 2026-10-28**：8 情绪 → 小图形挂气泡右上角；信号走 `emitChatEmotion` 唯一出口双发（规矩 27）；**跟标签不跟衰减**（否则角标自己变淡像坏了）；calm 不挂牌、认不出的收牌；角标**绝对定位不占布局**（实测有/无牌 72px = 72px，否则打乱 A3 与高度上报）。图形取 **Lucide（ISC）**现成路径，**不用 emoji 字符**（字形随系统变 + llm.js 清洗器本来就在丢 emoji） | dsh-dfy 原话「爱心/怒气/问号…均为**视觉特效，不是文字占位**」；位置依 **Material Badge** 规范（默认右上角 + 允许压宿主边） |
 
 | W43 | ~~动作池 pick 纯函数~~ **✅**：`pickers.js`（`pick`/`pickWeighted`/`rollKind`/`pickWeightedCategory`；排除后空退回原池；权重 0 不归一化）。`animations{}` 配置化仍待素材/视频线 | dsh-pet pickers；§18.2 |
@@ -170,13 +170,7 @@
 | W45 | ✅ 已核验通过（2026-10-30）—— 项目无 HTMLMediaElement，四条在**音频播放路径**上逐条核到等价实现且安全：`onended` + 兜底定时器（非 loadeddata）· `currentSrc===src` 单槽防残留 handler · `waiting.delete` + `cleanup` 全路径释放 pending · `ttsGen` 世代号丢弃迟到结果；verify-w45.js 32 条断言固化 | 同上 `animation.ts` / `asset-loader.ts`；③ 与规矩 24「关掉的入口不许点了没反应」同族 |
 | W46 | **素材链存档为「第二交付路线」**（不换产品线）：20 段核心动作（idle / turn / drag / click×5 / 工作状态×6）≈10MB 就能撑起一个可用形象；管线 = AI 绿幕视频 → 抠像（**手工**，自动 HSV 残边）→ 归一化 → 640×360 webm(VP9-alpha) → Safari 另出 HEVC-alpha `.mov` | `custom-model-plan.md` §11 降档路线；🔴 **许可**：代码 MIT、**素材「禁止商用」**、形象 CC BY-NC-SA 4.0 → **只借结构，一行素材不能进包**（规矩 29） |
 | W47 | ✅ 已完成（2026-10-30）—— `src/main/tts-providers.js` 预设（gsv 网关默认 + 常见端点）、`ttsProviderById` / `ttsIsUsable` / `ttsToPatch` / `ttsTest`；`synthWav` 第三参分流：openai → `POST {baseUrl}/audio/speech`（`response_format:'wav'`），失败/超时/无 key **静默回落 WinRT** 并记一行日志（绝不弹窗变哑巴）；`gsv` provider 的 model 为空时自动 `GET /v1/models` 拉取；文本超 1500 字截断；渲染层 `engineOf()` 不用改（波形路径同 winrt）；托盘「功能开关→语音朗读→语音接入」面板（预设 + 一键测试，照 llm-providers 结构）；`verify-w47.js` 39 条断言（含负对照：分流判断改坏 → C1+C2 真红） | 同上 `InariNGT-Ofiicial/gsv-rvc-voice-bridge` MIT；网关无认证、只听 127.0.0.1、串行合成（防并发抢 GPU）；`maxChars` 是**文本**限制不是音频时长限制 |
-| W48 | **proactive 加「决策 AI」**（借 group_chat_plus 的**决策 AI / 回复 AI 分离**，
-  ⚠️ 该仓 **AGPL-3.0 → 只借思想自己写，不复制代码**）：判断"要不要插嘴"走
-  **独立的轻量 LLM 调用**，不拼完整人格 + 全部记忆 + 全部历史 —— 把最贵的资源
-  花在会被丢弃的判断上是浪费。现在是三道规则闸（quietHours / maxUnanswered /
-  media），决策 AI 作为**可选增强**叠在闸门之后 |
-  `Him666233/astrbot_plugin_group_chat_plus` 191★ AGPL-3.0；另两个可借机制：
-  GWW（按**用户粒度**隔离等待窗口，不劫持他人消息）· 频率调整 AI（按活跃度自适应概率）|
+| W48 | ✅ **已完成**（2026-11-11）：proactive 决策 AI。`decision-ai.js` 独立轻量 LLM 调用（stall 4s / total 8s，比主对话短）判断"该不该开口"，不拼完整人设 + 全部记忆 + 全部历史。`buildDecisionPrompt` 只带最近 4 条对话 + 闲置时长 + 时间 + 边缘线索 + 候选话题。`parseDecision` 优先 JSON、关键词兜底、fail-open。开关 `proactive.decisionAi` 默认关 + `proactive.decisionModel` 可选便宜模型。挂点：info-gain + rhythm 闸之后、bookFirst 之前。回归 `verify-w48.js` 50 项全绿 | `Him666233/astrbot_plugin_group_chat_plus` 191★ AGPL-3.0（决策 AI / 回复 AI 分离，只借思想） |
 
 | W49 | ✅ **已完成**（2026-10-31，提交 `d05c15e`）：Mnemosyne「已被取代的证据」检索维度。memory.js `factRelation`（公共前缀+公共后缀判据）· `markSuperseded/clearSuperseded/isSuperseded` · upsert 区分 expand（合并）/replace（留档不删）· recall/settle 过滤留档 · `listFacts({includeSuperseded})` · refreshFirstEncounters 候选池排除留档 · replace 守卫去掉 `!isFirstEncounter`（锚点不拦换值留档）。回归 `verify-w49.js` 37 项全绿 | dsh-mnemosyne（AGPL 只借思想） |
 | W50 | ✅ **已完成**（2026-10-31，提交 `d7abe42`）：心境 → 采样温度。`moodTemperature(axes)` 纯函数（高情绪 0.9 / 低情绪 0.7 / 低活力 0.7 / 中段 0.8）· `chatStream` 经 `extraBody.temperature` 注入 · 开关 `chat.moodTemperature` 默认开。回归 `verify-w50.js` 18 项全绿 | dsh-mood（MIT） |
@@ -189,7 +183,7 @@
 | W57 | **决策级回滚标记**（2026-10-31 归档 §22.3）：accepted/rejected 状态标记「上次这个方案被回滚了，别再推荐」——决策级，与 W49 事实级互补。中成本 | deja-vu（MIT） |
 | W58 | **闲置边界触发 proactive**（2026-10-31 归档 §22.8）：主动冒泡从「定时轮询」改「闲置边界触发」。表外，proactive 增强 | qq-dsh-bridge（MIT） |
 | W59 | **deepfish 表情参数名按官方白名单纠正**（2026-10-31 归档 §23.2）：我们按 hiyori 口径找 `ParamEyeLSmile`（不存在）就判「没有微笑眼」，但 jingyu 的 `model_profile.py` 白名单里是 **`EyeSmile` / `MouthSmile_L` / `MouthSmile_R` / `BrowInnerUp` / `CheeckPuff` / `JawOpen`** —— 参数在，只是没 `Param` 前缀。改档案前先跑 `verify-deepfish [A]`（防物理输出）；改完补 [H] 段断言这 6 个 ID 真在 cdi3。小改动、高收益。🔴 **2026-10-31 已重新上线**（就是 DeepSeek 鲸鱼娘皮，用户改主意要它），所以这条不再是"改了看不见"：**现在改完肉眼可见**。建议优先排期 | jingyu-live2d-agent（无 LICENSE，只借事实） |
-| W60 | **遮罩溢出（mask count）**（2026-10-31）：deepfish 49 个遮罩 > Cubism 单 render texture 上限 36 → SDK 打 `not supported mask count : 13` 并把**所有**遮罩塌成一块整幅缓冲（`setupLayoutBounds` 错误分支）。实测**不是**「看不见」的原因（337 个未遮罩 drawable 正常出画），但换复杂动作/表情时可能显形。候选修法：patch `_clippingManager.setupLayoutBounds` 用 4×4 网格（64 容量）。🔴 **2026-10-31 重新上线后变成现役隐患**（模型已在菜单上、用户会切到）：20+ 表情换图时可能显形。建议**先观测**（切到 20+ 表情逐个看有没有破面）再决定要不要 patch SDK | 本轮真机排查 |
+| W60 | **遮罩溢出（mask count）**（2026-10-31）：deepfish 49 个遮罩 > Cubism 单 render texture 上限 36 → SDK 打 `not supported mask count : 13` 并把**所有**遮罩塌成一块整幅缓冲（`setupLayoutBounds` 错误分支）。实测**不是**「看不见」的原因（337 个未遮罩 drawable 正常出画），但换复杂动作/表情时可能显形。候选修法：patch `_clippingManager.setupLayoutBounds` 用 4×4 网格（64 容量）。🔴 **2026-10-31 重新上线后变成现役隐患**（模型已在菜单上、用户会切到）：20+ 表情换图时可能显形。建议**先观测**（切到 20+ 表情逐个看有没有破面）再决定要不要 patch SDK。✅ **2026-11-11 静态分析完成**（verify-w60.js 7 项通过：cdi3 无 Drawables 段、Parts=148、expressions=23、retired=true 当前不可观测）。真机观测脚本 observe-masks.js 已就位，**待 deepfish 上线后跑** | 本轮真机排查 |
 
 **网上已有、我们已有**：番茄 / 提醒 / 开机自启 / 锁屏静默 / 摸头 / 全屏闸门 / 低电降帧 / 工作状态；甩抛/摸头交互形态与 Coopanion 同类。  
 **不抄主线**：亲密度养成、多宠交友、径向技能轮当主 UI、内置捆小模型、会议 Join、打字蒸汽特效；**Computer use 控键鼠当产品主线**（与安静搭子冲突）。

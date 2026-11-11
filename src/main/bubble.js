@@ -177,6 +177,14 @@ const asideOn = () => chatOpt('floatBubbleAside', true);
 const caretOn = () => chatOpt('floatBubbleCaret', true);
 const readTimeOn = () => chatOpt('floatBubbleReadTime', true);
 const moodBadgeOn = () => chatOpt('floatBubbleMoodBadge', true);
+const skinOn = () => {
+  try {
+    const v = require('./config').loadConfig().chat?.bubbleSkin;
+    return ['classic', 'rounded', 'flat', 'dark', 'minimal'].includes(v) ? v : 'classic';
+  } catch {
+    return 'classic';
+  }
+};
 
 /* OCEAN·A 放大/缩小读气泡时间（P3）。中性 1。refreshConfig / 每次算时读配置。 */
 function bubbleReadMul() {
@@ -484,7 +492,7 @@ function reveal(w) {
   w.showInactive();          // 不抢焦点
   try {
     w.webContents.send('bubble:show', {
-      outline: outlineOn(), caret: caretOn(), badge: moodBadgeOn()
+      outline: outlineOn(), caret: caretOn(), badge: moodBadgeOn(), skin: skinOn()
     });
     /* 情绪跟上（showFull / begin 都把 curEmotion 清了，正常是 null；
      * 万一情绪先到、窗口后建，这里补发一次，角标不丢）。 */

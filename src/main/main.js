@@ -115,6 +115,7 @@ const {
   configureLedger, bookDelivery, settleDelivery, previewProactive
 } = require('./proactive-ledger');
 const topicStream = require('./topic-stream');
+const decisionAI = require('./decision-ai');
 const { cardToPersonaDraft } = require('./character-card');
 const { checkPersonaOutput, normalizeLevel: guardLevel } = require('./persona-guard');
 const { distillPersonaParts, PROMPT_FIELDS: DISTILL_FIELDS } = require('./persona-distill');
@@ -2671,8 +2672,40 @@ function appearanceSubmenu(cfg) {
           } catch { /* ignore */ }
         }
       }))
-    }] : [])
+    }] : []),
+    /* W41：气泡皮肤可切换（外观下拉）。 */
+    {
+      label: `气泡皮肤（${skinLabel(cfg.chat?.bubbleSkin)})`,
+      submenu: ['classic', 'rounded', 'flat', 'dark', 'minimal'].map((sk) => ({
+        label: skinLabel(sk),
+        type: 'radio',
+        checked: cfg.chat?.bubbleSkin === sk,
+        click: () => { setBubbleSkin(sk); }
+      }))
+    }
   ];
+}
+
+/* W41：气泡皮肤标签（中英对照，给用户看的）。 */
+function skinLabel(sk) {
+  const map = {
+    classic: '经典（白圆角）',
+    rounded: '圆润（大圆角）',
+    flat: '扁平（无投影）',
+    dark: '深色',
+    minimal: '极简（虚线框）'
+  };
+  return map[sk] || '经典';
+}
+
+/* W41：切换气泡皮肤。落盘 + 通知渲染层 + 气泡窗。 */
+function setBubbleSkin(sk) {
+  if (!['classic', 'rounded', 'flat', 'dark', 'minimal'].includes(sk)) return;
+  patchConfig('chat', { bubbleSkin: sk });
+  /* 通知渲染层（主窗 #bubble 皮肤） */
+  try { mainWindow?.webContents.send('chat:bubble-skin', sk); } catch { /* ignore */ }
+  /* 通知气泡窗（浮动气泡皮肤）—— bubble.js 下次 reveal 时会读配置 */
+  toast(`气泡皮肤：${skinLabel(sk)}`);
 }
 
 function buildMenuTemplate() {
@@ -2891,6 +2924,9 @@ function buildMenuTemplate() {
     flag('proactive', 'enabled', '主动搭话'),
     flag('proactive', 'edgeCues', '边缘线索（电量/CPU/切应用）', false),
     flag('proactive', 'topicStream', '主题流（刷新兴趣话题）', false),
+    flag('proactive', 'rollback', '决策回滚（沉默的话题不再推荐）', false),
+    flag('proactive', 'idleBoundary', '闲置边界触发（离开键鼠才冒泡）', false),
+    flag('proactive', 'decisionAi', '决策 AI（判断该不该开口）', false),
     flag('chat', 'showThink', '内心 OS（[think:]）', true),
     {
       label: `人设护栏（${guardLevel(cfg.chat?.personaGuard)}）`,
@@ -3558,7 +3594,11 @@ function memoryLine(messages) {
     injectMax: cfg.memory?.injectMax,
     forceExpand: false
   });
-  return memory.formatMemoryLine(facts, cfg.memory?.injectChars);
+  /* W56：分层摘要开关默认开。开 → 先看 L0 一句话摘要再读 L2 详情；
+   * 关 → 原 formatMemoryLine（零侵入）。 */
+  if (!isOn('memory', 'summary')) return memory.formatMemoryLine(facts, cfg.memory?.injectChars);
+  const store = memory.ensureSummary(memory.loadStore());
+  return memory.formatMemoryLayered(facts, store, cfg.memory?.injectChars);
 }
 
 /* 回合结束后异步记一笔（不挡回复）。启发式必跑；有 key 且开着才 LLM 补抽。 */
@@ -4922,6 +4962,33 @@ function registerIpc() {
       return { ok: true, silent: true, skipped: 'rhythm-off-hours', reason: 'rhythm-off-hours', head: 'none' };
     }
 
+    /* W48：决策 AI —— 规则闸之后的可选增强。用一次独立的轻量 LLM 调用
+     * 判断"现在该不该开口"，不拼完整人设 + 全部记忆 + 全部历史。
+     * fail-open：调用失败 / 超时 / 解析失败一律放行（speak=true），
+     * 决策 AI 是增强不是闸门，挂了不该把 proactive 弄哑。 */
+    if (cfg.proactive?.decisionAi === true) {
+      const topics = (cfg.proactive?.topicStream === true)
+        ? topicStream.getTopics().map((t) => t.text)
+        : [];
+      const decision = await decisionAI.decideSpeak({
+        history: past,
+        idleMinutes: Number(c.idleMinutes),
+        edgeHint: edge.hint,
+        moodLine: moodEngine.promptLine(),
+        fgHint,
+        topics,
+        llm: {
+          baseUrl: cfg.llm?.baseUrl,
+          apiKey: cfg.llm?.apiKey,
+          model: cfg.proactive?.decisionModel || cfg.llm?.model
+        }
+      });
+      if (!decision.speak) {
+        console.log('[chat] proactive skip（decision-ai: ' + decision.reason + '）');
+        return { ok: true, silent: true, skipped: decision.reason, reason: decision.reason, head: gain.head };
+      }
+    }
+
     /* W26：先记账再生成（pending → delivered / interrupted / silent）。 */
     let book = null;
     if (cfg.proactive?.bookFirst !== false) {
@@ -4959,6 +5026,13 @@ function registerIpc() {
          * 也不记"没被搭理"（她根本没开口）。 */
         bubble.endStream();
         if (book) settleDelivery(book.id, 'silent', { reason: gain.reason });
+        /* W57：决策级回滚 —— 她判定沉默，等于对本轮候选主题投了否决票。
+         * 把这些话题标记"已回滚"，下次刷新不再推荐（rollback 开关开着才记）。 */
+        if (loadConfig().proactive?.rollback === true) {
+          const live = topicStream.getTopics();
+          for (const t of live) topicStream.markRejected(t.text);
+          if (live.length) console.log('[topic] silent → rollback', JSON.stringify(live.map((t) => t.text)));
+        }
         console.log('[chat] proactive silent（她选择这会儿不说）', gain.reason);
         return { ok: true, silent: true, reason: gain.reason, head: gain.head };
       }
@@ -5233,6 +5307,8 @@ if (!gotLock) {
 
     configureLedger(app.getPath('userData'));  // W26 主动账本
     configureTopicStream(app.getPath('userData'));  // W55 主题流台账
+    /* W57：rollback 开关从配置读（startTopicStream 每次 tick 过滤被回滚主题）。 */
+    const rollbackOn = loadConfig().proactive?.rollback === true;
     topicStream.startTopicStream({
       /* 记忆是活的，每轮现取（listFacts 已过滤墓碑/留档）。 */
       listFacts: () => memory.listFacts(),
@@ -5242,6 +5318,7 @@ if (!gotLock) {
           return Array.isArray(arr) ? arr.slice(-20) : [];
         } catch { return []; }
       },
+      rollback: rollbackOn,
       onTick: (next) => {
         /* 诊断用：主题刷新了才留一行，没变不刷屏。 */
         if (next.length) console.log('[topic] refresh', JSON.stringify(next.map((t) => t.text)));

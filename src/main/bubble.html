@@ -93,6 +93,46 @@
     border-radius: 0 0 2px 0;   /* 旋转后朝下的那个角，微微收圆 */
     transform: rotate(45deg);
   }
+  /* ---- 气泡皮肤（W41）----
+   * 通过 body[data-bubble-skin="xxx"] 切换。与 style.css 里主窗 #bubble
+   * 共用同一套皮肤名，改皮肤时两边必须同步改（规矩 9）。 */
+  body[data-bubble-skin="rounded"] #shell {
+    border-radius: 22px;
+  }
+  body[data-bubble-skin="flat"] #shell {
+    border-radius: 4px;
+    border: 1px solid #c8cdd6;
+    background: #fafafc;
+  }
+  body[data-bubble-skin="flat"] #tail {
+    background: #fafafc;
+  }
+  body[data-bubble-skin="dark"] #shell {
+    background: #24262c;
+    border: 1px solid #4a4d56;
+    color: #e0e2e8;
+  }
+  body[data-bubble-skin="dark"] #tail {
+    background: #24262c;
+  }
+  body[data-bubble-skin="dark"] #think {
+    color: #8a8c94;
+    border-bottom-color: #4a4d56;
+  }
+  body[data-bubble-skin="dark"] #wrap {
+    filter:
+      drop-shadow(0 1px 2px rgba(0, 0, 0, 0.30))
+      drop-shadow(0 3px 8px rgba(0, 0, 0, 0.50));
+  }
+  body[data-bubble-skin="minimal"] #shell {
+    border-radius: 10px;
+    border: 1px dashed #c0c4cc;
+    background: transparent;
+  }
+  body[data-bubble-skin="minimal"] #tail {
+    background: transparent;
+    border: 1px dashed #c0c4cc;
+  }
   /* 等待首字：呼吸的省略号（与主窗气泡同一套动画节奏） */
   #shell.waiting::after {
     content: "…";
@@ -253,6 +293,9 @@
     document.body.classList.toggle('outline', !!s.outline);
     document.body.classList.toggle('caret', !!s.caret);
     document.body.classList.toggle('badge', !!s.badge);
+    /* W41：气泡皮肤（classic/rounded/flat/dark/minimal） */
+    const skin = ['classic', 'rounded', 'flat', 'dark', 'minimal'].includes(s.skin) ? s.skin : 'classic';
+    document.body.setAttribute('data-bubble-skin', skin);
     setPhase('pop');
   });
   /* 情绪：跟**标签**走，不跟脸上的强度走（衰减回 calm 时角标不该自己变淡消失）。

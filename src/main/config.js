@@ -191,7 +191,12 @@ const DEFAULT_CONFIG = {
     /* 输入框闲置自动收起（秒）：点开对话框后这么久没打字 / 没发消息就 hideUI。
      * 治"聊完一嘴输入条一直挂着"。0 = 不自动收（只能 Esc / 再点她之外的路径关）。
      * ⚠️ 参数型，不进托盘（规矩 5）。下限由渲染层钳到 ≥15，防手滑写成 1 秒乱闪。 */
-    composerIdleSec: 120
+    composerIdleSec: 120,
+    /* W41：气泡皮肤可切换。取值：classic / rounded / flat / dark / minimal。
+     * classic = 当前默认（白色圆角 + 柔投影）；其余四套是不同观感。
+     * 出处：dsh-pet 已有 5 套皮肤可切；我们也做多套 + 下拉切换。
+     * ⚠️ 纯外观开关，不占资源、不打扰；进配置 + 托盘可调。 */
+    bubbleSkin: 'classic'
   },
   // 语音朗读。默认关（会出声，见上面的默认值取舍）：想听再在托盘「功能开关」里开。
   tts: {
@@ -247,8 +252,30 @@ const DEFAULT_CONFIG = {
      * 主动搭话本身默认关，这个增强默认也关；托盘有勾选。
      * 出处：surfcore-life / group_chat_plus 的"兴趣刷新"分层思想。 */
     topicStream: false,
+    /* W57：决策级回滚标记 —— 模型判定沉默（[silent]）时，把本轮候选主题
+     * 标记为"已回滚"，下次刷新不再推荐。借 deja-vu accepted/rejected 思想。
+     * 依赖 topicStream，默认也关；托盘有勾选。 */
+    rollback: false,
     /* W26：先记账再生成（投递 / 打断可审计）。默认开：只写本地 JSONL，不打扰。 */
-    bookFirst: true
+    bookFirst: true,
+    /* W58：闲置边界触发 —— 主动冒泡从"距上次交互的墙钟计时"改为
+     * "系统级闲置（用户真没碰键鼠）跨过 idleMinutes 才触发"。
+     * 现状问题：用户聊完天后忙别的（打字/点别的窗口），8 分钟后她
+     * 照常冒泡 = 打扰；边界口径下只有用户真离开键鼠才冒泡。
+     * 出处：qq-dsh-bridge 的"闲置边界压缩"（MIT）。表外 proactive 增强，
+     * 默认关；开后渲染层 pokeIdleTimer 不排墙钟定时器，由主进程
+     * motion.js 的 idleTick 检测闲置跨阈值后推 pet:proactive-boundary。 */
+    idleBoundary: false,
+    /* W48：决策 AI —— 规则闸（quietHours / maxUnanswered / media）之后的
+     * 可选增强：用一次独立的轻量 LLM 调用判断"现在该不该开口"，不拼完整
+     * 人设 + 全部记忆 + 全部历史（那会把最贵的资源花在会被丢弃的判断上）。
+     * 出处：group_chat_plus 的"决策 AI / 回复 AI 分离"（AGPL-3.0 → 只借思想）。
+     * fail-open：调用失败 / 超时 / 解析失败一律放行，不把 proactive 弄哑。
+     * 多一次 LLM 调用 → 默认关；托盘有勾选。 */
+    decisionAi: false,
+    /* W48：决策 AI 用的模型（空 = 用主模型）。可以指定便宜模型
+     * （如 Haiku / Flash）—— 判断比生成简单，不该烧同一个模型。 */
+    decisionModel: ''
   },
   /* 专注/勿扰三档（X2，见 presence.js）：盖过单一 quietHours。
    *   companion 陪伴 = 忽略安静时段、搭话更勤
@@ -293,7 +320,11 @@ const DEFAULT_CONFIG = {
     /* W53：内容哈希跳过未变。事实对象带 `h` 字段（= sha1(规范化文本) 前 8 位），
      * recall/settle 热路径上 h 与当前文本一致 → 跳过 scoreFact/retentionOf 重算。
      * 只是省算力短路（结果恒等），不改变升降/遗忘语义。默认开。 */
-    contentHash: true
+    contentHash: true,
+    /* W56：分层摘要 L0/L1/L2（借 OpenViking 思想，AGPL 只借思想）。
+     * settle 日结生成 L0 一句话摘要 + L1 概览存盘；recall 注入时先看 L0 摘要再读 L2 详情。
+     * 纯函数确定性、无 LLM 调用。默认开——摘要廉价（一天算一次），且让 LLM 先把握全局印象。 */
+    summary: true
   },
   /* G12：MCP 客户端骨架。默认关；无 server、无 SDK 依赖；工具调用需逐条授权。 */
   mcp: {

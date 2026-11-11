@@ -749,6 +749,69 @@ function formatMemoryLine(facts, budget = 400) {
 }
 
 /**
+ * W56：分层摘要（借 OpenViking L0/L1/L2 思想，AGPL 只借思想不搬码）。
+ * 从事实池聚合「一句话摘要 + 概览」，供 recall 先看摘要再读详情。
+ * 纯函数、确定性、无 LLM——settle 日结算一次存盘。
+ * @returns {{ l0: string, l1: string[], at: number }}
+ */
+function buildSummary(facts, now = Date.now()) {
+  const live = (facts || []).filter((f) => !isTombstone(f) && !isSuperseded(f));
+  const byKind = {};
+  for (const k of KINDS) byKind[k] = [];
+  for (const f of live) (byKind[f.kind] || byKind.other).push(f);
+  const sortImp = (arr) => arr.slice().sort((a, b) => (Number(b.importance) || 0) - (Number(a.importance) || 0));
+  /* L0 一句话摘要：每类代表一条，限 60 字。 */
+  const l0Bits = [];
+  let l0Len = 0;
+  for (const k of KINDS) {
+    const arr = sortImp(byKind[k]);
+    if (!arr.length) continue;
+    const t = String(arr[0].text || '').slice(0, 12);
+    const piece = (l0Bits.length ? '；' : '') + t;
+    if (l0Len + piece.length > 60) break;
+    l0Bits.push(t);
+    l0Len += piece.length;
+  }
+  const l0 = l0Bits.join('；');
+  /* L1 概览：每类前 2 条（存盘供诊断，注入层只用 L0）。 */
+  const l1 = [];
+  for (const k of KINDS) {
+    const arr = sortImp(byKind[k]);
+    if (arr.length) l1.push(k + '：' + arr.slice(0, 2).map((f) => String(f.text || '').slice(0, 10)).join('、'));
+  }
+  return { l0, l1, at: localDayIndex(now) };
+}
+
+/**
+ * W56：分层注入——L0 一句话摘要先行，L2 详情随后，共享 budget。
+ * 摘要不新鲜（非当日）→ 退化为原 formatMemoryLine（零侵入）。
+ */
+function formatMemoryLayered(facts, store, budget = 400) {
+  const base = formatMemoryLine(facts, budget);
+  const summary = store && store.summary;
+  if (!summary || Number(summary.at) !== localDayIndex()) return base;
+  const l0 = String(summary.l0 || '');
+  if (!l0) return base;
+  const l0Line = '【她对主人的整体印象（先看这句，用得上再细想）：' + l0 + '】';
+  if (l0Line.length + 1 > budget) {
+    return '【她对主人的整体印象：' + l0.slice(0, Math.max(0, budget - 14)) + '】';
+  }
+  const rest = budget - l0Line.length - 1;
+  const detail = formatMemoryLine(facts, rest);
+  return detail ? l0Line + detail : l0Line;
+}
+
+/** W56：确保 store.summary 新鲜（当日）。缺失/过期 → 现场补算并存盘（一天一次）。 */
+function ensureSummary(store, now = Date.now()) {
+  if (!store || typeof store !== 'object') store = loadStore();
+  if (!store.summary || Number(store.summary.at) !== localDayIndex(now)) {
+    store.summary = buildSummary(store.facts, now);
+    saveStore(store);
+  }
+  return store;
+}
+
+/**
  * 每天最多降一档；离线补跑 ≤30 天。
  * 2a：只降档不删。2b（opts.forgetEnabled）：retention<10 且非钉住、非迁移背填 → 墓碑。
  * @returns {{ store, dropped, risen, forgotten, awayDays }}
@@ -818,6 +881,8 @@ function settle(storeIn, now = Date.now(), opts = {}) {
   }
   store.decayDay = today;
   store.version = 2;
+  /* W56：日结时同步生成分层摘要（L0/L1），供 recall 先看摘要再读详情。 */
+  store.summary = buildSummary(store.facts, now);
   return { store, dropped, risen, forgotten, awayDays: step };
 }
 
@@ -997,8 +1062,13 @@ module.exports = {
   /* W53：内容哈希（内部函数，verify-w53 直接调） */
   factHash,
   factHashMatches,
+  /* W56：分层摘要 L0/L1/L2（借 OpenViking 思想，AGPL 只借思想） */
+  buildSummary,
+  formatMemoryLayered,
+  ensureSummary,
   /* 测试用 */
   _resetCache: () => { cache = null; },
   normalizeKey,
-  tokenize
+  tokenize,
+  localDayIndex
 };

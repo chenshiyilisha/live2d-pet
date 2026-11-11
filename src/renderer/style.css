@@ -108,6 +108,54 @@ html, body {
 }
 @keyframes blink { 0%, 60% { opacity: 1; } 61%, 100% { opacity: 0.2; } }
 
+/* ---------------- 气泡皮肤（W41）----------------
+ * 通过 body[data-bubble-skin="xxx"] 切换。主窗 #bubble 和浮动气泡窗
+ * 共用同一套皮肤名。改皮肤时两边的 CSS 必须同步改（规矩 9）。
+ * classic = 默认（上面的 #bubble 样式本身就是 classic）。 */
+/* rounded：更大圆角 + 更柔投影 */
+body[data-bubble-skin="rounded"] #bubble {
+  border-radius: 22px;
+  box-shadow: 0 8px 30px rgba(20, 30, 45, 0.20);
+}
+body[data-bubble-skin="rounded"] #bubble::after {
+  border-radius: 2px 0 0 0;
+}
+/* flat：无圆角、无投影、细边框（适合深色壁纸） */
+body[data-bubble-skin="flat"] #bubble {
+  border-radius: 4px;
+  box-shadow: none;
+  border: 1px solid #c8cdd6;
+  background: rgba(250, 250, 252, 0.98);
+}
+/* dark：深色泡体 + 浅色文字 */
+body[data-bubble-skin="dark"] #bubble {
+  background: rgba(36, 38, 44, 0.97);
+  border: 1px solid #4a4d56;
+  color: #e0e2e8;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.40);
+}
+body[data-bubble-skin="dark"] #bubble::after {
+  background: rgba(36, 38, 44, 0.97);
+  border-left: 1px solid #4a4d56;
+  border-top: 1px solid #4a4d56;
+}
+body[data-bubble-skin="dark"] #bubble-think {
+  color: #8a8c94;
+  border-bottom-color: #4a4d56;
+}
+/* minimal：只有细虚线边框，无填充无投影 */
+body[data-bubble-skin="minimal"] #bubble {
+  border-radius: 10px;
+  box-shadow: none;
+  background: transparent;
+  border: 1px dashed #c0c4cc;
+}
+body[data-bubble-skin="minimal"] #bubble::after {
+  background: transparent;
+  border-left: 1px dashed #c0c4cc;
+  border-top: 1px dashed #c0c4cc;
+}
+
 /* ---------------- 输入条 ---------------- */
 #composer {
   position: absolute;

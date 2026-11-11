@@ -44,9 +44,12 @@ let token = 0;                   // 代际令牌（规矩 16）
 let lastError = '';
 /* 测试钩子：verify 脚本把台账路径指到不可写处制造失败（同 config-ledger 的教训）。 */
 let testLedgerOverride = null;
+/* 测试钩子：把回滚集合路径指到不可写处制造失败。 */
+let testRejectedOverride = null;
 
 function configureTopicStream(dir) {
   dataDir = dir || null;
+  if (dataDir) loadRejected();
 }
 
 function ledgerPath() {
@@ -117,6 +120,58 @@ function mergeTopics(parts) {
   return out;
 }
 
+/* ---- W57：决策级回滚标记（借 deja-vu accepted/rejected 思想，MIT）---- */
+const REJECTED_NAME = 'proactive-rejected.json';
+const REJECTED_MAX = 20;
+let rejected = [];
+
+function rejectedPath() {
+  if (testRejectedOverride) return testRejectedOverride;
+  if (!dataDir) return null;
+  return path.join(dataDir, REJECTED_NAME);
+}
+
+function loadRejected() {
+  try {
+    const arr = JSON.parse(fs.readFileSync(rejectedPath(), 'utf8'));
+    rejected = Array.isArray(arr) ? arr.filter((x) => typeof x === 'string') : [];
+  } catch { rejected = []; }
+  return rejected;
+}
+
+function saveRejected() {
+  try {
+    const p = rejectedPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(rejected), 'utf8');
+    return true;
+  } catch { return false; }
+}
+
+/** W57：标记决策被回滚（之后不再推荐）。去重 + 截断。 */
+function markRejected(text) {
+  const t = String(text || '').trim();
+  if (!t || rejected.includes(t)) return false;
+  rejected.push(t);
+  if (rejected.length > REJECTED_MAX) rejected = rejected.slice(-REJECTED_MAX);
+  saveRejected();
+  return true;
+}
+
+function isRejected(text) {
+  return rejected.includes(String(text || '').trim());
+}
+
+/** 测试钩子：清空内存里的回滚集合（不动磁盘文件）。 */
+function resetRejectedForTest() {
+  rejected = [];
+}
+
+/** 测试钩子：把回滚集合路径指到指定处（制造写失败用）。 */
+function setRejectedPathForTest(p) {
+  testRejectedOverride = p || null;
+}
+
 /**
  * 刷新主题（纯函数式入口，测试直接调它，不依赖定时器）。
  * @param {object} deps { listFacts, history, now }
@@ -129,7 +184,10 @@ function buildTopics(deps) {
     topicsFromHistory(deps && deps.history)
   ];
   const merged = mergeTopics(parts);
-  return merged.map((t) => ({ text: t.text, source: t.source, at: now }));
+  /* W57：开关开（rollback===true）→ 过滤被回滚的主题。 */
+  const filter = deps && deps.rollback === true;
+  const kept = filter ? merged.filter((t) => !isRejected(t.text)) : merged;
+  return kept.map((t) => ({ text: t.text, source: t.source, at: now }));
 }
 
 /** 取当前有效主题（过期的丢掉）。 */
@@ -166,9 +224,10 @@ function refreshOnce(deps) {
 
 /**
  * 启动主题刷新流（自调度，规矩 16）。
- * @param {object} opts { listFacts, history, refreshMs, onTick }
+ * @param {object} opts { listFacts, history, refreshMs, onTick, rollback }
  * listFacts / history 是**取数据的函数**（每次轮询时现取），
  * 不是静态值 —— 记忆是活的，得每轮重新读。
+ * rollback：W57 开关，开则过滤已回滚主题。
  */
 function startTopicStream(opts) {
   stopTopicStream();
@@ -180,7 +239,8 @@ function startTopicStream(opts) {
     const deps = {
       listFacts: typeof o.listFacts === 'function' ? o.listFacts : null,
       history: typeof o.history === 'function' ? o.history() : o.history,
-      now: Date.now()
+      now: Date.now(),
+      rollback: o.rollback === true
     };
     let next = [];
     try { next = refreshOnce(deps); } catch { next = []; }
@@ -211,5 +271,11 @@ module.exports = {
   TTL_MS,
   MAX_TOPICS,
   ledgerPath,
-  _debug: () => ({ topics, lastError })
+  /* W57：决策级回滚标记 */
+  markRejected,
+  isRejected,
+  loadRejected,
+  resetRejectedForTest,
+  setRejectedPathForTest,
+  _debug: () => ({ topics, lastError, rejected })
 };

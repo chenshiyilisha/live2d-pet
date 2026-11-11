@@ -4,6 +4,8 @@ const { screen, powerMonitor } = require('electron');
 const { loadConfig } = require('./config');
 const { clamp, cornerPos } = require('./util');
 const { SIZE, MARGIN } = require('./win-size');
+const { derive: deriveOcean } = require('./ocean');
+const { normalizeMode, presenceIdleMul } = require('./presence');
 const {
   estimateVelocity, shouldThrow, step: throwStep
 } = require('./throw-physics');
@@ -444,19 +446,64 @@ function maybeGoHome() {
 const IDLE_TICK_MS = 1000;
 let idleTimer = null;
 
+/* W58 闲置边界触发（开关 proactive.idleBoundary，默认关）。
+ * 语义：主动冒泡不再由"距上次交互的墙钟"驱动（用户聊天后忙别的，
+ * 8 分钟后她照常冒泡 = 打扰），而由"系统级闲置跨过阈值"驱动——
+ * 只有用户真离开键鼠达到 idleMinutes 才发 pet:proactive-boundary。
+ *
+ * armed：用户操作（idleSec < 1）→ 重新武装；闲置跨过阈值 → 触发一次 +
+ * 解除武装。这样持续闲置不会每秒都发（每秒一次的 idleTick 若每次
+ * idleSec ≥ 阈值都发，等于刷屏）。 */
+let proactiveArmed = true;
+
+/* ── 测试钩子（verify-w58 用）──────────────────────────────
+ * idleSec 注入：真实环境走 powerMonitor；测试时用 setIdleForTest
+ * 精确控制每一次 tick 的闲置秒数。 */
+let testIdleOverride = null;
+let testWin = null;
+let boundarySentCount = 0;
+
+/** 闲置边界阈值（毫秒）。公式与渲染层 pokeIdleTimer 的 scaled 同式
+ *  （idleMinutes × ocean.idleMinutesMul × presenceIdleMul）。
+ *  ⚠️ 双处定义的取舍：渲染层那份只在 W58 关着时生效，这份只在开着时
+ *  生效，互斥不冲突（开关开 → 渲染层 pokeIdleTimer 不排定时器）。 */
+function proactiveBoundaryMs(cfg) {
+  const mins = Number(cfg?.proactive?.idleMinutes);
+  const safe = Number.isFinite(mins) && mins >= 0.05 ? mins : 8;
+  const oceanMul = Number(cfg?.ocean?.idleMinutesMul) || 1;
+  const presMul = Number(cfg?.presenceMul) || 1;
+  return Math.max(0.05, safe * oceanMul * presMul) * 60 * 1000;
+}
+
 function idleTick() {
   if (paused) return;
   const cfg = loadConfig();
   if (cfg.motion?.enabled === false) return;
 
-  const idleSec = systemIdleSeconds();
+  const idleSec = testIdleOverride !== null ? testIdleOverride : systemIdleSeconds();
 
   /* 「有人操作」= 最近 1 秒内有输入。
    * 用户要的定义就是「移动鼠标或触发键盘」（系统级，不限于光标在她身上）。 */
   if (idleSec < 1) {
+    /* 用户在操作 → W58 重新武装（下次闲置重新计）。 */
+    proactiveArmed = true;
     if (mode === 'wander') stopWander();
     if (cfg.motion?.returnOnActivity !== false) maybeGoHome();
     return;
+  }
+
+  /* W58：闲置边界检测（开关开才做）。
+   * ⚠️ 用户操作时（上一支）已重新武装，所以跨过阈值那一刻只触发一次；
+   *    持续闲置不会每秒刷屏（武装解除后 idleSec 再涨也不再发）。 */
+  if (cfg.proactive?.idleBoundary === true) {
+    const boundaryMs = proactiveBoundaryMs(cfg);
+    if (idleSec * 1000 >= boundaryMs) {
+      if (proactiveArmed) {
+        proactiveArmed = false;
+        boundarySentCount++;
+        try { (testWin || win())?.webContents.send('pet:proactive-boundary'); } catch { /* ignore */ }
+      }
+    }
   }
 
   if (cfg.motion?.wander === false) return;
@@ -671,5 +718,12 @@ module.exports = {
   rollPositionPin,
   isPositionPinned,
   currentDisplay,
+  /* W58 测试钩子 */
+  setIdleForTest: (sec) => { testIdleOverride = sec; },
+  setWinForTest: (w) => { testWin = w; },
+  idleTickForTest: () => idleTick(),
+  proactiveBoundaryMs,
+  proactiveArmedForTest: () => proactiveArmed,
+  boundarySentCountForTest: () => boundarySentCount,
   disposeMotion
 };

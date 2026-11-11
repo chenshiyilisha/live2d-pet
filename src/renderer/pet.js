@@ -3028,6 +3028,16 @@ for (const el of [bubble, composer]) {
  * 关 = 老布局，气泡压在输入条上方（会挡胸口那段，胜在单窗口简单）。 */
 const floatBubble = () => cfg?.chat?.floatBubble !== false;
 
+/* W41：气泡皮肤应用。主窗 #bubble 通过 body[data-bubble-skin] 切换。
+ * 皮肤名白名单与 style.css / bubble.html 的 CSS 类一一对应。 */
+const BUBBLE_SKINS = ['classic', 'rounded', 'flat', 'dark', 'minimal'];
+function applyBubbleSkin(skin) {
+  const s = BUBBLE_SKINS.includes(skin) ? skin : 'classic';
+  document.body.setAttribute('data-bubble-skin', s);
+}
+/* 启动时也应用一次（防止 config 加载前 body 没有属性） */
+applyBubbleSkin(cfg?.chat?.bubbleSkin);
+
 /* ============================================================
  *  对话
  * ========================================================== */
@@ -3145,6 +3155,9 @@ window.pet?.onConfigChanged?.(async () => {
     if (cfg?.appearance?.hoverFade !== true) setHoverFade(false);
     // 大小也可能是在配置里改的，跟着同步一次
     setUserScale(cfg?.appearance?.scale);
+    /* W41：气泡皮肤（classic/rounded/flat/dark/minimal）。
+     * 主窗 #bubble 通过 body[data-bubble-skin] 切换；浮动气泡窗由 bubble.js 下发。 */
+    applyBubbleSkin(cfg?.chat?.bubbleSkin);
     /* X1：appearance.model 变了 → 热换档案 + 重挂（署名 toast 由主进程发）。 */
     const nextModel = resolveModelName(cfg?.appearance?.model);
     if (nextModel !== prevModel) {
@@ -3422,6 +3435,11 @@ async function refreshMediaPlaying() {
 
 function pokeIdleTimer() {
   clearTimeout(idleTimer);
+  /* W58 闲置边界触发：开关开着时不排墙钟定时器 —— 主动冒泡由主进程的
+   * 系统级闲置边界事件（pet:proactive-boundary）驱动。墙钟口径的问题：
+   * 用户聊完天后开始忙别的（打字/点别的），8 分钟后她照常冒泡 = 打扰；
+   * 边界口径下只有用户真离开键鼠跨过阈值才冒泡。 */
+  if (cfg?.proactive?.idleBoundary === true) return;
   /* 全屏静默中不排新的主动搭话 —— 所有"人还在"的入口（点击、划过、提醒、
    * 改配置）都会走到这里，拦这一处就等于全部拦住。醒来时主进程那侧的
    * 闲置检测会重新武装（motion.js 的 refreshWanderConfig / setMotionPaused），
@@ -4023,6 +4041,24 @@ window.pet?.on?.('pet:screen-locked', (d) => {
   if (locked) clearTimeout(idleTimer);
   else pokeIdleTimer();
   console.log('[pet] screen-locked', JSON.stringify({ locked }));
+});
+
+/* W58 闲置边界触发（开关 proactive.idleBoundary，默认关）。
+ * 主进程 motion.js 检测到系统级闲置跨过阈值时推过来 —— 收到即冒泡。
+ * ⚠️ 不调 pokeIdleTimer（W58 下它不排定时器）：边界事件本身就是新的
+ *    "闲置起点"，冒泡后等**用户有反应**（noteUserResponse → 主进程那边
+ *    用户操作会让 proactiveArmed 重新武装）或下一次边界。
+ * 🔴 必须先过 proactiveBlockedBy：边界事件可能落在用户刚回来操作电脑的
+ *    瞬间（idleSec 刚好跨过阈值时用户恰好碰了鼠标），闸门拦下走短周期重试。 */
+window.pet?.on?.('pet:proactive-boundary', () => {
+  if (!cfg || cfg.proactive?.idleBoundary !== true) return;
+  if (cfg.proactive?.enabled === false) return;
+  proactiveSpeak();
+});
+
+/* W41：气泡皮肤即时切换（托盘选了皮肤后主窗 #bubble 立刻换肤）。 */
+window.pet?.on?.('chat:bubble-skin', (skin) => {
+  applyBubbleSkin(skin);
 });
 
 // 系统状态悬浮显示

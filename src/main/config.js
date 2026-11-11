@@ -4,6 +4,12 @@ const { app } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
+/* W54：配置改动台账（config-ledger.js）。saveConfig 成功落盘后追加一行，
+ * 记"谁 / 为什么 / 改了哪些键 / 之前是什么 / 之后是什么"。
+ * 写台账失败不影响落盘（它自己 fail-open）。只在 saveConfig 里用，
+ * 不在这里 require 别的模块以免反向依赖。 */
+const ledger = require('./config-ledger');
+
 /* ============================================================
  *  配置
  * ==========================================================
@@ -40,6 +46,13 @@ const LIMITS = {
 const NAME_LIMITS = { min: 1, max: 12 };
 
 const DEFAULT_CONFIG = {
+  /* W54：配置改动台账开关。开 = 每次 config.json 落盘往
+   * userData/config-changes.jsonl 追加一行（谁改的 / 改了哪些键 /
+   * 之前是什么 / 之后是什么）。纯记录，不改行为、不调模型、
+   * 不占常驻资源；排查"设置自己变回去"时唯一的时间线证据。
+   * 默认开（零打扰）；关着就完全不写台账。只进配置文件不进托盘
+   * （纯技术开关，见规矩 5）。 */
+  ledgerEnabled: true,
   /* 对话后端。任何 OpenAI 兼容服务都能接：换服务只动这三个字段。
    * 默认值是 DeepSeek 官方，但**没填 apiKey 时走离线话术**，所以默认状态
    * 不会往外发任何请求。
@@ -166,6 +179,14 @@ const DEFAULT_CONFIG = {
     /* P6：对话模态 companion 陪伴 / work 专业（只改本轮语气提示，不改人设正文）。 */
     mode: 'companion',
     /* G9：输出侧人设护栏 off / med / strict。默认 med（禁客服腔）；silent 直通。 */
+    /* G23：短期记忆 → 长期记忆（历史保留三档开关，按开源调研的最优机制落地）。
+     * 出处 §25：KokoroMemo「近期原文 + 远期摘要」分层思路 + Mem0 抽取形态。
+     * - contextKeep：渲染层发给 LLM 的最近对话条数（直接决定 token 开销，用户可调）。
+     * - saveKeep：chat-history.json 落盘保留条数（不影响 token，只影响恢复后的历史）。
+     * - loadKeep：启动时恢复进内存的条数。
+     * ⚠️ 规矩 4：默认温和值（20/300/100），不打扰不占资源，进配置 + 托盘可调。 */
+    history: { contextKeep: 20, saveKeep: 300, loadKeep: 100 },
+    /* G9：输出侧人设护栏 off / med / strict。默认 med（禁客服腔）；silent 直通。 */
     personaGuard: 'med',
     /* 输入框闲置自动收起（秒）：点开对话框后这么久没打字 / 没发消息就 hideUI。
      * 治"聊完一嘴输入条一直挂着"。0 = 不自动收（只能 Esc / 再点她之外的路径关）。
@@ -221,6 +242,11 @@ const DEFAULT_CONFIG = {
     /* X5：边缘线索（高 CPU / 低电量 / 刚切应用）进主动搭话。
      * 打扰向 → 默认关；开着时仍可 [silent]。 */
     edgeCues: false,
+    /* W55：主题流 —— 主动搭话前由独立刷新流生成候选话题（记忆事实 +
+     * 最近对话），开口时只挑一个提起来，而不是每次从零想。
+     * 主动搭话本身默认关，这个增强默认也关；托盘有勾选。
+     * 出处：surfcore-life / group_chat_plus 的"兴趣刷新"分层思想。 */
+    topicStream: false,
     /* W26：先记账再生成（投递 / 打断可审计）。默认开：只写本地 JSONL，不打扰。 */
     bookFirst: true
   },
@@ -900,7 +926,7 @@ function loadConfig() {
   return out;
 }
 
-function saveConfig(cfg) {
+function saveConfig(cfg, reason) {
   /* 读都读不到，就绝不能写 —— 见 cfgUnreadable 那段。
    * 这比"写失败"更该早一步拦住：写失败只是这一次没存上，
    * 写成功却是把用户的东西永久抹掉。 */
@@ -912,6 +938,9 @@ function saveConfig(cfg) {
   try {
     fs.mkdirSync(app.getPath('userData'), { recursive: true });
     fs.writeFileSync(getConfigPath(), JSON.stringify(cfg, null, 2), 'utf8');
+    /* W54：落盘成功后记台账（值没变不记、开关关了不记，
+     * 台账自己失败不影响这里 —— 返回值只由配置写入决定）。 */
+    ledger.recordChange(cfg, reason);
     return true;
   } catch (err) {
     console.error('[config] save failed:', err);

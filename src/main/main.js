@@ -114,6 +114,7 @@ const { shouldProactiveSpeak } = require('./info-gain');
 const {
   configureLedger, bookDelivery, settleDelivery, previewProactive
 } = require('./proactive-ledger');
+const topicStream = require('./topic-stream');
 const { cardToPersonaDraft } = require('./character-card');
 const { checkPersonaOutput, normalizeLevel: guardLevel } = require('./persona-guard');
 const { distillPersonaParts, PROMPT_FIELDS: DISTILL_FIELDS } = require('./persona-distill');
@@ -238,7 +239,7 @@ configureThrowHooks({
     setTimeout(() => {
       if (!mainWindow || mainWindow.isDestroyed()) return;
       const { x, y } = mainWindow.getBounds();
-      saveConfig({ ...loadConfig(), window: { x, y } });
+      saveConfig({ ...loadConfig(), window: { x, y } }, 'window:save');
     }, 500);
   }
 });
@@ -270,17 +271,20 @@ setReminderSink((payload) => {
  * 保证「配置落盘 + 通知渲染层 + 重画菜单」三件事永远一起发生。
  * 读写本身在 config.js，这里只做编排 —— 它要碰窗口和托盘，
  * 放到 config.js 里会让那个模块反过来 require 主文件。 */
-function patchConfig(section, patch) {
+function patchConfig(section, patch, reason) {
   const cur = loadConfig();
   const next = { ...cur };
   if (section) next[section] = { ...(cur[section] || {}), ...patch };
   else Object.assign(next, patch);
+  /* W54：reason 默认 'patch:<段>'（段名即来路：托盘/右键/设置页都走这里），
+   * 调用方可以传更具体的（如 'tray:scale-btn'）。进台账用。 */
+  const why = reason || ('patch:' + (section || 'root'));
   /* ⚠️ 落盘结果必须看一眼，再决定要不要说"改好了"。
    *    saveConfig 有两种失败：磁盘写不进去，以及"本次运行读不到配置"
    *    （那种情况下它**故意拒绝写**，见 config.js 的 cfgUnreadable）。
    *    以前这里把返回值丢掉、菜单照样弹「大小 106%」—— 用户以为成功了，
    *    重启一看没变，属于"提示与实际不符"。 */
-  if (!saveConfig(next)) {
+  if (!saveConfig(next, why)) {
     const blocked = cfgReadBlocked();
     toast(blocked
       ? `配置读不了（${blocked}），这次改动没能保存`
@@ -465,7 +469,7 @@ function createWindow() {
     savePosTimer = setTimeout(() => {
       if (!mainWindow || isMoveAnimRunning()) return;
       const [x, y] = mainWindow.getPosition();
-      saveConfig({ ...loadConfig(), window: { x, y } });
+      saveConfig({ ...loadConfig(), window: { x, y } }, 'window:save');
     }, 600);
   });
 
@@ -2886,6 +2890,7 @@ function buildMenuTemplate() {
     ttsItem,
     flag('proactive', 'enabled', '主动搭话'),
     flag('proactive', 'edgeCues', '边缘线索（电量/CPU/切应用）', false),
+    flag('proactive', 'topicStream', '主题流（刷新兴趣话题）', false),
     flag('chat', 'showThink', '内心 OS（[think:]）', true),
     {
       label: `人设护栏（${guardLevel(cfg.chat?.personaGuard)}）`,
@@ -2931,6 +2936,54 @@ function buildMenuTemplate() {
         patchConfig('memory', { forget });
         toast(item.checked ? '已开启到期遗忘（不可逆）' : '已关闭到期遗忘');
       }
+    },
+    /* G23：短期记忆 → 长期记忆。历史保留三档做成数值子菜单，
+     * 用户可调；改完立即 patchConfig 落盘 + toast 反馈。
+     * ⚠️ 规矩 4：默认温和值，进托盘可调。 */
+    {
+      label: '对话历史保留',
+      submenu: [
+        /* 发给 LLM 的上下文条数（直接决定 token 开销）。档位越密越省，
+         * 越疏越能记住更早聊过的内容。 */
+        {
+          label: `上下文窗口（${cfg.chat?.history?.contextKeep ?? 20} 条）`,
+          submenu: [10, 20, 40, 60].map((n) => ({
+            label: `${n} 条`,
+            type: 'radio',
+            checked: Number(cfg.chat?.history?.contextKeep) === n,
+            click: () => {
+              patchConfig('chat', { history: { ...(cfg.chat?.history || {}), contextKeep: n } });
+              toast(`上下文窗口：${n} 条`);
+            }
+          }))
+        },
+        { type: 'separator' },
+        /* 落盘保留条数（不影响 token，只影响恢复后的历史）。 */
+        {
+          label: `落盘保留（${cfg.chat?.history?.saveKeep ?? 300} 条）`,
+          submenu: [100, 300, 600, 1000].map((n) => ({
+            label: `${n} 条`,
+            type: 'radio',
+            checked: Number(cfg.chat?.history?.saveKeep) === n,
+            click: () => {
+              patchConfig('chat', { history: { ...(cfg.chat?.history || {}), saveKeep: n } });
+              toast(`落盘保留：${n} 条`);
+            }
+          }))
+        },
+        {
+          label: `启动恢复（${cfg.chat?.history?.loadKeep ?? 100} 条）`,
+          submenu: [50, 100, 200, 400].map((n) => ({
+            label: `${n} 条`,
+            type: 'radio',
+            checked: Number(cfg.chat?.history?.loadKeep) === n,
+            click: () => {
+              patchConfig('chat', { history: { ...(cfg.chat?.history || {}), loadKeep: n } });
+              toast(`启动恢复：${n} 条`);
+            }
+          }))
+        }
+      ]
     },
     {
       label: 'MCP 工具（默认关）',
@@ -4284,7 +4337,7 @@ function registerIpc() {
     setTimeout(() => {
       if (!mainWindow || mainWindow.isDestroyed()) return;
       const { x, y } = mainWindow.getBounds();
-      saveConfig({ ...loadConfig(), window: { x, y } });
+      saveConfig({ ...loadConfig(), window: { x, y } }, 'window:save');
     }, 500);
   });
 
@@ -4784,10 +4837,23 @@ function registerIpc() {
    * 存成 userData/chat-history.json，退出重开还能接着上次聊。 */
   const historyFile = () => path.join(app.getPath('userData'), 'chat-history.json');
 
+  /* G23：历史保留三档（contextKeep/saveKeep/loadKeep）—— 读配置，
+   * 缺字段或配置坏 → 用 DEFAULT_CONFIG 的温和值兜底（不抛）。 */
+  const historyKeep = () => {
+    const c = loadConfig();
+    const h = (c && c.chat && c.chat.history) || {};
+    const num = (v, def) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.floor(Number(v)) : def);
+    return {
+      loadKeep: num(h.loadKeep, 100),
+      saveKeep: num(h.saveKeep, 300),
+      contextKeep: num(h.contextKeep, 20)
+    };
+  };
+
   ipcMain.handle('history:load', () => {
     try {
       const arr = JSON.parse(fs.readFileSync(historyFile(), 'utf8'));
-      return Array.isArray(arr) ? arr.slice(-40) : [];
+      return Array.isArray(arr) ? arr.slice(-historyKeep().loadKeep) : [];
     } catch {
       return [];
     }
@@ -4796,7 +4862,7 @@ function registerIpc() {
   ipcMain.handle('history:save', (_e, arr) => {
     try {
       fs.mkdirSync(app.getPath('userData'), { recursive: true });
-      fs.writeFileSync(historyFile(), JSON.stringify((arr || []).slice(-80), null, 1), 'utf8');
+      fs.writeFileSync(historyFile(), JSON.stringify((arr || []).slice(-historyKeep().saveKeep), null, 1), 'utf8');
       return true;
     } catch (err) {
       console.error('[history] save failed:', err);
@@ -4868,6 +4934,9 @@ function registerIpc() {
     try {
       const gainSilent = gain.preferSilent && allowSilent
         ? '（信息不多，优先 [silent]。）' : '';
+      /* W55：主题流开关开着时，把最近刷新的话题带进提示词 ——
+       * 她"挑一个提起来"而不是每次从零想。开关关着 / 没话题时返回 ''。 */
+      const topicHint = topicStream.topicHintFor(cfg);
       const res = await chatStream([
         { role: 'system', content: resolvePersona(cfg) },
         ...past,
@@ -4881,6 +4950,7 @@ function registerIpc() {
                    (edge.hint || '') +
                    edgeSilent +
                    gainSilent +
+                   topicHint +
                    '）'
         }
       ], { signal: ac.signal });
@@ -5162,6 +5232,21 @@ if (!gotLock) {
     } catch { /* 取不到就算了 */ }
 
     configureLedger(app.getPath('userData'));  // W26 主动账本
+    configureTopicStream(app.getPath('userData'));  // W55 主题流台账
+    topicStream.startTopicStream({
+      /* 记忆是活的，每轮现取（listFacts 已过滤墓碑/留档）。 */
+      listFacts: () => memory.listFacts(),
+      history: () => {
+        try {
+          const arr = JSON.parse(fs.readFileSync(historyFile(), 'utf8'));
+          return Array.isArray(arr) ? arr.slice(-20) : [];
+        } catch { return []; }
+      },
+      onTick: (next) => {
+        /* 诊断用：主题刷新了才留一行，没变不刷屏。 */
+        if (next.length) console.log('[topic] refresh', JSON.stringify(next.map((t) => t.text)));
+      }
+    });
     configureGlanceGrant({
       onChange: ({ reason, remainingMs }) => {
         if (reason === 'expired') toast('看屏限时授权已到期，已自动收回');
@@ -5373,6 +5458,7 @@ if (!gotLock) {
     stopSensorWatch();
     stopMediaWatch();
     stopSynth();
+    topicStream.stopTopicStream();  // W55 主题刷新流（自调度，停令牌即退出）
     try { httpServer?.close(); } catch { /* ignore */ }
   });
 }

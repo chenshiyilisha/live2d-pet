@@ -3690,7 +3690,10 @@ async function sendMessage() {
   busy = true;
 
   history.push({ role: 'user', content: text });
-  if (history.length > 16) history.splice(0, history.length - 16);
+  /* G23：短期记忆 → 长期记忆。发送给 LLM 的上下文窗口大小改为配置项
+   * chat.history.contextKeep（默认 20，原硬编码 16）。读配置失败用温和值兜底。 */
+  const keep = Math.max(1, Math.floor(Number(cfg?.chat?.history?.contextKeep)) || 20);
+  if (history.length > keep) history.splice(0, history.length - keep);
 
   // 立刻用思考态占住，避免流式首字返回前的空窗
   // （浮窗模式的等待态由主进程 chat:send 里的 beginStream() 负责）

@@ -511,10 +511,12 @@ const BASE = { baseUrl: 'https://example.invalid/v1', apiKey: 'k', model: 'm', s
     }
   });
 
-  await checkAsync('不传 extraBody 时请求体只有三个契约字段', async () => {
+  await checkAsync('不传 extraBody 时请求体只有契约字段（含 W64 stream_options）', async () => {
     stubFetch(sse('a'));
     await streamLLM([{ role: 'user', content: 'x' }], BASE);
-    assert.deepStrictEqual(Object.keys(sentBody).sort(), ['messages', 'model', 'stream']);
+    assert.deepStrictEqual(Object.keys(sentBody).sort(), ['messages', 'model', 'stream', 'stream_options']);
+    /* W64：stream_options.include_usage=true —— 让服务端在末包带 usage。 */
+    assert.strictEqual(sentBody.stream_options?.include_usage, true, 'stream_options.include_usage 应为 true');
   });
 
   await checkAsync('apiKey 为空 → 不发任何网络请求，走离线话术', async () => {

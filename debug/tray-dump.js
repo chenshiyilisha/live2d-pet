@@ -42,6 +42,10 @@ const sliceFn = (name) => {
  * 报错信息会指向「沙箱里没这个符号」，很容易误判成菜单代码写错了。 */
 const fnSrc = [
   sliceFn('appearanceSubmenu'),
+  /* W41 气泡皮肤（2026-11-19 补）：菜单标题 `气泡皮肤（${skinLabel(...)}）`
+   * 直接调它，W41 落地时没在这里登记，dump 一直在
+   * "skinLabel is not defined" 上红着，菜单改没改都看不出来。 */
+  sliceFn('skinLabel'),
   sliceFn('personaStateLabel'),
   /* 「模型接入」的组标题靠它算（2026-10-29 加）。它只依赖 providerById，
    * 后者从 llm-providers 真实 require 进来 —— 别在桩里手写一份标签逻辑，

@@ -3820,3 +3820,76 @@ https://github.com/EASYGOING45/open-pets                NOASSERTION · Codex 桌
 https://lottiefiles.com/                                Lottie 生态（dotLottie / ThorVG / LottieFiles）
 Shimeji-ee (Kilkakon) / ShimeLinux / wl_shimeji          多源 · Shimeji 精灵图引擎生态
 ```
+
+---
+
+# 28. moeru-ai/airi：MIT 竞品深挖（2026-11-19，第 28 轮）
+
+> https://github.com/moeru-ai/airi · 51.5k★ · **MIT** · TypeScript pnpm monorepo
+> 「Neuro-sama 开源复刻」：Electron 桌宠（stage-tamagotchi）+ Web（PWA）+ Pocket（移动）+ Godot 实验引擎，
+> 玩 Minecraft/Factorio/KSP，Discord/Telegram 接入，Live2D + VRM 双渲染。
+> **许可结论：四大竞品（Coopanion AGPL / dsh-pet NOASSERTION / surfcore NOASSERTION / airi）里唯一 MIT，可代码级借鉴（保留署名）。**
+
+## 28.1 与我们同栈的证据
+
+- 桌面版 = Electron 透明置顶窗口（`apps/stage-tamagotchi`），与我们的 pet 窗口同型
+- Live2D 渲染用 **pixi-live2d-display/cubism4** —— **与我们同一库**，`stage-ui-live2d` 的滤镜/composable 可直接对照移植
+- 模块纪律同构：`core-character` README 明确「每个 renderer 拥有自己的模型配置」「不把 Vue 状态/渲染实例/持久化混进来」——与我们规矩 9（同一数值只有一处定义）同型
+
+## 28.2 值得借鉴（按价值排序）
+
+### ① 屏幕环境光自适应（最高价值，对症 whalegirl 显黑）
+
+`packages/stage-ui-live2d/src/filters/screen-ambient-light.ts`（640 行，注释极佳）+ `stage-shared/screen-ambient-light`：
+
+- **采样**：截屏 → 排除自己窗口矩形 + `paintedAlpha` 掩码（角色画过的像素绝不进测量）→ 环境光图（`AmbientLightMap`）
+- **渲染**：PIXI Filter 两个通道——背光缘（rim，σ=0.004×窗高≈2px）+ 环绕带（wrap band，对模型 alpha 做高斯模糊，r=rim / g=wrap 一遍 blur 链两用）；模型内部亮度按屏幕光缩放
+- **参数**（全部带物理注释）：`darkBase 0.45`（黑屏地板亮度）/ `baseCurve 2`（响应曲线幂）/ `localShare 0.5`（局部光/全局光配比——全局项保证拖窗不闪，局部项让旁边的亮窗单侧照头）/ 中性色权重 0.35（桌面多灰，纯均值不出颜色）
+- blur 半分辨率（2x 屏 1 texel/CSS px）、6 taps × 0.5σ、wrapPadding 16px（防 silhouette 贴框读自身 alpha）
+- **比 Coopanion 柔光光圈（GDI 0.8s 取像素比一圈灰）更成体系**：这是「模型融入桌面光照」，不只是描边可见性
+
+### ② agents 单一职责 LLM 工具（对照我们 W48 决策 AI）
+
+`packages/agents`：每个 agent 只管一个 prompt+一个请求形状+一个解析器，不选模型不选供应商（调用方注入 `GenerateText`）：
+
+- `voice-end-judge`：判断**停顿中的语音**是否说完了（VAD 断句的语义兜底）
+- `transcription-rephrase`：清洗一句 ASR 文本（口语赘词）
+- 与 W48 决策 AI 同型；`voice-end-judge` 对我们 VAD/ASR 断句是现成的补强方向
+
+### ③ 触摸命中（对照我们规矩 31 摸头）
+
+`composables/live2d/touch.ts`：作者 hitArea 名（`/head|face/i`）优先 → 无声明时 head-box + **drawable 网格三角命中**（`isPointInLive2DMesh` 点在三角形遍历——包围盒会把抬手与身体间的空腔也算身体，网格不会）。pat（按下划过头）与 tap 区分。
+
+### ④ focus-bias 注视配比（对照我们 updateGaze）
+
+`composables/live2d/focus-bias.ts`：`headGain 0.55 / bodyGain 0.15`（眼拿余量）、`fadeSeconds 0.4 / followSeconds 0.12`，角度换算 `head 30° / body 10°`。全是可校准的量化初值。
+
+### ⑤ head-anchor（对照我们 headTopY 实量）
+
+`composables/live2d/head-anchor.ts`：量头顶时**跑模型 physics**（头发/挂件摆动算进头）——与我们「头顶只用量出来的 headTopY，绝不锚 petRect.y」同思路，但更进一层。
+
+### ⑥ motion-control-spring / beat-sync / MAGIC
+
+- 逐轴弹簧：settle 阈值 0.001（位置+速度）、最大步长 1/120s（防大 dt 爆炸）
+- beat-sync：BPM 检测+节拍驱动身体 Y/Z 微摆、风格轮换、autoStyleShift
+- **MAGIC**（`motion-driver-magic`）：VAR/AR-HMM 从录制动作拟合「马尔可夫动画生成器」+ 种子生成 + crossfade（from/to 两个生成器同步推进混合）——**活人感的天花板路线**，复杂度高，记为长期方向
+
+### ⑦ 模型工具链
+
+`utils/`：live2d-validator / live2d-structure-report（模型结构体检）/ **zip-loader 含非 ASCII 文件名解码**（GBK/Shift-JIS 乱码防护——对我们 models.zip 分发是现成的坑位预防）/ OPFS 存储。
+
+### ⑧ lipsync 分层
+
+`model-driver-lipsync`：shared 入口（纯函数，Node 可测）与 runtime 入口（Web Audio 工厂）分离；AEIOUS 帧转稳定 AEIOU 权重 + 赢家选择 + 静音检测 + 平滑。与我们 W63 口型联动（tts.js lipEnv）同型，纯函数可测的分层值得对齐。
+
+## 28.3 不借
+
+- 玩游戏代理（Minecraft/Factorio/KSP）——不在「安静陪伴」定位
+- Monorepo 规模（repo 644MB、70+ packages、i18n/Crowdin/sponsorkit 全家桶）——我们的小仓节奏装不下
+- VRM/MMD/Spine/tachie 多渲染器矩阵——我们只做 Live2D
+- 记忆：memory-pgvector 只是服务端模块壳；Memory Alaya WIP 无可抄实现；我们的 W56 分层摘要已覆盖
+- DuckDB-WASM/pglite 浏览器数据库——我们是 Electron 主进程，无此需求
+
+## 28.4 生态外围（记档不展开）
+
+xsai（LLM 统一 provider，他们自研）、unspeech（ASR/TTS 统一代理「speech 界 LiteLLM」）、MCP Launcher（「Ollama for MCP servers」）、proj-airi 子组织（webai-realtime-voice-chat 全链路示例：VAD+STT+LLM+TTS）。

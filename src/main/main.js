@@ -2211,16 +2211,20 @@ function personalitySubmenu(cfg) {
 /* 菜单上可选的模型 = **产品线**。这里没有的模型不允许出现在配置里，
  * 也不允许被渲染层挂上（下面三处消费点都按这张表过滤）。
  *
- * 2026-10-31 深夜再次**下线** deepfish（用户拍板：菜单上去掉，代码保留）。
+ * 2026-10-31 深夜**下线** deepfish（用户拍板：菜单上去掉，代码保留）。
  * 素材 187M 全在本地（20+ 表情 / 8 动作 / 5 纹理），取景用
  * alignByMeasure 实测对齐，是实测值、未删；想再启用只需两处同改：
  * 这里加回那一项 **＋** 档案里摘掉 `retired: true`（见 profiles/deepfish.js）。
  *
+ * 2026-11-19 下线 whalegirl（自研鲸鱼娘，用户拍板：代码保留归档但不使用）。
+ * 档案 / 素材 / 参数表 / 四张 emotion 表 / verify-whalegirl.js 全留着，
+ * 只摘这里一项 + 档案加 `retired: true`（见 profiles/whalegirl.js）。
+ * 存量配置里还写着 whalegirl 的，由 normalizeAppearanceModel() 回落 hiyori。
+ *
  * ⚠️ 只改一处就是「菜单能点但挂不上」或反过来，别处不用动。 */
 const APPEARANCE_MODELS = [
   { id: 'hiyori', label: '日和' },
-  { id: 'whale', label: '鲸鱼娘' },
-  { id: 'whalegirl', label: '鲸鱼娘（自研）' }
+  { id: 'whale', label: '鲸鱼娘' }
 ];
 
 function applyAppearanceModel(id) {
@@ -2232,14 +2236,13 @@ function applyAppearanceModel(id) {
   const row = APPEARANCE_MODELS.find((m) => m.id === want);
   if (want === 'whale') {
     toast('已切到鲸鱼娘 · 素材源自 VTube Studio 模型包（Andersen216 补 model3）');
-  } else if (want === 'whalegirl') {
-    toast('已切到鲸鱼娘（自研） · ImageGen 生成 + psd2live 绑骨导出');
   } else {
     toast(`已切到「${row ? row.label : want}」`);
   }
 }
 
-/* 存量配置兜底：模型退役后，老配置里还留着 `appearance.model: 'deepfish'`。
+/* 存量配置兜底：模型退役后，老配置里还留着 `appearance.model: 'deepfish'`
+ * / `'whalegirl'` 这类已下线的键。
  * 三处消费点（syncAppearance / 托盘单选 / 启动挂载）都按 APPEARANCE_MODELS
  * 回落 hiyori，所以**不刷盘也不影响运行**；但不刷盘的后果是托盘"人物模型"
  * 一个单选都不亮、且每次启动都要再回落一遍。这里一次性落盘把状态摆正。

@@ -3838,7 +3838,7 @@ Shimeji-ee (Kilkakon) / ShimeLinux / wl_shimeji          多源 · Shimeji 精�
 
 ## 28.2 值得借鉴（按价值排序）
 
-### ① 屏幕环境光自适应（最高价值，对症 whalegirl 显黑）
+### ① 屏幕环境光自适应（价值高，但非 bug 修复 —— 见 §28.5 订正）
 
 `packages/stage-ui-live2d/src/filters/screen-ambient-light.ts`（640 行，注释极佳）+ `stage-shared/screen-ambient-light`：
 
@@ -3910,3 +3910,5 @@ xsai（LLM 统一 provider，他们自研）、unspeech（ASR/TTS 统一代理�
 - ⑥ MAGIC 程序化动作 —— 长期方向，非当前痛点。
 
 **本轮实际落地只有一件事**：`5f8f8fc` 修 boot 崩溃（真机 probe 发现，Node verify 抓不到）。这再次验证规矩：真机采样不可省，Node 单测覆盖不到 boot 编排。
+
+**后续（2026-11-19 当日）**：用户拍板 **whalegirl 代码保留归档、但不使用**，已按 deepfish 同型机制退役（`retired: true` + `APPEARANCE_MODELS` 摘除 + 存量配置回落 hiyori），详见 `docs/custom-model-plan.md` §12.9。故本节「对症 whalegirl」的历史表述全部作废 —— 不要再拿一个已退役的模型当需求依据。

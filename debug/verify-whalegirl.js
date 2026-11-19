@@ -16,8 +16,10 @@
  *       —— model3.json 的 File 字段是给 SDK 的，pet.js 不走那条路）。
  *   [E] model3.json：HitAreas 数组（缺失 → boot failed）、Groups 有
  *       EyeBlink/LipSync（SDK 自动眨眼/口型的依据）、Motions 四组齐全。
- *   [F] 接线层：params.js 四个注册表都有 whalegirl；main.js 的
- *       APPEARANCE_MODELS **列着它**（菜单入口在）。
+ *   [F] 接线层：params.js 四个注册表**仍保留** whalegirl（代码归档不删）；
+ *       main.js 的 APPEARANCE_MODELS **没有它**（2026-11-19 退役，菜单无入口）。
+ *   [I] 退役守卫：档案有 retired: true、挂载口真跑拦截、负对照摘标志即放行、
+ *       存量配置由 normalizeAppearanceModel() 回落默认（两处必须一致）。
  *   [G] 实测取景：档案声明 alignByMeasure: true（新画布尺寸，线性假设
  *       大概率不成立 —— 规矩 2）。
  *   [H] motionSlots 契约：psd2live 只生成 idle，六个槽全是空字符串；
@@ -226,13 +228,13 @@ const readSrc = (p) => fs.readFileSync(path.join(SRC, p), 'utf8').replace(/\r\n/
     'params.js 的 PROPS 注册表里有 whalegirl');
 
   const MAIN = readSrc('main/main.js');
-  /* 菜单入口在：APPEARANCE_MODELS 里必须列着 whalegirl。
-   * 排除注释文本后匹配（退役说明注释不会误判）。 */
+  /* 2026-11-19 退役：APPEARANCE_MODELS 里**不能**有 whalegirl。
+   * 排除注释文本后匹配（退役说明注释里提到它，不能误判）。 */
   const appearanceBlock = (MAIN.match(/const APPEARANCE_MODELS = \[[\s\S]*?\];/) || [''])[0];
   ok(appearanceBlock.length > 0, 'main.js 里能找到 APPEARANCE_MODELS 表');
   const appearanceNoComments = appearanceBlock.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-  ok(/\{\s*id:\s*'whalegirl'[\s\S]*?label:\s*'鲸鱼娘（自研）'/.test(appearanceNoComments),
-    'APPEARANCE_MODELS 里有 whalegirl（菜单入口在）');
+  ok(!/\{\s*id:\s*'whalegirl'/.test(appearanceNoComments),
+    'APPEARANCE_MODELS 里没有 whalegirl（退役，菜单无入口）');
 
   /* pet.js 不调 model.expression() —— 表情由 pet.js 自己的 fetch + setParam 通道管理。 */
   const PET = readSrc('renderer/pet.js');
@@ -278,6 +280,43 @@ const readSrc = (p) => fs.readFileSync(path.join(SRC, p), 'utf8').replace(/\r\n/
   ok(typeof D.credit === 'string' && D.credit.length > 0, '档案有署名文案');
   ok(D.emotionAlias && typeof D.emotionAlias === 'object', '档案有 emotionAlias（W33 协议回退）');
   ok(typeof D.mouthOpenMax === 'number', '档案有 mouthOpenMax（§11.6 第 3 条）');
+
+  /* ================= [I] 退役守卫（2026-11-19） ================= */
+  console.log('\n[I] 退役守卫：档案标记、挂载口真跑、存量配置回落');
+
+  ok(D.model?.retired === true, '档案里有 retired: true（挂载口拦截）');
+
+  const fnSrc = (PET.match(/function\s+resolveModelName\s*\(name\)\s*\{[\s\S]*?\n\}/) || [''])[0];
+  ok(fnSrc.length > 0, 'pet.js 里能抠出 resolveModelName 函数体');
+  let resolveModel = null;
+  try {
+    /* eslint-disable-next-line no-new-func */
+    resolveModel = new Function('MODELS', 'MODEL_NAME', `${fnSrc}\nreturn resolveModelName;`)(
+      { hiyori: {}, whale: {}, whalegirl: D.model }, 'hiyori');
+  } catch { /* 下面那条断言会红 */ }
+  ok(typeof resolveModel === 'function', 'resolveModelName 可执行（源码级真跑）');
+  ok(resolveModel?.('hiyori') === 'hiyori', '已知模型原样返回');
+  ok(resolveModel?.('whalegirl') === 'hiyori',
+    'whalegirl 被拦截回落默认（退役中，挂不上）');
+  ok(resolveModel?.('nope') === 'hiyori', '不存在的键 → 回落默认模型');
+
+  /* 负对照：给档案**摘掉** retired，同一个函数必须立刻放行 whalegirl。
+   * 证明拦住它的是这个字段，而不是"注册表里恰好没有"之类的别的原因。 */
+  let negResolve = null;
+  try {
+    negResolve = new Function('MODELS', 'MODEL_NAME', `${fnSrc}\nreturn resolveModelName;`)(
+      { hiyori: {}, whale: {}, whalegirl: { retired: false } }, 'hiyori');
+  } catch { /* 上面已红 */ }
+  ok(negResolve?.('whalegirl') === 'whalegirl',
+    '负对照：档案摘掉 retired 后 whalegirl 立刻放行（证明拦住它的是这个字段）');
+
+  /* 存量配置：老机器 config.json 里还写着 whalegirl，启动时必须能回落 hiyori。
+   * main.js 的 normalizeAppearanceModel() 按 APPEARANCE_MODELS 过滤并 patchConfig。 */
+  const mainNoComments = MAIN.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  ok(/function\s+normalizeAppearanceModel\s*\(/.test(mainNoComments),
+    'main.js 有 normalizeAppearanceModel()（存量配置回落）');
+  ok(/normalizeAppearanceModel\s*\(\s*\)\s*;/.test(mainNoComments),
+    'normalizeAppearanceModel() 在启动时被调用（createWindow 前）');
 
   console.log(fails === 0 ? '\n全部通过' : `\n${fails} 项失败`);
   process.exit(fails === 0 ? 0 : 1);

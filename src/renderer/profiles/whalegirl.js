@@ -27,6 +27,12 @@ export const WHALEGIRL = {
   model: {
     label: '鲸鱼娘（自研）',
     url: '/src/assets/models/selfmade/export/whale-girl.model3.json',
+    /* 🔴 2026-11-19 用户拍板：**代码保留归档，但不使用这块**。
+     * retired: true = 菜单不显示、挂载口（resolveModelName）不放行。
+     * 档案 / 素材 / 参数表 / 四张 emotion 表 / 回归脚本全保留，不是删干净；
+     * 想再启用只需两处同改：这里摘掉 retired: true ＋ main.js 的
+     * APPEARANCE_MODELS 加回那一项（见 main.js 头注释）。 */
+    retired: true,
     /* ---- 几何标定：待真机实测后回填 ----
      * psd2live 导出的画布尺寸未知，先用占位值。
      * 🔴 第一次挂载前必须用 alignByMeasure 实测对齐（规矩 2），

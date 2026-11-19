@@ -554,3 +554,18 @@ psd2live / See-Through 整条生态都是围着半身长出来的，我们正好
 - **链路进仓库**：`tools/imgtool/`（analyze.js / split-layers.js + package.json，
   node_modules 被忽略）、`src/renderer/profiles/whalegirl.js`、本文档 §12.7。
 - **工具本身不进仓库**：`tools/psd2live/`（297MB 便携版，GPL-3.0，见 §12.1）。
+
+### 12.9 退役状态（2026-11-19）：代码保留归档，不使用
+
+用户拍板：whalegirl **不上线使用**，但整条自研链路作为资产保留。
+
+- 档案 `profiles/whalegirl.js` 的 `model.retired: true` → 渲染层 `resolveModelName()`
+  不放行；`main.js` 的 `APPEARANCE_MODELS` 已摘除 → 托盘「人物模型」只剩日和 / 鲸鱼娘。
+- 存量配置里还写着 `appearance.model: 'whalegirl'` 的，由 `normalizeAppearanceModel()`
+  在 `createWindow()` 前回落 hiyori 并落盘（真机已验：`{"from":"whalegirl","to":"hiyori"}`）。
+- **保留的东西**：档案、四张 emotion 表、素材（源图 / export / layers）、
+  `tools/imgtool/` 拆层工具、`debug/verify-whalegirl.js`（65→74 项，含退役守卫负对照）。
+  §12.1–12.8 的踩坑记录继续有效 —— 那是自研 Cubism 管线唯一的中文实录。
+- **想再启用**：两处同改 —— 摘掉档案里的 `retired: true` ＋ `APPEARANCE_MODELS`
+  加回 `{ id: 'whalegirl', label: '鲸鱼娘（自研）' }`。只改一处会出现
+  「菜单能点但挂不上」或反过来。别处不用动（参数注册表一直在）。

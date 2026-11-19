@@ -5356,7 +5356,7 @@ if (!gotLock) {
     } catch { /* 取不到就算了 */ }
 
     configureLedger(app.getPath('userData'));  // W26 主动账本
-    configureTopicStream(app.getPath('userData'));  // W55 主题流台账
+    topicStream.configureTopicStream(app.getPath('userData'));  // W55 主题流台账
     usage.setStorePath(path.join(app.getPath('userData'), 'usage.json'));  // W64 token 用量台账
     affinity.setStorePath(path.join(app.getPath('userData'), 'affinity.json'));  // W65 好感度
     /* W57：rollback 开关从配置读（startTopicStream 每次 tick 过滤被回滚主题）。 */

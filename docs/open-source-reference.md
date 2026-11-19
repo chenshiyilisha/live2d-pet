@@ -3893,3 +3893,20 @@ Shimeji-ee (Kilkakon) / ShimeLinux / wl_shimeji          多源 · Shimeji 精�
 ## 28.4 生态外围（记档不展开）
 
 xsai（LLM 统一 provider，他们自研）、unspeech（ASR/TTS 统一代理「speech 界 LiteLLM」）、MCP Launcher（「Ollama for MCP servers」）、proj-airi 子组织（webai-realtime-voice-chat 全链路示例：VAD+STT+LLM+TTS）。
+
+## 28.5 订正：环境光滤镜的触发前提是假问题（2026-11-19）
+
+**不要因为 whalegirl"显黑"去上环境光滤镜——看了真机截图（`debug/whalegirl-ink2.png`）后发现模型渲染完全正常**：黑发、白衬衫、深蓝裙子、白袜、尾巴、呆毛，颜色清晰。此前"身体是深蓝(0,32,64)所以显黑"的推断来自**纹理像素采样**，而不是实际画面——纹理里的深蓝是裙子，不是通体。
+
+真正的"黑"是 `configureTopicStream` boot 崩溃（W57 引入，main.js 只 import 模块对象却直接调函数名 → ReferenceError → 窗口不创建）时看到的旧画面 / 打包版残留。已在 `5f8f8fc` 修复并真机 probe 复验。`buildEmoTarget` 那套别动。
+
+**因此 §28.2 ① 环境光滤镜降级为「可选增强，非 bug 修复」**：将来若要做，应该是"让模型融入桌面光照"的美学功能（配置开关、默认关），不是 bug 修复；且必须在 PIXI v8 下重写（airi 是 v7 GLSL，`texture2D`/`varying`/`new Filter({glProgram})` 全部不兼容，v8 要 `in`/`out`/`texture()`/`Filter.from({gl:{fragment},resources})`）。
+
+**其余借鉴的契合度复核**：
+- ③ 网格三角命中 —— 我们 `isOverPet()` 已是**像素级 alpha 判定**（`maxAlphaNear` 读渲染后帧缓冲），比网格三角更准（半透明也算），**不用抄**。
+- ⑤ head-anchor 跑物理 —— 我们 `headTopY` 已实量头顶（扫描帧缓冲），同思路已落地。
+- ② voice-end-judge（LLM 断句）—— 我们是本地 VAD，加 LLM 判断=增延迟+成本，契合度低，只记档。
+- ⑧ lipsync 分层 —— W63 `tts.js lipEnv()` 已落地。
+- ⑥ MAGIC 程序化动作 —— 长期方向，非当前痛点。
+
+**本轮实际落地只有一件事**：`5f8f8fc` 修 boot 崩溃（真机 probe 发现，Node verify 抓不到）。这再次验证规矩：真机采样不可省，Node 单测覆盖不到 boot 编排。

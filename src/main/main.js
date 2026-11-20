@@ -127,6 +127,8 @@ const { checkPersonaOutput, normalizeLevel: guardLevel } = require('./persona-gu
 const { distillPersonaParts, PROMPT_FIELDS: DISTILL_FIELDS } = require('./persona-distill');
 const rhythm = require('./rhythm');
 const memory = require('./memory');
+/* W22：记忆 Markdown 工作区（纯函数投影，不碰 store 架构）。 */
+const memoryWorkspace = require('./memory-workspace');
 const mcp = require('./mcp');
 
 // 项目根目录，本地服务与托盘图标、诊断截图都以它为基准
@@ -1880,6 +1882,69 @@ async function promptLlm() {
   return true;
 }
 
+/* W22：记忆工作区导出/导入 —— 主进程 IO 层（dialog + fs）。
+ * 纯投影在 memory-workspace.js；这里只管选文件夹/读文件/合并，
+ * 合并仍走 memory.upsertFacts（不新建存储格式、不绕规矩 8 的原子写）。
+ * 🔴 路径来自用户所选文件，写盘前确认目录存在；多级子路径（partner/）要先 mkdir。 */
+async function exportMemoryWorkspace(host) {
+  try {
+    const pick = await dialog.showOpenDialog(host && !host.isDestroyed() ? host : mainWindow, {
+      title: '导出记忆 Markdown（选一个文件夹）',
+      properties: ['openDirectory', 'createDirectory']
+    });
+    if (pick.canceled || !pick.filePaths || !pick.filePaths[0]) return;
+    const dir = pick.filePaths[0];
+    const files = memoryWorkspace.exportWorkspace(memory.loadStore());
+    let n = 0;
+    for (const [rel, text] of Object.entries(files)) {
+      const dest = path.join(dir, rel);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, text, 'utf8');
+      n++;
+    }
+    toast(`已导出 ${n} 个 Markdown 文件`);
+    try { await host.webContents.executeJavaScript(
+      `showHint(${JSON.stringify('已导出 ' + n + ' 个文件到 ' + dir)});`); } catch { /* 窗口关了 */ }
+  } catch (err) {
+    console.warn('[memory] 导出失败', err && err.message);
+    toast('导出失败：' + (err && err.message ? err.message : '未知错误'));
+  }
+}
+
+async function importMemoryWorkspace(host, after) {
+  try {
+    const pick = await dialog.showOpenDialog(host && !host.isDestroyed() ? host : mainWindow, {
+      title: '导入记忆 Markdown（可多选 .md）',
+      filters: [{ name: 'Markdown', extensions: ['md', 'markdown', 'txt'] }],
+      properties: ['openFile', 'multiSelections']
+    });
+    if (pick.canceled || !pick.filePaths || !pick.filePaths.length) return;
+    const texts = {};
+    for (const file of pick.filePaths) {
+      try {
+        texts[path.basename(file)] = fs.readFileSync(file, 'utf8');
+      } catch (err) {
+        console.warn('[memory] 读取失败', file, err && err.message);
+      }
+    }
+    /* 按文件名归类（PARTNER.md → name/boundary 混在一文件，parse 按 other 兜底；
+     * 但正文正确、来源标 user，交给 similarFact 合并即可，不新建格式）。 */
+    const drafts = memoryWorkspace.parseWorkspace(texts);
+    if (!drafts.length) {
+      toast('没读到可导入的记忆（确认是导出的 Markdown 格式）');
+      return;
+    }
+    const r = memory.upsertFacts(drafts);
+    toast(`已导入 ${(r && r.added) || 0} 条新增、${(r && r.updated) || 0} 条更新`);
+    if (typeof after === 'function') after();
+    try { await host.webContents.executeJavaScript(
+      `showHint(${JSON.stringify('已导入 ' + ((r && r.added) || 0) + ' 新增 / ' + ((r && r.updated) || 0) + ' 更新')});`); } catch { /* 窗口关了 */ }
+  } catch (err) {
+    console.warn('[memory] 导入失败', err && err.message);
+    toast('导入失败：' + (err && err.message ? err.message : '未知错误'));
+  }
+}
+
 /* W2：记忆日记本 —— 浏览 / 删除（设置菜单入口）。
  * 列表在渲染层，删除时回调主进程 memory.deleteFact(id)（墓碑，不可逆）。
  * 对话框内联 HTML（同 promptTts 模式）。 */
@@ -1919,6 +1984,7 @@ function promptMemoryJournal() {
                  background:#3a2222;color:#e8a8a8;font-size:12px;cursor:pointer;white-space:nowrap}
       button.del:hover{filter:brightness(1.2)}
       .empty{padding:24px 12px;text-align:center;color:#7d7d88;font-size:12px}
+      .hint{display:none;font-size:11px;color:#9ac6a0;margin-top:8px;min-height:15px}
       .grow{flex:1}
       .row{display:flex;justify-content:flex-end;margin-top:12px}
       button{height:28px;padding:0 14px;border-radius:6px;border:1px solid #3a3a40;
@@ -1929,11 +1995,23 @@ function promptMemoryJournal() {
     <div class="sub" id="sub">-</div>
     <div id="list"></div>
     <div class="grow"></div>
+    <div class="hint" id="hint"></div>
     <div class="row">
+      <button id="exp" title="把记忆导成一组 Markdown 文件（选一个文件夹存放）">导出 Markdown</button>
+      <button id="imp" title="从 Markdown 导回记忆（正文会按新内容更新，旧值留档）">导入 Markdown</button>
+      <div class="grow"></div>
       <button id="c">关闭</button>
     </div>
     <script>
       window.__memList = [];
+      /* W22：按钮只置旗标，真正的 dialog/fs 在主进程轮询里做（data URL 无 preload）。 */
+      document.getElementById('exp').onclick = () => { window.__memExport = true; };
+      document.getElementById('imp').onclick = () => { window.__memImport = true; };
+      function showHint(msg) {
+        var h = document.getElementById('hint');
+        h.textContent = msg;
+        h.style.display = msg ? 'block' : 'none';
+      }
       function clarityLabel(c) {
         if (c === 'fuzzy') return '记得不太清';
         if (c === 'trace') return '好像有过';
@@ -2008,16 +2086,32 @@ function promptMemoryJournal() {
       if (!w.isDestroyed()) w.destroy();
       resolve(val);
     };
+    let busy = false;   // W22：dialog  modal 期间别重复触发（轮询 120ms）
     const timer = setInterval(async () => {
       if (w.isDestroyed()) { finish(undefined); return; }
+      if (busy) return;
       try {
-        const v = await w.webContents.executeJavaScript(
-          'window.__memDelete ?? window.__memResult ?? undefined');
-        if (v === undefined) return;
-        if (v === 'close') { finish('close'); return; }
-        /* v 是待删除的 fact id */
-        if (typeof v === 'string') {
-          const ok = memory.deleteFact(v);
+        const v = await w.webContents.executeJavaScript(`({
+          action: window.__memExport ? 'export' : window.__memImport ? 'import'
+                : (window.__memDelete ?? window.__memResult ?? undefined),
+          del: window.__memDelete ?? null
+        })`);
+        if (v.action === undefined || v.action === null) return;
+        if (v.action === 'close') { finish('close'); return; }
+        if (v.action === 'export' || v.action === 'import') {
+          /* 先清旗标再开 dialog —— dialog 是 await 的，不清会在 120ms 后重复弹。 */
+          const flag = v.action === 'export' ? '__memExport' : '__memImport';
+          await w.webContents.executeJavaScript(`window.${flag} = false;`);
+          busy = true;
+          try {
+            if (v.action === 'export') await exportMemoryWorkspace(w);
+            else await importMemoryWorkspace(w, injectList);
+          } finally { busy = false; }
+          return;
+        }
+        /* v.action 是待删除的 fact id */
+        if (typeof v.action === 'string') {
+          const ok = memory.deleteFact(v.action);
           if (ok) {
             toast('已删除');
             await w.webContents.executeJavaScript('window.__memDelete = null;');
